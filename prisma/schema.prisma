@@ -1,0 +1,47 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String   @id @default(cuid())
+  telegramId       String   @unique
+  username         String?
+  firstName        String?
+  lastName         String?
+
+  // Polymarket wallet info (encrypted) - EVM compatible (Polygon, Ethereum, BNB)
+  walletAddress    String   @unique
+  encryptedPrivateKey String
+
+  // Solana wallet (encrypted)
+  solanaAddress    String?
+  encryptedSolanaPrivateKey String?
+
+  // API credentials (encrypted)
+  encryptedApiKey    String
+  encryptedApiSecret String
+  encryptedPassphrase String
+
+  // 2FA settings (encrypted)
+  twoFactorSecret     String?
+  twoFactorEnabled    Boolean  @default(false)
+  backupCodes         String?  // JSON array of backup codes
+
+  isAdmin          Boolean  @default(false)
+  isActive         Boolean  @default(true)
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([telegramId])
+  @@index([walletAddress])
+  @@map("users")
+}
