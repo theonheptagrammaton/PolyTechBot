@@ -5,8 +5,7 @@ import { getUserByTelegramId } from '../../services/user';
 import {
   getAllBalances,
   getChainBalance,
-  approveUSDC,
-  depositToPolymarket,
+  approveAndDepositWithRelayer,
   formatBalance,
 } from '../../services/deposit';
 
@@ -337,14 +336,15 @@ export async function handleApproveDeposit(
     }
 
     // Show confirmation
-    let message = '🚀 *Confirm Deposit*\n\n';
+    let message = '🚀 *Confirm Gasless Deposit*\n\n';
     message += `Chain: *Polygon*\n`;
     message += `Amount: *${formatBalance(balance.balance)}*\n\n`;
-    message += '⚠️ *This will:*\n';
+    message += '🔥 *What happens:*\n';
     message += '1. Approve USDC for Polymarket\n';
     message += '2. Transfer funds to your Polymarket account\n\n';
-    message += '💰 *Gas fees:* ~$0.01-0.05 (paid from your wallet)\n\n';
-    message += '✅ Are you sure you want to proceed?';
+    message += '💰 *Gas fees: $0* (Polymarket pays for you!)\n';
+    message += '⚡ *Powered by Relayer API*\n\n';
+    message += '✅ Ready to proceed?';
 
     await ctx.editMessageText(message, {
       parse_mode: 'Markdown',
@@ -385,9 +385,10 @@ export async function handleConfirmDeposit(
 
     // Send processing message
     await ctx.editMessageText(
-      '⏳ *Processing Deposit*\n\n' +
-      '1️⃣ Approving USDC...\n' +
-      '⏳ Please wait, this may take 1-2 minutes.',
+      '⏳ *Processing Gasless Deposit*\n\n' +
+      '🔥 Using Polymarket Relayer (No Gas Fee!)\n' +
+      '1️⃣ Approving and depositing...\n' +
+      '⏳ Please wait, this may take 30-60 seconds.',
       { parse_mode: 'Markdown' }
     );
 
@@ -396,26 +397,22 @@ export async function handleConfirmDeposit(
     const amount = balance.balance;
 
     try {
-      // Step 1: Approve USDC
-      await approveUSDC(user.encryptedPrivateKey, amount);
-
-      await ctx.editMessageText(
-        '⏳ *Processing Deposit*\n\n' +
-        '✅ USDC Approved\n' +
-        '2️⃣ Depositing to Polymarket...\n' +
-        '⏳ Please wait...',
-        { parse_mode: 'Markdown' }
-      );
-
-      // Step 2: Deposit to Polymarket
-      const depositTx = await depositToPolymarket(user.encryptedPrivateKey, amount);
+      // Gasless approve + deposit via Relayer API
+      // Polymarket pays ALL gas fees!
+      const txHash = await approveAndDepositWithRelayer(user.encryptedPrivateKey, amount);
 
       // Success!
       let message = '✅ *Deposit Successful!*\n\n';
       message += `Amount: *${formatBalance(amount)}*\n`;
       message += `Chain: *Polygon*\n\n`;
       message += '🎉 Your funds are now available for trading on Polymarket!\n\n';
-      message += `🔍 [View Transaction](https://polygonscan.com/tx/${depositTx})`;
+      message += '🔥 *Gas Fee: $0* (Polymarket paid for you!)\n\n';
+
+      if (txHash && txHash !== 'relayer_submitted') {
+        message += `🔍 [View Transaction](https://polygonscan.com/tx/${txHash})`;
+      } else {
+        message += '✅ Transaction submitted via Relayer';
+      }
 
       await ctx.editMessageText(message, {
         parse_mode: 'Markdown',

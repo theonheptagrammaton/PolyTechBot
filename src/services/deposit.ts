@@ -1,5 +1,6 @@
 import { ethers, Wallet, Contract, providers } from 'ethers';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { RelayClient, CallType } from '@polymarket/relayer-client';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
@@ -17,6 +18,9 @@ const RPC_URLS = {
   ethereum: 'https://eth.llamarpc.com',
   solana: 'https://api.mainnet-beta.solana.com',
 };
+
+// Polymarket Relayer URL
+const POLYMARKET_RELAYER_URL = 'https://polygon-relayer.polymarket.com';
 
 // Polymarket Deposit Contract (Polygon)
 const POLYMARKET_DEPOSIT_CONTRACT = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'; // CTF Exchange
@@ -293,6 +297,81 @@ export async function depositToPolymarket(
   } catch (error) {
     logger.error('Error depositing to Polymarket:', error);
     throw new Error('Failed to deposit to Polymarket');
+  }
+}
+
+/**
+ * Approve and Deposit USDC to Polymarket using Relayer API (GASLESS!)
+ * This function uses Polymarket's Relayer to cover all gas fees
+ */
+export async function approveAndDepositWithRelayer(
+  encryptedPrivateKey: string,
+  amount: string
+): Promise<string> {
+  try {
+    logger.info(`[Relayer] Approving and depositing ${amount} USDC to Polymarket (gasless)`);
+
+    const privateKey = decrypt(encryptedPrivateKey);
+    const provider = new providers.JsonRpcProvider(RPC_URLS.polygon);
+    const wallet = new Wallet(privateKey, provider);
+
+    // Initialize Relayer Client
+    const relayerClient = new RelayClient(
+      POLYMARKET_RELAYER_URL,
+      137, // Polygon chain ID
+      wallet
+    );
+
+    // Convert amount to raw (6 decimals for USDC)
+    const amountRaw = ethers.utils.parseUnits(amount, 6);
+
+    logger.info('[Relayer] Creating batch transactions for approve and deposit...');
+
+    // Create contract interfaces for encoding
+    const usdcInterface = new ethers.utils.Interface(ERC20_ABI);
+    const ctfInterface = new ethers.utils.Interface(CTF_EXCHANGE_ABI);
+
+    // Encode approve transaction
+    const approveData = usdcInterface.encodeFunctionData('approve', [
+      POLYMARKET_DEPOSIT_CONTRACT,
+      amountRaw,
+    ]);
+
+    // Encode deposit transaction
+    const depositData = ctfInterface.encodeFunctionData('deposit', [amountRaw]);
+
+    // Create batch ProxyTransactions
+    // CallType.Call = normal contract call
+    const transactions = [
+      {
+        to: USDC_ADDRESSES.polygon,
+        typeCode: CallType.Call,
+        data: approveData,
+        value: '0',
+      },
+      {
+        to: POLYMARKET_DEPOSIT_CONTRACT,
+        typeCode: CallType.Call,
+        data: depositData,
+        value: '0',
+      },
+    ];
+
+    logger.info('[Relayer] Executing gasless transactions via Relayer...');
+
+    // Execute batch transactions through relayer (gasless!)
+    const result = await relayerClient.executeProxyTransactions(
+      transactions,
+      'Approve and deposit USDC to Polymarket'
+    );
+
+    logger.info(`[Relayer] Transactions submitted! Response:`, result);
+
+    // Return transaction info
+    return result.hash || 'relayer_submitted';
+  } catch (error) {
+    logger.error('[Relayer] Error with gasless deposit:', error);
+    throw new Error('Failed to execute gasless deposit');
   }
 }
 

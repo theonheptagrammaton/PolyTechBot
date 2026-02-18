@@ -22,6 +22,7 @@
   "license": "MIT",
   "dependencies": {
     "@polymarket/clob-client": "^5.2.3",
+    "@polymarket/relayer-client": "^3.0.0",
     "@prisma/client": "^6.1.0",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.95.8",
