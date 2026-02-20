@@ -1,9 +1,12 @@
 import { ethers, Wallet, Contract, providers } from 'ethers';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { RelayClient, CallType } from '@polymarket/relayer-client';
+import { ClobClient } from '@polymarket/clob-client';
+import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client';
+import { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
+import { config } from '../config';
 
 // USDC Contract Addresses
 const USDC_ADDRESSES = {
@@ -12,18 +15,29 @@ const USDC_ADDRESSES = {
   solana: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC on Solana
 };
 
-// RPC Endpoints
+// RPC Endpoints - Using reliable public nodes
 const RPC_URLS = {
-  polygon: 'https://polygon-rpc.com',
+  polygon: 'https://polygon-bor-rpc.publicnode.com', // More reliable than polygon-rpc.com
   ethereum: 'https://eth.llamarpc.com',
   solana: 'https://api.mainnet-beta.solana.com',
 };
 
-// Polymarket Relayer URL
-const POLYMARKET_RELAYER_URL = 'https://polygon-relayer.polymarket.com';
+// Polymarket Relayer URL (using v2 endpoint)
+const POLYMARKET_RELAYER_URL = 'https://relayer-v2.polymarket.com/';
 
-// Polymarket Deposit Contract (Polygon)
-const POLYMARKET_DEPOSIT_CONTRACT = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'; // CTF Exchange
+// Polymarket Contract Addresses (Polygon)
+const POLYMARKET_ADDRESSES = {
+  USDCe: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', // USDC.e on Polygon
+  CTF: '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045', // Conditional Tokens Framework
+  CTF_EXCHANGE: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E', // CTF Exchange (for deposit)
+  NEG_RISK_CTF_EXCHANGE: '0xC5d563A36AE78145C45a50134d48A1215220f80a', // Neg Risk CTF Exchange
+  NEG_RISK_ADAPTER: '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296', // Neg Risk Adapter
+};
+
+// Keep old constants for backwards compatibility
+const POLYMARKET_DEPOSIT_CONTRACT = POLYMARKET_ADDRESSES.CTF_EXCHANGE;
+const NEG_RISK_OPERATOR = POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE;
+const CTF_CONTRACT = POLYMARKET_ADDRESSES.CTF;
 
 // ERC20 ABI (minimal)
 const ERC20_ABI = [
@@ -36,6 +50,12 @@ const ERC20_ABI = [
 // Polymarket CTF Exchange ABI (minimal)
 const CTF_EXCHANGE_ABI = [
   'function deposit(uint256 amount)',
+];
+
+// CTF Contract ABI (for trading approval)
+const CTF_ABI = [
+  'function setApprovalForAll(address operator, bool approved) external',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
 ];
 
 export interface BalanceInfo {
@@ -301,6 +321,136 @@ export async function depositToPolymarket(
 }
 
 /**
+ * Enable trading by doing ALL required approvals (GASLESS!)
+ * According to Polymarket docs, we need 3 approvals:
+ * 1. USDC.e → CTF Contract (to split USDC into outcome tokens)
+ * 2. CTF tokens → CTF Exchange (to trade outcome tokens)
+ * 3. CTF tokens → Neg Risk CTF Exchange (to trade neg-risk markets)
+ */
+export async function enableTrading(
+  encryptedPrivateKey: string
+): Promise<{ success: boolean; txHash?: string; alreadyEnabled?: boolean }> {
+  try {
+    logger.info('[Relayer] Enabling trading with all required approvals...');
+
+    const privateKey = decrypt(encryptedPrivateKey);
+    const provider = new providers.JsonRpcProvider(RPC_URLS.polygon);
+    const wallet = new Wallet(privateKey, provider);
+
+    // Check if already approved (check one of the approvals)
+    const ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, provider);
+    const isApproved = await ctfContract.isApprovedForAll(
+      wallet.address,
+      NEG_RISK_OPERATOR
+    );
+
+    if (isApproved) {
+      logger.info('[Relayer] Trading already enabled');
+      return { success: true, alreadyEnabled: true };
+    }
+
+    // Create BuilderConfig with builder credentials from env
+    logger.info('[Relayer] Creating BuilderConfig with builder credentials...');
+    const builderConfig = new BuilderConfig({
+      localBuilderCreds: {
+        key: config.polymarket.builder.apiKey,
+        secret: config.polymarket.builder.secret,
+        passphrase: config.polymarket.builder.passphrase,
+      },
+    });
+
+    logger.info('[Relayer] BuilderConfig created successfully');
+
+    // Initialize Relayer Client with builder config
+    logger.info('[Relayer] Initializing RelayClient...');
+    const relayerClient = new RelayClient(
+      POLYMARKET_RELAYER_URL,
+      137,
+      wallet,
+      builderConfig,
+      RelayerTxType.SAFE
+    );
+
+    // Prepare all 3 approval transactions
+    const erc20Interface = new ethers.utils.Interface(ERC20_ABI);
+    const ctfInterface = new ethers.utils.Interface(CTF_ABI);
+
+    const transactions = [
+      // 1. Approve USDC.e for CTF Contract (to split USDC into outcome tokens)
+      {
+        to: POLYMARKET_ADDRESSES.USDCe,
+        data: erc20Interface.encodeFunctionData('approve', [
+          POLYMARKET_ADDRESSES.CTF,
+          ethers.constants.MaxUint256,
+        ]),
+        value: '0',
+      },
+      // 2. Approve CTF tokens for CTF Exchange (to trade outcome tokens)
+      {
+        to: POLYMARKET_ADDRESSES.CTF,
+        data: ctfInterface.encodeFunctionData('setApprovalForAll', [
+          POLYMARKET_ADDRESSES.CTF_EXCHANGE,
+          true,
+        ]),
+        value: '0',
+      },
+      // 3. Approve CTF tokens for Neg Risk CTF Exchange (to trade neg-risk markets)
+      {
+        to: POLYMARKET_ADDRESSES.CTF,
+        data: ctfInterface.encodeFunctionData('setApprovalForAll', [
+          POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE,
+          true,
+        ]),
+        value: '0',
+      },
+    ];
+
+    logger.info('[Relayer] Executing 3 gasless approval transactions...');
+    logger.info('  1. USDC.e → CTF Contract');
+    logger.info('  2. CTF → CTF Exchange');
+    logger.info('  3. CTF → Neg Risk Exchange');
+
+    // Execute all 3 approvals in one batch (gasless)
+    const response = await relayerClient.execute(
+      transactions,
+      'Enable trading on Polymarket (3 approvals)'
+    );
+
+    logger.info('[Relayer] Waiting for transaction confirmation...');
+    const result = await response.wait();
+
+    logger.info('[Relayer] All trading approvals completed!', result);
+
+    const txHash = result?.transactionHash || 'relayer_submitted';
+
+    return { success: true, txHash };
+  } catch (error) {
+    logger.error('[Relayer] Error enabling trading:', error);
+    return { success: false };
+  }
+}
+
+/**
+ * Check if trading is enabled for a wallet
+ */
+export async function isTradingEnabled(walletAddress: string): Promise<boolean> {
+  try {
+    const provider = new providers.JsonRpcProvider(RPC_URLS.polygon);
+    const ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, provider);
+
+    const isApproved = await ctfContract.isApprovedForAll(
+      walletAddress,
+      NEG_RISK_OPERATOR
+    );
+
+    return isApproved;
+  } catch (error) {
+    logger.error('Error checking trading status:', error);
+    return false;
+  }
+}
+
+/**
  * Approve and Deposit USDC to Polymarket using Relayer API (GASLESS!)
  * This function uses Polymarket's Relayer to cover all gas fees
  */
@@ -315,11 +465,23 @@ export async function approveAndDepositWithRelayer(
     const provider = new providers.JsonRpcProvider(RPC_URLS.polygon);
     const wallet = new Wallet(privateKey, provider);
 
-    // Initialize Relayer Client
+    // Create ClobClient to get builder config
+    const clobClient = new ClobClient(
+      'https://clob.polymarket.com',
+      137,
+      wallet
+    );
+
+    // Get builder config
+    const builderConfig = clobClient.builderConfig;
+
+    // Initialize Relayer Client with builder config
     const relayerClient = new RelayClient(
       POLYMARKET_RELAYER_URL,
-      137, // Polygon chain ID
-      wallet
+      137,
+      wallet,
+      builderConfig,
+      RelayerTxType.SAFE
     );
 
     // Convert amount to raw (6 decimals for USDC)
@@ -340,18 +502,15 @@ export async function approveAndDepositWithRelayer(
     // Encode deposit transaction
     const depositData = ctfInterface.encodeFunctionData('deposit', [amountRaw]);
 
-    // Create batch ProxyTransactions
-    // CallType.Call = normal contract call
+    // Create batch transactions
     const transactions = [
       {
         to: USDC_ADDRESSES.polygon,
-        typeCode: CallType.Call,
         data: approveData,
         value: '0',
       },
       {
         to: POLYMARKET_DEPOSIT_CONTRACT,
-        typeCode: CallType.Call,
         data: depositData,
         value: '0',
       },
@@ -360,15 +519,18 @@ export async function approveAndDepositWithRelayer(
     logger.info('[Relayer] Executing gasless transactions via Relayer...');
 
     // Execute batch transactions through relayer (gasless!)
-    const result = await relayerClient.executeProxyTransactions(
+    const response = await relayerClient.execute(
       transactions,
       'Approve and deposit USDC to Polymarket'
     );
 
-    logger.info(`[Relayer] Transactions submitted! Response:`, result);
+    logger.info('[Relayer] Waiting for transaction confirmation...');
+    const result = await response.wait();
+
+    logger.info(`[Relayer] Transactions confirmed!`, result);
 
     // Return transaction info
-    return result.hash || 'relayer_submitted';
+    return result?.transactionHash || 'relayer_submitted';
   } catch (error) {
     logger.error('[Relayer] Error with gasless deposit:', error);
     throw new Error('Failed to execute gasless deposit');

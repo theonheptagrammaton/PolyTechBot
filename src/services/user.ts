@@ -3,15 +3,21 @@ import { prisma } from '../database/prisma';
 import { redisCache } from '../database/redis';
 import { encrypt, decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
-import { createWallet, createSolanaWallet } from './wallet';
-import { createPolymarketCredentials, PolymarketCredentials } from './polymarket';
+import { createWallet } from './wallet';
+import { updatePolymarketProfile } from './polymarket';
+import { setupPolymarketAccount } from './polymarketSetup';
 import { config } from '../config';
 
+export interface PolymarketCredentials {
+  apiKey: string;
+  apiSecret: string;
+  passphrase: string;
+}
+
 export interface UserWalletInfo {
-  walletAddress: string;
+  walletAddress: string; // EVM wallet for deposits (Polygon, Ethereum, BNB)
   privateKey: string;
-  solanaAddress?: string;
-  solanaPrivateKey?: string;
+  polymarketProxyAddress: string; // Polymarket Safe/Proxy for trading (don't deposit here)
 }
 
 export interface UserWithCredentials {
@@ -39,18 +45,29 @@ export async function createUserWithWallet(
       return getCompleteUserInfo(existingUser);
     }
 
-    // Create new EVM wallet (Polygon, Ethereum, BNB)
+    // Create new EVM wallet (for deposits: Polygon, Ethereum, BNB)
     const walletInfo = await createWallet();
+    logger.info(`EVM wallet created: ${walletInfo.address}`);
 
-    // Create Solana wallet
-    const solanaWalletInfo = await createSolanaWallet();
+    // Setup complete Polymarket account (API credentials + Proxy wallet)
+    logger.info('Setting up Polymarket account...');
+    const polymarketSetup = await setupPolymarketAccount(walletInfo.privateKey);
 
-    // Create Polymarket API credentials
-    const polymarketCreds = await createPolymarketCredentials(walletInfo.privateKey);
+    logger.info('✅ Complete Polymarket account setup:');
+    logger.info(`  - EOA: ${polymarketSetup.eoaAddress}`);
+    logger.info(`  - Proxy: ${polymarketSetup.proxyAddress}`);
+    logger.info(`  - API Key: ${polymarketSetup.apiKey.substring(0, 10)}...`);
+
+    const polymarketCreds = {
+      apiKey: polymarketSetup.apiKey,
+      apiSecret: polymarketSetup.apiSecret,
+      passphrase: polymarketSetup.passphrase,
+    };
+
+    const polymarketProxyAddress = polymarketSetup.proxyAddress;
 
     // Encrypt sensitive data
     const encryptedPrivateKey = encrypt(walletInfo.privateKey);
-    const encryptedSolanaPrivateKey = encrypt(solanaWalletInfo.privateKey);
     const encryptedApiKey = encrypt(polymarketCreds.apiKey);
     const encryptedApiSecret = encrypt(polymarketCreds.apiSecret);
     const encryptedPassphrase = encrypt(polymarketCreds.passphrase);
@@ -58,7 +75,7 @@ export async function createUserWithWallet(
     // Check if user should be admin
     const isAdmin = config.telegram.adminUserIds.includes(parseInt(telegramId, 10));
 
-    // Save user to database
+    // Save user to database with deposit addresses
     const user = await prisma.user.create({
       data: {
         telegramId,
@@ -67,8 +84,11 @@ export async function createUserWithWallet(
         lastName,
         walletAddress: walletInfo.address,
         encryptedPrivateKey,
-        solanaAddress: solanaWalletInfo.address,
-        encryptedSolanaPrivateKey,
+        polymarketProxyAddress,
+        depositAddressEvm: polymarketSetup.depositAddresses.evm,
+        depositAddressSvm: polymarketSetup.depositAddresses.svm,
+        depositAddressBtc: polymarketSetup.depositAddresses.btc,
+        depositAddressTvm: polymarketSetup.depositAddresses.tvm,
         encryptedApiKey,
         encryptedApiSecret,
         encryptedPassphrase,
@@ -78,6 +98,40 @@ export async function createUserWithWallet(
 
     logger.info(`User created successfully: ${user.id}`);
 
+    // Enable trading automatically (one-time approval for CTF contract)
+    logger.info('[Setup] Enabling trading for new user...');
+    const { enableTrading } = await import('./deposit');
+    enableTrading(encryptedPrivateKey)
+      .then(async (result) => {
+        if (result.success) {
+          // Update user record to mark trading as enabled
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { tradingEnabled: true },
+          });
+          logger.info(`✅ Trading enabled successfully for user: ${user.id}`);
+        } else {
+          logger.warn(`⚠️ Could not enable trading for user: ${user.id} (can be done later)`);
+        }
+      })
+      .catch((error) => {
+        logger.error('[Setup] Enable trading failed (non-blocking):', error);
+      });
+
+    // Try to update Polymarket profile with bot name
+    // This runs in background and doesn't block user creation
+    updatePolymarketProfile(walletInfo.privateKey, 'PolyTech Bot')
+      .then((success) => {
+        if (success) {
+          logger.info(`Polymarket profile updated for user: ${user.id}`);
+        } else {
+          logger.warn(`Could not update Polymarket profile for user: ${user.id} (will show as "anon")`);
+        }
+      })
+      .catch((error) => {
+        logger.error('Profile update failed (non-blocking):', error);
+      });
+
     // Cache user data
     await cacheUser(user);
 
@@ -86,8 +140,7 @@ export async function createUserWithWallet(
       walletInfo: {
         walletAddress: walletInfo.address,
         privateKey: walletInfo.privateKey,
-        solanaAddress: solanaWalletInfo.address,
-        solanaPrivateKey: solanaWalletInfo.privateKey,
+        polymarketProxyAddress,
       },
       polymarketCredentials: polymarketCreds,
     };
@@ -107,9 +160,23 @@ export async function getCompleteUserInfo(user: User): Promise<UserWithCredentia
     const apiSecret = decrypt(user.encryptedApiSecret);
     const passphrase = decrypt(user.encryptedPassphrase);
 
-    let solanaPrivateKey: string | undefined;
-    if (user.encryptedSolanaPrivateKey) {
-      solanaPrivateKey = decrypt(user.encryptedSolanaPrivateKey);
+    // For backwards compatibility, if proxy address is null, we should create it
+    let polymarketProxyAddress = user.polymarketProxyAddress;
+    if (!polymarketProxyAddress) {
+      logger.warn(`User ${user.id} has no proxy address, fetching/creating one...`);
+      const { getExistingProxyAddress } = await import('./polymarketSetup');
+      polymarketProxyAddress = await getExistingProxyAddress(privateKey);
+
+      // If still no proxy, this is an old user - they need to use the new system
+      if (!polymarketProxyAddress) {
+        throw new Error('No Polymarket proxy address found. Please contact support.');
+      }
+
+      // Update user with the proxy address
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { polymarketProxyAddress },
+      });
     }
 
     return {
@@ -117,8 +184,7 @@ export async function getCompleteUserInfo(user: User): Promise<UserWithCredentia
       walletInfo: {
         walletAddress: user.walletAddress,
         privateKey,
-        solanaAddress: user.solanaAddress || undefined,
-        solanaPrivateKey,
+        polymarketProxyAddress,
       },
       polymarketCredentials: {
         apiKey,

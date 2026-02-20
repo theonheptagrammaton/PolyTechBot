@@ -81,6 +81,11 @@ export class RedisCache {
     }
   }
 
+  // Alias for delete
+  async del(key: string): Promise<boolean> {
+    return this.delete(key);
+  }
+
   async exists(key: string): Promise<boolean> {
     try {
       const result = await this.client.exists(key);

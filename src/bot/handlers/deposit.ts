@@ -8,6 +8,8 @@ import {
   approveAndDepositWithRelayer,
   formatBalance,
 } from '../../services/deposit';
+import { updateUserProxyAddress } from '../../services/polymarket';
+import { decrypt } from '../../utils/encryption';
 
 // User state for deposit flow
 export const depositState = new Map<
@@ -47,6 +49,11 @@ export async function handleDepositMenu(ctx: Context): Promise<void> {
         [Markup.button.callback('📊 Check All Balances', 'deposit_check_all')],
         [Markup.button.callback('« Back to Wallet', 'wallet_page')],
       ]),
+    }).catch((err: any) => {
+      // Ignore "message is not modified" errors
+      if (!err.message?.includes('message is not modified')) {
+        throw err;
+      }
     });
 
     logger.info(`Deposit menu shown to user: ${ctx.from?.id}`);
@@ -128,6 +135,11 @@ export async function handleDepositChain(
         [Markup.button.callback('🔄 Check Balance', `deposit_balance_${chain}`)],
         [Markup.button.callback('« Back', 'deposit_menu')],
       ]),
+    }).catch((err: any) => {
+      // Ignore "message is not modified" errors
+      if (!err.message?.includes('message is not modified')) {
+        throw err;
+      }
     });
 
     logger.info(`Deposit ${chain} instructions shown to user: ${telegramId}`);
@@ -193,6 +205,11 @@ export async function handleCheckBalance(
     await ctx.editMessageText(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
+    }).catch((err: any) => {
+      // Ignore "message is not modified" errors
+      if (!err.message?.includes('message is not modified')) {
+        throw err;
+      }
     });
 
     logger.info(`Balance checked for ${chain}: ${balance.balance}`);
@@ -424,6 +441,23 @@ export async function handleConfirmDeposit(
       });
 
       logger.info(`Deposit successful for user ${telegramId}: ${amount} USDC`);
+
+      // Fetch and update proxy address (async, don't block)
+      // After first deposit, Polymarket creates the proxy wallet
+      if (!user.polymarketProxyAddress) {
+        const privateKey = decrypt(user.encryptedPrivateKey);
+        updateUserProxyAddress(user.id, privateKey)
+          .then((proxyAddress) => {
+            if (proxyAddress) {
+              logger.info(`Proxy address fetched and saved for user ${user.id}: ${proxyAddress}`);
+            } else {
+              logger.debug('Proxy address not yet available for user ' + user.id);
+            }
+          })
+          .catch((err) => {
+            logger.error('Error fetching proxy address:', err);
+          });
+      }
     } catch (error: any) {
       logger.error('Error executing deposit:', error);
 

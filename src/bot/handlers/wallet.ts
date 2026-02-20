@@ -22,10 +22,30 @@ export async function handleWallet(ctx: Context): Promise<void> {
       return;
     }
 
-    const walletMessage =
-      '💼 *Your Wallet Information*\n\n' +
-      `📍 Address: \`${user.walletAddress}\`\n\n` +
-      `📅 Created: ${user.createdAt.toLocaleDateString()}\n\n` +
+    let walletMessage = '💼 *Your Wallet Information*\n\n';
+
+    // Show deposit addresses from Bridge API
+    if (user.depositAddressEvm) {
+      walletMessage +=
+        '*💰 Deposit Addresses:*\n' +
+        `• EVM (Ethereum/Arbitrum/Base): \`${user.depositAddressEvm}\`\n` +
+        `• Solana: \`${user.depositAddressSvm}\`\n` +
+        `• Bitcoin: \`${user.depositAddressBtc}\`\n` +
+        `• Tron: \`${user.depositAddressTvm}\`\n\n` +
+        '💸 _Send USDC or other assets → Auto-converts to USDC.e on Polygon_\n\n';
+    }
+
+    if (user.polymarketProxyAddress) {
+      walletMessage +=
+        '*🏦 Polymarket Trading Wallet:*\n' +
+        `📍 \`${user.polymarketProxyAddress}\`\n` +
+        `🔗 [View on Polymarket](https://polymarket.com/profile/${user.polymarketProxyAddress})\n\n`;
+    }
+
+    walletMessage +=
+      '*📍 Owner Wallet (EOA):*\n' +
+      `\`${user.walletAddress}\`\n\n` +
+      `📅 Created: ${new Date(user.createdAt).toLocaleDateString()}\n\n` +
       '⚠️ *Security Note:*\n' +
       'Your private key is securely stored and encrypted.\n' +
       'For security reasons, we only showed your private key once during wallet creation.\n\n' +

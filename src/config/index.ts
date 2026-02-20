@@ -11,6 +11,11 @@ interface Config {
   polymarket: {
     host: string;
     chainId: number;
+    builder: {
+      apiKey: string;
+      secret: string;
+      passphrase: string;
+    };
   };
   database: {
     url: string;
@@ -32,6 +37,9 @@ function validateConfig(): Config {
     'TELEGRAM_BOT_TOKEN',
     'DATABASE_URL',
     'ENCRYPTION_KEY',
+    'POLY_BUILDER_API_KEY',
+    'POLY_BUILDER_SECRET',
+    'POLY_BUILDER_PASSPHRASE',
   ];
 
   const missingVars = requiredEnvVars.filter((varName) => !process.env[varName]);
@@ -59,6 +67,11 @@ function validateConfig(): Config {
     polymarket: {
       host: process.env.POLYMARKET_HOST || 'https://clob.polymarket.com',
       chainId: parseInt(process.env.POLYMARKET_CHAIN_ID || '137', 10),
+      builder: {
+        apiKey: process.env.POLY_BUILDER_API_KEY!,
+        secret: process.env.POLY_BUILDER_SECRET!,
+        passphrase: process.env.POLY_BUILDER_PASSPHRASE!,
+      },
     },
     database: {
       url: process.env.DATABASE_URL!,

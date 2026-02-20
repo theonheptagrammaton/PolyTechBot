@@ -59,44 +59,60 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
 
     // Build wallet message
     let message = '💼 *WALLET*\n\n';
-    message += '_Deposit/Withdraw in and out of your Polygun safe wallet instantly_\n\n';
-    message += '💼 *Deposit Wallets*\n\n';
+    message += '_Deposit/Withdraw in and out of your Polymarket wallet instantly_\n\n';
+    message += '💰 *Deposit Addresses (Bridge API)*\n\n';
 
-    // Polygon (POL, USDC, USDC.e)
-    message += '🟢 *Polygon (POL, USDC, USDC.e):*\n';
-    message += `\`${user.walletAddress}\`\n\n`;
+    // Show deposit addresses from Bridge API
+    if (user.depositAddressEvm) {
+      message += '🔷 *EVM Chains (Ethereum/Arbitrum/Base/Optimism):*\n';
+      message += `\`${user.depositAddressEvm}\`\n`;
+      message += '_Supports USDC, ETH, and other ERC20 tokens_\n\n';
 
-    // Solana (SOL, USDT, USDC)
-    if (user.solanaAddress) {
-      message += '🟣 *Solana (SOL, USDT, USDC):*\n';
-      message += `\`${user.solanaAddress}\`\n\n`;
+      message += '🟣 *Solana:*\n';
+      message += `\`${user.depositAddressSvm}\`\n`;
+      message += '_Supports USDC, SOL, and other SPL tokens_\n\n';
+
+      message += '🟠 *Bitcoin:*\n';
+      message += `\`${user.depositAddressBtc}\`\n`;
+      message += '_BTC deposits automatically converted to USDC.e_\n\n';
+
+      message += '🔴 *Tron:*\n';
+      message += `\`${user.depositAddressTvm}\`\n`;
+      message += '_Supports USDT(TRC20), TRX_\n\n';
+
+      message += '💸 _All deposits auto-convert to USDC.e on Polygon_\n\n';
+    } else {
+      // Fallback for old users without deposit addresses
+      message += '⚠️ *Legacy Wallet - Please contact support*\n\n';
     }
 
-    // Ethereum (ETH, USDT, USDC) - same address as Polygon (EVM compatible)
-    message += '🔵 *Ethereum (ETH, USDT, USDC):*\n';
-    message += `\`${user.walletAddress}\`\n\n`;
+    // Polymarket Trading Wallet
+    message += '🏦 *Polymarket Trading Wallet*\n';
+    if (user.polymarketProxyAddress) {
+      message += `\`${user.polymarketProxyAddress}\`\n`;
+      message += '✅ _Active and ready for trading_\n\n';
+    } else {
+      message += '⚠️ _Setup incomplete - contact support_\n\n';
+    }
 
-    // BNB (BNB, USDT, USDC) - same address as Polygon (EVM compatible)
-    message += '🟡 *BNB (BNB, USDT, USDC):*\n';
-    message += `\`${user.walletAddress}\`\n\n`;
-
-    // Polymarket Wallet (Don't Deposit Here)
-    message += '✅ *Polymarket Wallet: (Don\'t Deposit Here)*\n';
-    message += `\`${user.walletAddress}\`\n\n`;
+    // Owner Wallet (EOA)
+    message += '📍 *Owner Wallet (EOA)*\n';
+    message += `\`${user.walletAddress}\`\n`;
+    message += '_Used for transaction signing_\n\n';
 
     // Trading Balance (Real data from API)
     message += `💰 *Current Trading Balance:* $${balance}\n`;
-    message += '💡 *Minimum deposit amount is $10 worth of tokens.*';
+    message += '💡 *Minimum deposit: $10 USDC*';
 
     // Buttons
     const buttons = [
       [
-        Markup.button.url('👤 Profile', `https://polymarket.com/profile/${user.walletAddress}`),
+        Markup.button.url('👤 Profile', `https://polymarket.com/profile/${user.polymarketProxyAddress || user.walletAddress}`),
         Markup.button.callback('📊 Portfolio', 'portfolio'),
       ],
       [
-        Markup.button.callback('🔐 2FA Settings', '2fa_menu'),
-        Markup.button.callback('💸 Withdraw', 'withdraw'),
+        Markup.button.callback('⚙️ Settings', 'settings_menu'),
+        Markup.button.callback('💰 Deposit', 'deposit_menu'),
       ],
       [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
     ];
@@ -104,6 +120,11 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     await ctx.editMessageText(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
+    }).catch((err: any) => {
+      // Ignore "message is not modified" errors
+      if (!err.message?.includes('message is not modified')) {
+        throw err;
+      }
     });
 
     logger.info(`Wallet page shown to user: ${telegramId}`);
@@ -128,8 +149,8 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
     await ctx.editMessageText(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('🟢 Open Positions', 'portfolio_open_1')],
-        [Markup.button.callback('🔴 Closed Positions', 'portfolio_closed_1')],
+        [Markup.button.callback('📊 Active Positions', 'portfolio_open_1')],
+        [Markup.button.callback('📜 Closed Positions', 'portfolio_closed_1')],
         [Markup.button.callback('📋 All Transactions', 'portfolio_all_1')],
         [Markup.button.callback('« Back to Wallet', 'wallet_page')],
       ]),
@@ -170,13 +191,13 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       user.encryptedPassphrase
     );
 
-    const openOrders = portfolioData.openOrders;
+    const positions = portfolioData.activePositions; // Only active positions (size > 0)
 
-    if (openOrders.length === 0) {
+    if (positions.length === 0) {
       await ctx.editMessageText(
-        '🟢 *Open Positions*\n\n' +
-        '📭 You have no open positions.\n\n' +
-        'Open positions appear here when you place orders on Polymarket.',
+        '📊 *Active Positions*\n\n' +
+        '📭 You have no active positions.\n\n' +
+        'Your active bets/shares in markets will appear here.',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -190,30 +211,30 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
 
     // Pagination
     const ITEMS_PER_PAGE = 5;
-    const totalPages = Math.ceil(openOrders.length / ITEMS_PER_PAGE);
+    const totalPages = Math.ceil(positions.length / ITEMS_PER_PAGE);
     const currentPage = Math.min(Math.max(1, page), totalPages);
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
     const endIndex = startIndex + ITEMS_PER_PAGE;
-    const pageOrders = openOrders.slice(startIndex, endIndex);
+    const pagePositions = positions.slice(startIndex, endIndex);
 
     // Build message
-    let message = `🟢 *Open Positions*\n\n`;
-    message += `Found ${openOrders.length} open position${openOrders.length > 1 ? 's' : ''}\n\n`;
+    let message = `📊 *Active Positions*\n\n`;
+    message += `Found ${positions.length} active position${positions.length > 1 ? 's' : ''}\n\n`;
 
-    pageOrders.forEach((order, index) => {
+    pagePositions.forEach((position, index) => {
       const number = startIndex + index + 1;
-      const side = order.side === 'BUY' ? '🟢 BUY' : '🔴 SELL';
-      const price = formatOrderPrice(order.price);
-      const size = formatOrderSize(order.original_size);
-      const filled = formatOrderSize(order.size_matched);
-      const value = calculateTradeValue(order.original_size, order.price);
-      const created = formatTimestamp(order.created_at);
+      const market = position.market || 'Unknown Market';
+      const outcome = position.outcome || 'Unknown';
+      const size = parseFloat(position.size || '0');
+      const shares = isNaN(size) ? '0.00' : size.toFixed(2);
+      const unrealizedPnl = parseFloat(position.unrealized_pnl || '0');
+      const pnl = isNaN(unrealizedPnl) ? 'N/A' : `$${unrealizedPnl.toFixed(2)}`;
 
-      message += `${number}) *${order.outcome}*\n`;
-      message += `├ ${side} · ${price}\n`;
-      message += `├ Size: ${size} · Filled: ${filled}\n`;
-      message += `├ Value: ${value}\n`;
-      message += `└ Created: ${created}\n\n`;
+      message += `${number}) *${outcome}*\n`;
+      message += `├ Market: ${market.substring(0, 50)}${market.length > 50 ? '...' : ''}\n`;
+      message += `├ Shares: ${shares}\n`;
+      message += `├ Unrealized P&L: ${pnl}\n`;
+      message += `└ Asset ID: ${position.asset_id.substring(0, 10)}...\n\n`;
     });
 
     // Build buttons
@@ -284,13 +305,13 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
       user.encryptedPassphrase
     );
 
-    const trades = portfolioData.trades;
+    const closedPositions = portfolioData.closedPositions; // Positions I exited or settled
 
-    if (trades.length === 0) {
+    if (closedPositions.length === 0) {
       await ctx.editMessageText(
-        '🔴 *Closed Positions*\n\n' +
+        '📜 *Closed Positions*\n\n' +
         '📭 You have no closed positions.\n\n' +
-        'Your completed trades will appear here.',
+        'Positions you exited or settled markets will appear here.',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -304,29 +325,30 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
 
     // Pagination
     const ITEMS_PER_PAGE = 5;
-    const totalPages = Math.ceil(trades.length / ITEMS_PER_PAGE);
+    const totalPages = Math.ceil(closedPositions.length / ITEMS_PER_PAGE);
     const currentPage = Math.min(Math.max(1, page), totalPages);
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
     const endIndex = startIndex + ITEMS_PER_PAGE;
-    const pageTrades = trades.slice(startIndex, endIndex);
+    const pagePositions = closedPositions.slice(startIndex, endIndex);
 
     // Build message
-    let message = `🔴 *Closed Positions*\n\n`;
-    message += `Found ${trades.length} completed trade${trades.length > 1 ? 's' : ''}\n\n`;
+    let message = `📜 *Closed Positions*\n\n`;
+    message += `Found ${closedPositions.length} closed position${closedPositions.length > 1 ? 's' : ''}\n\n`;
 
-    pageTrades.forEach((trade, index) => {
+    pagePositions.forEach((position, index) => {
       const number = startIndex + index + 1;
-      const side = trade.side === 'BUY' ? '🟢 BUY' : '🔴 SELL';
-      const price = formatOrderPrice(trade.price);
-      const size = formatOrderSize(trade.size);
-      const value = calculateTradeValue(trade.size, trade.price);
-      const matchTime = formatTimestamp(trade.match_time);
+      const market = position.market || 'Unknown Market';
+      const outcome = position.outcome || 'Unknown';
+      const realizedPnlNum = parseFloat(position.realized_pnl || '0');
+      const costBasisNum = parseFloat(position.cost_basis || '0');
+      const realizedPnl = isNaN(realizedPnlNum) ? 'N/A' : `$${realizedPnlNum.toFixed(2)}`;
+      const costBasis = isNaN(costBasisNum) ? 'N/A' : `$${costBasisNum.toFixed(2)}`;
 
-      message += `${number}) *${trade.outcome}*\n`;
-      message += `├ ${side} · ${price}\n`;
-      message += `├ Size: ${size}\n`;
-      message += `├ Value: ${value}\n`;
-      message += `└ Date: ${matchTime}\n\n`;
+      message += `${number}) *${outcome}*\n`;
+      message += `├ Market: ${market.substring(0, 50)}${market.length > 50 ? '...' : ''}\n`;
+      message += `├ Cost Basis: ${costBasis}\n`;
+      message += `├ Realized P&L: ${realizedPnl}\n`;
+      message += `└ Asset ID: ${position.asset_id.substring(0, 10)}...\n\n`;
     });
 
     // Build buttons

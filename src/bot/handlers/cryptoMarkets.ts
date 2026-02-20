@@ -20,6 +20,11 @@ export async function handleCryptoCategory(ctx: Context): Promise<void> {
         [Markup.button.callback('₿ All Crypto Markets', 'category_crypto')],
         [Markup.button.callback('« Back', 'show_categories')],
       ]),
+    }).catch((err: any) => {
+      // Ignore "message is not modified" errors
+      if (!err.message?.includes('message is not modified')) {
+        throw err;
+      }
     });
 
     logger.info(`Crypto subcategories shown to user: ${ctx.from?.id}`);
@@ -55,6 +60,11 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
         [Markup.button.callback('« Back', 'category_crypto_sub')],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
+    }).catch((err: any) => {
+      // Ignore "message is not modified" errors
+      if (!err.message?.includes('message is not modified')) {
+        throw err;
+      }
     });
 
     logger.info(`Up/Down crypto (no markets) shown to user: ${ctx.from?.id}`);

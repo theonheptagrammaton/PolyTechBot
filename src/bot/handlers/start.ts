@@ -16,6 +16,29 @@ export async function handleStart(ctx: Context): Promise<void> {
       return;
     }
 
+    // Check for deep link parameter (e.g., /start event_123 or /start trade_...)
+    const messageText = 'text' in ctx.message! ? ctx.message.text : '';
+    const startParam = messageText.split(' ')[1];
+
+    if (startParam?.startsWith('event_')) {
+      // User clicked on a "Trade" link - show event details
+      const eventId = startParam.replace('event_', '');
+      logger.info(`Deep link to event ${eventId} from user: ${telegramId}`);
+
+      const { handleEventDetails } = await import('./markets');
+      await handleEventDetails(ctx, eventId);
+      return;
+    }
+
+    if (startParam?.startsWith('trade_')) {
+      // User clicked on a trade button - start trade flow
+      logger.info(`Deep link to trade from user: ${telegramId} - ${startParam}`);
+
+      const { handleTradeFlow } = await import('./trade');
+      await handleTradeFlow(ctx, startParam);
+      return;
+    }
+
     logger.info(`Start command received from user: ${telegramId}`);
 
     // Send initial message
@@ -28,20 +51,41 @@ export async function handleStart(ctx: Context): Promise<void> {
       if (existingUser) {
         logger.info(`User already exists: ${telegramId}`);
 
-        await ctx.reply(
-          '✅ Welcome back!\n\n' +
-          'Your wallet is already set up and ready to use.\n\n' +
-          `📍 Wallet Address: \`${existingUser.walletAddress}\`\n\n` +
-          '💡 Use /help to see available commands.',
-          {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback('📊 Browse Markets', 'show_categories')],
-              [Markup.button.callback('🔍 Search Markets', 'search_markets')],
-              [Markup.button.callback('💼 My Wallet', 'show_wallet')],
-            ]),
-          }
-        );
+        let welcomeMessage =
+          '✅ *Welcome back!*\n\n' +
+          'Your Polymarket account is ready.\n\n';
+
+        // Show deposit addresses from Bridge API
+        if (existingUser.depositAddressEvm) {
+          welcomeMessage +=
+            '*💰 Deposit Addresses:*\n' +
+            `• EVM (Ethereum/Arbitrum/Base): \`${existingUser.depositAddressEvm}\`\n` +
+            `• Solana: \`${existingUser.depositAddressSvm}\`\n` +
+            `• Bitcoin: \`${existingUser.depositAddressBtc}\`\n` +
+            `• Tron: \`${existingUser.depositAddressTvm}\`\n\n` +
+            '💸 _Send USDC or other assets → Auto-converts to USDC.e on Polygon_\n\n';
+        }
+
+        if (existingUser.polymarketProxyAddress) {
+          welcomeMessage +=
+            '*🏦 Polymarket Trading Wallet:*\n' +
+            `📍 \`${existingUser.polymarketProxyAddress}\`\n` +
+            `🔗 [View on Polymarket](https://polymarket.com/profile/${existingUser.polymarketProxyAddress})\n\n`;
+        }
+
+        welcomeMessage +=
+          '*📍 Owner Wallet (EOA):*\n' +
+          `\`${existingUser.walletAddress}\`\n\n` +
+          '💡 Use the buttons below or /help to see commands.';
+
+        await ctx.reply(welcomeMessage, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('📊 Browse Markets', 'show_categories')],
+            [Markup.button.callback('🔍 Search Markets', 'search_markets')],
+            [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+          ]),
+        });
         return;
       }
 
@@ -57,27 +101,38 @@ export async function handleStart(ctx: Context): Promise<void> {
 
       // Prepare success message
       let successMessage =
-        '🎉 *Your Multi-Chain Wallet is Ready!*\n\n' +
-        '✅ Your wallets have been created successfully.\n\n' +
-        '*EVM Wallet (Polygon, Ethereum, BNB):*\n' +
-        `📍 Address: \`${result.walletInfo.walletAddress}\`\n` +
-        `🔐 Private Key: \`${result.walletInfo.privateKey}\`\n\n`;
-
-      if (result.walletInfo.solanaAddress && result.walletInfo.solanaPrivateKey) {
-        successMessage +=
-          '*Solana Wallet:*\n' +
-          `📍 Address: \`${result.walletInfo.solanaAddress}\`\n` +
-          `🔐 Private Key: \`${result.walletInfo.solanaPrivateKey}\`\n\n`;
-      }
+        '🎉 *Your Polymarket Account is Ready!*\n\n' +
+        '✅ Complete setup successful!\n\n' +
+        '*💰 Deposit Addresses (Bridge API):*\n' +
+        `• EVM (Ethereum/Arbitrum/Base): \`${result.user.depositAddressEvm}\`\n` +
+        `• Solana: \`${result.user.depositAddressSvm}\`\n` +
+        `• Bitcoin: \`${result.user.depositAddressBtc}\`\n` +
+        `• Tron: \`${result.user.depositAddressTvm}\`\n\n` +
+        '💸 _Send USDC or other assets → Auto-converts to USDC.e on Polygon_\n\n' +
+        '*🏦 Polymarket Trading Wallet:*\n' +
+        `📍 \`${result.walletInfo.polymarketProxyAddress}\`\n` +
+        `🔗 [View on Polymarket](https://polymarket.com/profile/${result.walletInfo.polymarketProxyAddress})\n\n` +
+        '*📍 Owner Wallet (EOA):*\n' +
+        `\`${result.walletInfo.walletAddress}\`\n` +
+        `🔑 Private Key: \`${result.walletInfo.privateKey}\`\n\n`;
 
       successMessage +=
-        '⚠️ *IMPORTANT SECURITY NOTICE:*\n' +
-        '• Save your private keys in a secure location\n' +
-        '• Never share them with anyone\n' +
-        '• This is the ONLY time we will show your full private keys\n' +
-        '• If you lose them, you will lose access to your wallets\n\n' +
-        '📊 Your wallets are now ready for trading on Polymarket!\n\n' +
-        '💡 Use the buttons below to manage your wallets.';
+        '*✅ What was created:*\n' +
+        '• Deposit addresses for multiple chains (EVM, Solana, Bitcoin, Tron)\n' +
+        '• Polymarket Trading Wallet (Safe/Proxy for trading)\n' +
+        '• EOA wallet (for transaction signing)\n' +
+        '• Polymarket account with API credentials\n' +
+        '• Trading automatically enabled (approved USDC & CTF)\n\n' +
+        '⚠️ *CRITICAL SECURITY:*\n' +
+        '• Save your private key NOW\n' +
+        '• Never share it with anyone\n' +
+        '• This is the ONLY time we show it\n' +
+        '• Lost key = Lost funds\n\n' +
+        '🚀 *Start Trading:*\n' +
+        '1. Send USDC (or other assets) to any deposit address above\n' +
+        '2. Assets auto-convert to USDC.e on Polygon\n' +
+        '3. Start trading immediately!\n\n' +
+        '💡 Use buttons below to continue.';
 
       await ctx.reply(successMessage, {
         parse_mode: 'Markdown',

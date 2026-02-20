@@ -183,7 +183,7 @@
 
     Favorites sistemi ekle:
   - Database'e Favorite model ekle (userId, marketId)
-  - Market detayında "⭐ Favorite" toggle butonu
+  - Market detayında "⭐evet Favorite" toggle butonu
   - Ana menüde "⭐ My Favorites" butonu
   - Favorites sayfası: favori marketleri listele
   - "No favorites yet" empty state
@@ -196,3 +196,26 @@
   - Recent sayfası: son 10 marketi göster
   - "No recent activity" empty state
 
+
+
+----- 2fa tamamen opsiyonel
+----- Oluşan polymarket walletta isim anon yerine botun adı olacak
+----- solana key vermeyelim, sadece 1 etherium key verilmeli
+----- başlangıçta withdraw değil deposit o, deposit sayfasını açan withdraw kelimesi
+deposit yapıldı blockchaine para geldi ama blockchainden veri çekemediği için hata veriyo göstermiyor
+----- admin panelinde stats kısmını geliştir, toplam hacim, günlük ve haftalık, aylık hacim, zamana göre açılan işlem sayısı, 
+ileride kullanıcı artınca tradeleri databasee kaydedicez
+
+bot açıldığında sadece cüzdan oluşturuyor ama polymarket hesabı oluşturmuyor, polymarket hesabı oluşturmalı polymarket için resave yapmalı ve ayrı deposit adreslerine sahip olmalı kullanıcıya vermeli, dont deposit here kısmı doğru. Solana cüzdanı oluşturmamalıyız. 
+
+yeni Kullanıcı Kaydı
+  EVM wallet oluşturuluyor
+  polymarket hesabı açılıyor
+  doğru mesajlar gösteriliyor
+  proxynin ilk depositte oluşacağı yazıyorr
+
+ilk deposit
+  deposit yapılıyor
+  polymarket proxy oluşturuluyor otomatik
+  bot proxy addressi kaydediyor
+  sonraki görüntülemelerde proxy gösteriliyor

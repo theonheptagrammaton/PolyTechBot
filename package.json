@@ -21,6 +21,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@polymarket/abstract-signer": "^0.0.8",
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client": "^5.2.3",
     "@polymarket/relayer-client": "^3.0.0",
     "@prisma/client": "^6.1.0",

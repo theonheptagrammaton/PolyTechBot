@@ -50,17 +50,16 @@ export async function handleTwoFactorMenu(ctx: Context): Promise<void> {
 
     if (is2FAEnabled) {
       message += '✅ *Status:* Enabled\n\n';
-      message += '2FA is currently protecting your account. You will need to enter a 6-digit code for:\n';
-      message += '• Withdrawing funds\n';
-      message += '• Large trades (over $100)\n\n';
+      message += '🔒 2FA is currently protecting your account.\n\n';
       message += `🔑 *Backup Codes:* ${backupCodesCount} remaining\n\n`;
       message += '💡 *Tip:* Keep your backup codes safe. They can be used if you lose access to your authenticator app.';
     } else {
       message += '❌ *Status:* Disabled\n\n';
-      message += '🔒 *Why enable 2FA?*\n';
-      message += '• Protect your funds from unauthorized access\n';
-      message += '• Required for withdrawals\n';
-      message += '• Extra security for large trades\n\n';
+      message += '🔓 *2FA is completely optional.*\n\n';
+      message += '💡 *Benefits if you enable it:*\n';
+      message += '• Extra layer of security for your account\n';
+      message += '• Additional protection for your funds\n';
+      message += '• Peace of mind with two-factor authentication\n\n';
       message += '📱 *You will need:*\n';
       message += '• Google Authenticator or similar app\n';
       message += '• Your phone to scan a QR code';

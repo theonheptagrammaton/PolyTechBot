@@ -44,9 +44,22 @@ export interface Trade {
   trader_side?: string;
 }
 
+export interface Position {
+  asset_id: string;
+  market_id?: string;
+  market?: string;
+  outcome?: string;
+  size: string; // Number of shares
+  cost_basis?: string;
+  realized_pnl?: string;
+  unrealized_pnl?: string;
+}
+
 export interface PortfolioData {
   openOrders: OpenOrder[];
   trades: Trade[];
+  activePositions: Position[]; // Positions I currently hold (size > 0)
+  closedPositions: Position[]; // Positions I exited or settled
   balance: string;
 }
 
@@ -69,17 +82,18 @@ async function createClobClientForUser(
     // Create wallet
     const wallet = new Wallet(decryptedPrivateKey);
 
-    // Create CLOB client
+    // Create CLOB client with POLY_PROXY signature type
+    // Type 2 = POLY_PROXY (Gnosis Safe with EOA signer)
     const client = new ClobClient(
       'https://clob.polymarket.com',
       137, // Polygon mainnet
-      wallet,
+      wallet, // EOA wallet (signer)
       {
         key: decryptedApiKey,
         secret: decryptedApiSecret,
         passphrase: decryptedPassphrase,
       },
-      0 // Signature type 0 for EOA
+      2 // Signature type 2 for POLY_PROXY (Safe with EOA signer)
     );
 
     return client;
@@ -121,6 +135,64 @@ export async function getOpenOrders(
     return liveOrders;
   } catch (error) {
     logger.error('Error fetching open orders:', error);
+    // Return empty array instead of throwing to gracefully handle no positions
+    return [];
+  }
+}
+
+/**
+ * Gets user's active positions (shares in markets)
+ */
+export async function getPositions(
+  privateKey: string,
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string
+): Promise<Position[]> {
+  try {
+    const cacheKey = `portfolio:positions:${privateKey.substring(0, 20)}`;
+    const cached = await redisCache.get<Position[]>(cacheKey);
+
+    if (cached) {
+      logger.debug('Returning cached positions');
+      return cached;
+    }
+
+    logger.info('Fetching positions from Polymarket API');
+
+    // Get wallet address from private key
+    const wallet = new Wallet(decrypt(privateKey));
+    const address = wallet.address;
+
+    // Try to fetch positions via HTTP API
+    let positions: any[] = [];
+
+    try {
+      // Polymarket API endpoint for positions (if available)
+      const response = await fetch(`https://clob.polymarket.com/positions?address=${address}`);
+
+      if (response.ok) {
+        const data = await response.json();
+        positions = data.positions || data || [];
+      } else {
+        logger.warn(`Positions API returned ${response.status}`);
+        return [];
+      }
+    } catch (err) {
+      logger.error('Error fetching positions via HTTP:', err);
+      return [];
+    }
+
+    // Return all positions (including 0 size for closed)
+    // We'll filter active/closed in getPortfolioData
+    const allPositions = positions as Position[];
+
+    await redisCache.set(cacheKey, allPositions, CACHE_TTL);
+
+    logger.info(`Fetched ${allPositions.length} positions`);
+    return allPositions;
+  } catch (error) {
+    logger.error('Error fetching positions:', error);
     // Return empty array instead of throwing to gracefully handle no positions
     return [];
   }
@@ -177,10 +249,11 @@ export async function getPortfolioData(
   try {
     logger.info('Fetching complete portfolio data');
 
-    // Fetch both open orders and trades in parallel
-    const [openOrders, trades] = await Promise.all([
+    // Fetch open orders, trades, and positions in parallel
+    const [openOrders, trades, positions] = await Promise.all([
       getOpenOrders(privateKey, apiKey, apiSecret, passphrase),
       getTrades(privateKey, apiKey, apiSecret, passphrase),
+      getPositions(privateKey, apiKey, apiSecret, passphrase),
     ]);
 
     // Try to get balance
@@ -198,9 +271,17 @@ export async function getPortfolioData(
       // Continue with 0 balance
     }
 
+    // Separate active and closed positions
+    const activePositions = positions.filter((pos) => parseFloat(pos.size) > 0);
+    const closedPositions = positions.filter((pos) => parseFloat(pos.size) === 0);
+
+    logger.info(`Active positions: ${activePositions.length}, Closed positions: ${closedPositions.length}`);
+
     return {
       openOrders,
       trades,
+      activePositions,
+      closedPositions,
       balance,
     };
   } catch (error) {

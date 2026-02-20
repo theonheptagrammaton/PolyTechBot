@@ -17,11 +17,20 @@ model User {
   firstName        String?
   lastName         String?
 
-  // Polymarket wallet info (encrypted) - EVM compatible (Polygon, Ethereum, BNB)
+  // EVM wallet for deposits (Polygon, Ethereum, BNB)
   walletAddress    String   @unique
   encryptedPrivateKey String
 
-  // Solana wallet (encrypted)
+  // Polymarket Proxy/Safe wallet (for trading)
+  polymarketProxyAddress String?
+
+  // Polymarket Deposit Addresses (from Bridge API)
+  depositAddressEvm String? // Ethereum, Arbitrum, Base, Optimism, etc.
+  depositAddressSvm String? // Solana
+  depositAddressBtc String? // Bitcoin
+  depositAddressTvm String? // Tron
+
+  // Solana wallet (encrypted) - DEPRECATED, not used
   solanaAddress    String?
   encryptedSolanaPrivateKey String?
 
@@ -34,6 +43,10 @@ model User {
   twoFactorSecret     String?
   twoFactorEnabled    Boolean  @default(false)
   backupCodes         String?  // JSON array of backup codes
+
+  // Trading settings
+  defaultTradeAmount  Int      @default(25) // Default trade amount in USD
+  tradingEnabled      Boolean  @default(false) // Whether CTF trading is enabled (one-time approval)
 
   isAdmin          Boolean  @default(false)
   isActive         Boolean  @default(true)

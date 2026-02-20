@@ -4,13 +4,26 @@ import { logger } from '../utils/logger';
 import { handleStart } from './handlers/start';
 import { handleHelp } from './handlers/help';
 import { handleWallet } from './handlers/wallet';
-import { handleStats, handleUsers } from './handlers/admin';
+import {
+  handleStats,
+  handleUsers,
+  handleRefreshStats,
+  handleViewUsersButton,
+  handleUsersPage,
+  handleDeleteUserConfirm,
+  handleDeleteUserConfirmed,
+  handleBackToStats,
+  handleResetMe,
+  handleResetMeConfirmed,
+  handleResetMeCancel,
+} from './handlers/admin';
 import {
   handleShowCategories,
   handleCategorySelection,
   handleMarketDetails,
   handleBackToMenu,
   handleShowWallet,
+  handleRefreshCategory,
 } from './handlers/markets';
 import {
   handleWalletPage,
@@ -46,6 +59,20 @@ import {
   handleApproveDeposit,
   handleConfirmDeposit,
 } from './handlers/deposit';
+import {
+  handleSettingsMenu,
+  handleShowSecretKey,
+  handleDeleteKeyMessage,
+  handleChangeDefaultAmount,
+  handleSetDefaultAmount,
+} from './handlers/settings';
+import {
+  handleOutcomeSelection,
+  handleTradeConfirm,
+  handleTradeCancel,
+  handleTradeAmountInput,
+  tradeState,
+} from './handlers/trade';
 
 export class TelegramBot {
   private bot: Telegraf;
@@ -87,7 +114,8 @@ export class TelegramBot {
 
     // Admin commands
     this.bot.command('stats', handleStats);
-    this.bot.command('users', handleUsers);
+    this.bot.command('users', (ctx) => handleUsers(ctx, 1));
+    this.bot.command('reset_me', handleResetMe);
 
     // Callback query handlers for buttons
     this.bot.action('show_categories', handleShowCategories);
@@ -122,6 +150,12 @@ export class TelegramBot {
       await handleCategorySelection(ctx, category, page);
     });
 
+    // Refresh category handler - clears cache and reloads
+    this.bot.action(/^refresh_category_(.+)$/, async (ctx) => {
+      const category = ctx.match[1];
+      await handleRefreshCategory(ctx, category, 1);
+    });
+
     // Market details handler
     this.bot.action(/^market_(.+)$/, async (ctx) => {
       const marketId = ctx.match[1];
@@ -149,6 +183,52 @@ export class TelegramBot {
     this.bot.action(/^portfolio_all_(\d+)$/, async (ctx) => {
       const page = parseInt(ctx.match[1], 10);
       await handleAllTransactions(ctx, page);
+    });
+
+    // Settings handlers
+    this.bot.action('settings_menu', handleSettingsMenu);
+    this.bot.action('settings_show_key', handleShowSecretKey);
+    this.bot.action('settings_delete_key_msg', handleDeleteKeyMessage);
+    this.bot.action('settings_change_amount', handleChangeDefaultAmount);
+    this.bot.action('settings_amount_10', async (ctx) => await handleSetDefaultAmount(ctx, 10));
+    this.bot.action('settings_amount_25', async (ctx) => await handleSetDefaultAmount(ctx, 25));
+    this.bot.action('settings_amount_50', async (ctx) => await handleSetDefaultAmount(ctx, 50));
+    this.bot.action('settings_amount_100', async (ctx) => await handleSetDefaultAmount(ctx, 100));
+
+    // Trade handlers
+    this.bot.action(/^trade_outcome_/, async (ctx) => {
+      if ('data' in ctx.callbackQuery) {
+        await handleOutcomeSelection(ctx, ctx.callbackQuery.data);
+      }
+    });
+    this.bot.action(/^trade_confirm_/, async (ctx) => {
+      if ('data' in ctx.callbackQuery) {
+        await handleTradeConfirm(ctx, ctx.callbackQuery.data);
+      }
+    });
+    this.bot.action('trade_cancel', handleTradeCancel);
+
+    // Admin handlers
+    this.bot.action('admin_refresh_stats', handleRefreshStats);
+    this.bot.action('admin_view_users', handleViewUsersButton);
+    this.bot.action('admin_back_to_stats', handleBackToStats);
+    this.bot.action('admin_reset_me_confirmed', handleResetMeConfirmed);
+    this.bot.action('admin_reset_me_cancel', handleResetMeCancel);
+
+    // Admin user management
+    this.bot.action(/^admin_users_page_(\d+)$/, async (ctx) => {
+      const page = parseInt(ctx.match[1], 10);
+      await handleUsersPage(ctx, page);
+    });
+
+    this.bot.action(/^admin_delete_user_(.+)$/, async (ctx) => {
+      const userId = ctx.match[1];
+      await handleDeleteUserConfirm(ctx, userId);
+    });
+
+    this.bot.action(/^admin_delete_confirmed_(.+)$/, async (ctx) => {
+      const userId = ctx.match[1];
+      await handleDeleteUserConfirmed(ctx, userId);
     });
 
     // 2FA handlers
@@ -197,6 +277,13 @@ export class TelegramBot {
       const telegramId = ctx.from?.id.toString();
       if (!telegramId) return;
 
+      // Check if user is in a trade flow (waiting for amount input)
+      const tradeStateData = tradeState.get(telegramId);
+      if (tradeStateData) {
+        await handleTradeAmountInput(ctx, text);
+        return;
+      }
+
       // Check if user is in a 2FA flow
       const state = userState.get(telegramId);
 
@@ -239,6 +326,13 @@ export class TelegramBot {
   private setupErrorHandling(): void {
     // Handle bot errors
     this.bot.catch((error: any, ctx: Context) => {
+      // Ignore "message is not modified" errors - these are expected
+      // when users click the same button multiple times
+      if (error.message?.includes('message is not modified')) {
+        logger.debug('Ignored: message is not modified (user clicked same button)');
+        return;
+      }
+
       logger.error('Bot error:', error);
 
       try {
