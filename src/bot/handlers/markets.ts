@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import {
@@ -14,13 +12,13 @@ import {
 import { getMainMenuStats, MainMenuStats } from '../../services/portfolio';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
-import { isBenignTelegramError, sendPage } from '../../utils/telegram';
+import { isBenignTelegramError, sendPage, getMenuPhotoMedia, cacheMenuPhotoFileId } from '../../utils/telegram';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const EVENTS_PER_PAGE = 5;
+const EVENTS_PER_PAGE = 3;
 
 const CATEGORY_META: Record<string, { name: string; emoji: string }> = {
   'trending':    { name: 'Trending',    emoji: '🌎' },
@@ -169,6 +167,7 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
   try {
     await ctx.answerCbQuery('Loading...');
 
+    const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
     const cat = CATEGORY_META[category] ?? { name: category, emoji: '📊' };
 
     const events = await fetchCategoryEvents(category);
@@ -200,6 +199,8 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
     // ── Event cards ───────────────────────────────────────────────────────────
     pageEvents.forEach((event, idx) => {
       message += buildEventCard(event, idx, category);
+      message += `└ [Details](https://polymarket.com/event/${event.slug}) · `;
+      message += `[Trade](https://t.me/${botUsername}?start=event_${event.id})\n\n`;
     });
 
     // ── Numbered quick-trade buttons ──────────────────────────────────────────
@@ -308,18 +309,16 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
     }
 
     // ── Header ────────────────────────────────────────────────────────────────
-    const title = safeTitle(event.title, 80);
+    // Keep header short: description max 60 chars, condensed stats
+    const title = safeTitle(event.title, 70);
     let message = `📊 *${title}*\n\n`;
 
     if (event.description) {
-      const desc = event.description.slice(0, 180);
-      message += `${desc}${event.description.length > 180 ? '…' : ''}\n\n`;
+      const desc = event.description.slice(0, 60);
+      message += `${desc}${event.description.length > 60 ? '…' : ''}\n\n`;
     }
 
-    message +=
-      `📊 24h Vol: *${formatVolume(event.volume24hr)}* · ` +
-      `Total: *${formatVolume(event.volume)}* · ` +
-      `Liq: *${formatVolume(event.liquidity)}*\n\n`;
+    message += `📊 Vol: *${formatVolume(event.volume24hr)}* · Liq: *${formatVolume(event.liquidity)}*\n\n`;
 
     // ── Markets ───────────────────────────────────────────────────────────────
     const allMarkets = (event.markets || []) as any[];
@@ -335,18 +334,20 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
 
     const pool = activeMarkets.length > 0 ? activeMarkets : allMarkets;
     const withVolume = pool.filter((m: any) => (m.volume24hr || 0) > 0);
+    // Cap at 3: only top market gets trade links (condition_id ~66 chars makes URLs very long)
     const sortedMarkets = (withVolume.length > 0 ? withVolume : pool)
       .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0))
-      .slice(0, 8);
+      .slice(0, 3);
 
     if (sortedMarkets.length > 0) {
-      message += `*Markets (${sortedMarkets.length}):*\n\n`;
+      const totalActive = (withVolume.length > 0 ? withVolume : pool).length;
+      message += `*Markets (${sortedMarkets.length}${totalActive > 3 ? `/${totalActive}` : ''}):*\n\n`;
 
       sortedMarkets.forEach((market: any, idx: number) => {
-        const prices = parseOutcomePrices(market);
+        const prices  = parseOutcomePrices(market);
         const outcomes = parseOutcomes(market);
-        const q = safeTitle(market.question, 70);
-        const vol = formatVolume(market.volume24hr);
+        // Shorter question for markets 1+ to save space
+        const q = safeTitle(market.question, idx === 0 ? 60 : 50);
         const marketId = market.condition_id || market.id;
 
         message += `${idx + 1}. *${q}*\n`;
@@ -362,15 +363,17 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
           }
         }
 
-        message += `📊 ${vol}`;
-        message += `  [YES $${defaultAmount}](https://t.me/${botUsername}?start=trade_${marketId}_yes_default)`;
-        message += ` · [NO $${defaultAmount}](https://t.me/${botUsername}?start=trade_${marketId}_no_default)`;
-        message += ` · [Custom](https://t.me/${botUsername}?start=trade_${marketId}_custom)\n\n`;
+        if (idx === 0) {
+          // Trade links only for the top market (URLs are very long, would overflow for multiple)
+          const vol = formatVolume(market.volume24hr);
+          message += `📊 ${vol}`;
+          message += `  [YES $${defaultAmount}](https://t.me/${botUsername}?start=trade_${marketId}_yes_default)`;
+          message += ` · [NO $${defaultAmount}](https://t.me/${botUsername}?start=trade_${marketId}_no_default)`;
+          message += ` · [Custom](https://t.me/${botUsername}?start=trade_${marketId}_custom)\n\n`;
+        } else {
+          message += '\n';
+        }
       });
-
-      if ((event.markets?.length || 0) > 8) {
-        message += `_…and ${event.markets.length - 8} more markets_\n\n`;
-      }
     }
 
     message += `🔗 [View on Polymarket](https://polymarket.com/event/${event.slug})`;
@@ -421,7 +424,6 @@ export async function handleRefreshCategory(ctx: Context, category: string, page
 /**
  * Back to main menu.
  */
-const MENU_IMAGE = path.join(__dirname, '../img/beattheodds.JPG');
 const ZERO_STATS: MainMenuStats = { balance: '0.00', positionsValue: '0.00', ordersValue: '0.00', netWorth: '0.00' };
 
 // parse_mode: 'HTML' — uses custom emoji tags
@@ -490,33 +492,17 @@ export async function handleBackToMenu(ctx: Context): Promise<void> {
       }
     }
 
-    const caption     = buildMainMenuText(stats);
-    const keyboard    = mainMenuKeyboard();
-    const replyMarkup = (keyboard as any).reply_markup;
+    const caption  = buildMainMenuText(stats);
+    const keyboard = mainMenuKeyboard();
 
-    // If current message is already a photo → only update caption + keyboard (no re-download)
-    const cbMsg   = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : null;
-    const isPhoto = !!(cbMsg && 'photo' in cbMsg);
-
-    if (isPhoto) {
-      try {
-        await (ctx as any).editMessageCaption(caption, {
-          parse_mode: 'HTML',
-          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-        });
-        return;
-      } catch (err: any) {
-        if (isBenignTelegramError(err)) return;
-        // fall through to delete+send
-      }
-    }
-
-    // Coming from a text page — delete it and send a fresh photo
+    // Always delete and resend — ensures the menu image (beattheodds.JPG) is shown
+    // even when coming from an event detail page that has a different photo.
     await ctx.deleteMessage().catch(() => {});
-    await ctx.replyWithPhoto(
-      { source: fs.createReadStream(MENU_IMAGE) },
+    const result = await ctx.replyWithPhoto(
+      getMenuPhotoMedia() as any,
       { caption, parse_mode: 'HTML', ...keyboard }
     );
+    cacheMenuPhotoFileId(result);
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     logger.error('Error going back to menu:', error);

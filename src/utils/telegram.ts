@@ -10,6 +10,23 @@ let _cachedPhotoFileId: string | null = null;
 const _urlPhotoCache = new Map<string, string>();
 
 /**
+ * Returns the media object for the static menu image.
+ * Uses cached file_id if available to avoid re-uploading.
+ */
+export function getMenuPhotoMedia(): string | { source: ReturnType<typeof fs.createReadStream> } {
+  return _cachedPhotoFileId
+    ? _cachedPhotoFileId
+    : { source: fs.createReadStream(MENU_IMAGE) };
+}
+
+/** Saves a menu photo file_id returned by Telegram (call after first replyWithPhoto). */
+export function cacheMenuPhotoFileId(result: any): void {
+  if (!_cachedPhotoFileId && result?.photo?.length) {
+    _cachedPhotoFileId = result.photo[result.photo.length - 1].file_id;
+  }
+}
+
+/**
  * Sends a photo page.
  *
  * - If the current message is already a photo → editMessageCaption (caption + keyboard only,
