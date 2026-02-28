@@ -71,20 +71,21 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     }
 
     // Build wallet message
-    const eWallet = ce(EMOJI.walletPurse,    '👛');
-    const eEvm    = ce(EMOJI.ethDeposit,     '🔹');
-    const eSol    = ce(EMOJI.solanaDeposit,  '🟣');
-    const eUsdc   = ce(EMOJI.usdc,           '💲');
+    const eWallet  = ce('5424976816530014958', '👛');
+    const ePoly    = ce('5837001288457392898', '🟣');
+    const eEth     = ce(EMOJI.ethDeposit,      '🔹');
+    const eSol     = ce('5837001288457392898', '🟣');
+    const eUsdc    = ce(EMOJI.usdc, '💲');
 
     let message = `${eWallet} <b>WALLET</b>\n\n`;
     message += `💰 <b>Deposit Addresses</b>\n\n`;
 
     // Show deposit addresses from Bridge API
     if (user.depositAddressEvm) {
-      message += `${eEvm} <b>Polygon:</b>\n`;
+      message += `${ePoly} <b>Polygon:</b>\n`;
       message += `<code>${esc(user.depositAddressEvm)}</code>\n\n`;
 
-      message += `${eEvm} <b>ETH/Arbitrum/Base/Optimism:</b>\n`;
+      message += `${eEth} <b>ETH/Arbitrum/Base/Optimism:</b>\n`;
       message += `<code>${esc(user.depositAddressEvm)}</code>\n\n`;
 
       message += `${eSol} <b>Solana:</b>\n`;
@@ -95,16 +96,12 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     }
 
     // Polymarket Trading Wallet
-    message += `🏦 <b>Polymarket Trading Wallet (Don't deposit here):</b>\n`;
+    message += `💙 <b>Polymarket Trading Wallet (Don't deposit here):</b>\n`;
     if (user.polymarketProxyAddress) {
       message += `<code>${esc(user.polymarketProxyAddress)}</code>\n\n`;
     } else {
       message += `⚠️ <i>Setup incomplete - contact support</i>\n\n`;
     }
-
-    // Owner Wallet (EOA)
-    message += `📍 <b>Owner Wallet (EOA):</b>\n`;
-    message += `<code>${esc(user.walletAddress)}</code>\n\n`;
 
     // Trading Balance (Real data from API)
     message += `${eUsdc} <b>Balance:</b> $${esc(balance)}\n`;
