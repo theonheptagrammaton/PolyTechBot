@@ -285,8 +285,19 @@ export async function handleEventFromPage(
 /**
  * Shows event details with all markets and inline trade buttons.
  */
-export async function handleEventDetails(ctx: Context, eventId: string): Promise<void> {
+/**
+ * Shows event details with per-market pagination.
+ * Each market gets its own page with full YES/NO/Custom trade links.
+ * condition_id URLs are ~120 chars each — only 1 market per page fits within 1024.
+ */
+export async function handleEventDetails(
+  ctx: Context,
+  eventId: string,
+  marketPage: number = 1,
+): Promise<void> {
   try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading…').catch(() => {});
+
     const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
     const telegramId = ctx.from?.id.toString();
     let defaultAmount = 25;
@@ -308,22 +319,8 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
       return;
     }
 
-    // ── Header ────────────────────────────────────────────────────────────────
-    // Keep header short: description max 60 chars, condensed stats
-    const title = safeTitle(event.title, 70);
-    let message = `📊 *${title}*\n\n`;
-
-    if (event.description) {
-      const desc = event.description.slice(0, 60);
-      message += `${desc}${event.description.length > 60 ? '…' : ''}\n\n`;
-    }
-
-    message += `📊 Vol: *${formatVolume(event.volume24hr)}* · Liq: *${formatVolume(event.liquidity)}*\n\n`;
-
-    // ── Markets ───────────────────────────────────────────────────────────────
+    // ── Filter & sort markets ──────────────────────────────────────────────────
     const allMarkets = (event.markets || []) as any[];
-
-    // Filter out resolved/settled markets (any outcome at 0¢ or 100¢)
     const activeMarkets = allMarkets.filter((m: any) => {
       const prices = parseOutcomePrices(m);
       return prices.length > 0 && prices.every(p => {
@@ -334,60 +331,80 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
 
     const pool = activeMarkets.length > 0 ? activeMarkets : allMarkets;
     const withVolume = pool.filter((m: any) => (m.volume24hr || 0) > 0);
-    // Cap at 3: only top market gets trade links (condition_id ~66 chars makes URLs very long)
     const sortedMarkets = (withVolume.length > 0 ? withVolume : pool)
-      .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0))
-      .slice(0, 3);
+      .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0));
 
-    if (sortedMarkets.length > 0) {
-      const totalActive = (withVolume.length > 0 ? withVolume : pool).length;
-      message += `*Markets (${sortedMarkets.length}${totalActive > 3 ? `/${totalActive}` : ''}):*\n\n`;
+    const totalMarkets = sortedMarkets.length;
 
-      sortedMarkets.forEach((market: any, idx: number) => {
-        const prices  = parseOutcomePrices(market);
-        const outcomes = parseOutcomes(market);
-        // Shorter question for markets 1+ to save space
-        const q = safeTitle(market.question, idx === 0 ? 60 : 50);
-        const marketId = market.condition_id || market.id;
-
-        message += `${idx + 1}. *${q}*\n`;
-
-        if (prices.length >= 2 && outcomes.length >= 2) {
-          const p0 = parseFloat(prices[0] || '0');
-          const p1 = parseFloat(prices[1] || '0');
-          if (!isNaN(p0) && !isNaN(p1)) {
-            const bar = probBar(p0);
-            const y = (p0 * 100).toFixed(1);
-            const n = (p1 * 100).toFixed(1);
-            message += `${bar}  ${outcomes[0]} *${y}¢* · ${outcomes[1]} ${n}¢\n`;
-          }
-        }
-
-        if (idx === 0) {
-          // Trade links only for the top market (URLs are very long, would overflow for multiple)
-          const vol = formatVolume(market.volume24hr);
-          message += `📊 ${vol}`;
-          message += `  [YES $${defaultAmount}](https://t.me/${botUsername}?start=trade_${marketId}_yes_default)`;
-          message += ` · [NO $${defaultAmount}](https://t.me/${botUsername}?start=trade_${marketId}_no_default)`;
-          message += ` · [Custom](https://t.me/${botUsername}?start=trade_${marketId}_custom)\n\n`;
-        } else {
-          message += '\n';
-        }
+    if (totalMarkets === 0) {
+      await sendPage(ctx, `${ce(EMOJI.eventTitle, '💰')} <b>${esc(safeTitle(event.title, 60))}</b>\n\n<i>No active markets found.</i>`, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
       });
+      return;
     }
 
-    message += `🔗 [View on Polymarket](https://polymarket.com/event/${event.slug})`;
+    const currentPage = Math.min(Math.max(1, marketPage), totalMarkets);
+    const market  = sortedMarkets[currentPage - 1];
+    const marketId = market.condition_id || market.id;
+    const q       = safeTitle(market.question, 65);
+    const vol     = formatVolume(market.volume24hr);
+    const prices  = parseOutcomePrices(market);
+    const outcomes = parseOutcomes(market);
+
+    // ── Header ────────────────────────────────────────────────────────────────
+    const eTitle = ce(EMOJI.eventTitle, '💰');
+    const eUp    = ce(EMOJI.priceUp,    '⬆️');
+    const eDown  = ce(EMOJI.priceDown,  '⬇️');
+    const eStats = ce(EMOJI.eventStats, '📈');
+
+    const title = safeTitle(event.title, 60);
+    let message = `${eTitle} <b>${esc(title)}</b>\n`;
+    message += `Vol: <b>${formatVolume(event.volume24hr)}</b> · Liq: <b>${formatVolume(event.liquidity)}</b>\n\n`;
+
+    // ── Current market ────────────────────────────────────────────────────────
+    if (totalMarkets > 1) message += `<b>Market ${currentPage}/${totalMarkets}:</b>\n`;
+    message += `<b>${esc(q)}</b>\n`;
+
+    if (prices.length >= 2 && outcomes.length >= 2) {
+      const p0 = parseFloat(prices[0] || '0');
+      const p1 = parseFloat(prices[1] || '0');
+      if (!isNaN(p0) && !isNaN(p1)) {
+        const bar = probBar(p0);
+        const y = (p0 * 100).toFixed(1);
+        const n = (p1 * 100).toFixed(1);
+        message += `${bar}  ${eUp}${esc(outcomes[0])} <b>${y}¢</b> · ${eDown}${esc(outcomes[1])} ${n}¢\n`;
+      }
+    }
+
+    message += `${eStats} ${vol}`;
+    message += `  <a href="https://t.me/${botUsername}?start=trade_${marketId}_yes_default">YES $${defaultAmount}</a>`;
+    message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>`;
+    message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_custom">Custom</a>\n\n`;
+    message += `🔗 <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
+
+    // ── Keyboard ──────────────────────────────────────────────────────────────
+    const buttons: any[] = [];
+
+    if (totalMarkets > 1) {
+      const navRow: any[] = [];
+      if (currentPage > 1)
+        navRow.push(Markup.button.callback('◀️', `evd_mkt_${event.id}_${currentPage - 1}`));
+      navRow.push(Markup.button.callback(`${currentPage}/${totalMarkets}`, 'noop'));
+      if (currentPage < totalMarkets)
+        navRow.push(Markup.button.callback('▶️', `evd_mkt_${event.id}_${currentPage + 1}`));
+      buttons.push(navRow);
+    }
+
+    buttons.push([Markup.button.callback('🏠 Main Menu', 'back_to_menu')]);
 
     await sendPage(ctx, message, {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       image_url: event.image || undefined,
-      link_preview_options: { is_disabled: true },
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-      ]),
+      ...Markup.inlineKeyboard(buttons),
     });
 
-    logger.info(`Event ${eventId} details shown to user: ${ctx.from?.id}`);
+    logger.info(`Event ${eventId} market ${currentPage}/${totalMarkets} shown to user: ${ctx.from?.id}`);
   } catch (error) {
     logger.error(`Error showing event ${eventId}:`, error);
     await ctx.reply('❌ An error occurred while loading event details.');
