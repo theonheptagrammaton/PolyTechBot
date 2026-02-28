@@ -13,11 +13,27 @@ export const tradeState = new Map<string, {
   timestamp: number;
 }>();
 
+// Limit order state management
+export const limitTradeState = new Map<string, {
+  step: 'awaiting_limit_price' | 'awaiting_limit_amount' | 'awaiting_confirmation';
+  marketId: string;
+  marketQuestion: string;
+  outcome: 'yes' | 'no';
+  outcomeIndex: number;
+  currentPrice: number;
+  limitPrice?: number;
+  amount?: number;
+  timestamp: number;
+}>();
+
 // R6: Periodic cleanup of abandoned state entries (every 30 min, remove entries > 10 min old)
 setInterval(() => {
   const cutoff = Date.now() - 10 * 60 * 1000;
   for (const [key, state] of tradeState.entries()) {
     if (state.timestamp < cutoff) tradeState.delete(key);
+  }
+  for (const [key, state] of limitTradeState.entries()) {
+    if (state.timestamp < cutoff) limitTradeState.delete(key);
   }
 }, 30 * 60 * 1000);
 
@@ -74,6 +90,42 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
 
       if (outcome !== 'yes' && outcome !== 'no') {
         await ctx.reply('❌ Invalid outcome.');
+        return;
+      }
+
+      // 'custom' token: outcome known, ask user for amount
+      if (parts[2] === 'custom') {
+        const outcomeIdx = outcome === 'yes' ? 0 : 1;
+        let pricesArr: string[] = ['0.5', '0.5'];
+        try {
+          pricesArr = Array.isArray(market.outcomePrices)
+            ? market.outcomePrices
+            : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
+        } catch { /* keep defaults */ }
+        const price = parseFloat(pricesArr[outcomeIdx] ?? '0.5');
+
+        tradeState.set(telegramId, {
+          marketId,
+          marketQuestion: market.question || 'Unknown Market',
+          outcome,
+          outcomeIndex: outcomeIdx,
+          price,
+          timestamp: Date.now(),
+        });
+
+        const priceDisplay = (price * 100).toFixed(1);
+        await ctx.reply(
+          `💵 *Enter Trade Amount*\n\n` +
+          `Market: ${market.question}\n` +
+          `Outcome: ${outcome.toUpperCase()} (${priceDisplay}¢)\n\n` +
+          `Please send the amount in USD.\n` +
+          `Example: \`50\`\n\n` +
+          `⚠️ Min: $1 · Max: $10,000`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'trade_cancel')]]),
+          }
+        );
         return;
       }
 
@@ -579,7 +631,7 @@ async function executeTrade(
       await ctx.telegram.editMessageText(
         ctx.chat!.id, progressMsg.message_id, undefined,
         '❌ *Market Not Available for Trading*\n\nThis market cannot be traded at the moment.',
-        { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Back to Markets', 'show_categories')]]).reply_markup }
+        { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Back to Markets', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
       );
       return;
     }
@@ -639,7 +691,7 @@ async function executeTrade(
         await ctx.telegram.editMessageText(
           ctx.chat!.id, progressMsg.message_id, undefined,
           '❌ *Insufficient Balance*\n\nYou need USDC.e in your Polymarket proxy wallet.\n\nGo to 💼 My Wallet → Deposit to add funds.',
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('💰 Deposit Now', 'deposit_menu')], [Markup.button.callback('« Back', 'show_categories')]]).reply_markup }
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('💰 Deposit Now', 'deposit_menu')], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -647,7 +699,7 @@ async function executeTrade(
         await ctx.telegram.editMessageText(
           ctx.chat!.id, progressMsg.message_id, undefined,
           `❌ *No Liquidity*\n\nNo sellers available within the current slippage range (${slippagePct}%).\n\n• Increase slippage in ⚙️ Settings\n• Or try again shortly`,
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')]]).reply_markup }
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -662,7 +714,7 @@ async function executeTrade(
           `This market requires a minimum of *${minShares} shares* per order.\n\n` +
           `At the current price (${(worstPrice * 100).toFixed(1)}¢), you need at least *$${minUsd}*.\n\n` +
           `Please increase your trade amount and try again.`,
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')]]).reply_markup }
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -717,6 +769,7 @@ async function executeTrade(
           [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
           [Markup.button.callback('📋 Open Orders',  'portfolio_orders_1')],
           [Markup.button.callback('🔄 Trade Again',  `trade_${marketId}_custom`)],
+          [Markup.button.callback('🏠 Main Menu',    'back_to_menu')],
         ]).reply_markup,
       }
     );
@@ -742,6 +795,7 @@ async function executeTrade(
             reply_markup: Markup.inlineKeyboard([
               [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)],
               [Markup.button.callback('« Back', 'show_categories')],
+              [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
             ]).reply_markup,
           }
         );
@@ -899,9 +953,420 @@ export async function handleTradeCancel(ctx: Context): Promise<void> {
     await ctx.editMessageText('❌ Trade cancelled.', {
       ...Markup.inlineKeyboard([
         [Markup.button.callback('« Back to Markets', 'show_categories')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
   } catch (error) {
     logger.error('Error cancelling trade:', error);
+  }
+}
+
+// ─── Limit Order Flow ──────────────────────────────────────────────────────────
+
+/**
+ * Starts a limit order flow for a specific market and outcome.
+ * Called from the /start deep link handler: limit_{marketId}_{yes|no}
+ */
+export async function handleLimitOrderStart(
+  ctx: Context,
+  marketId: string,
+  outcome: 'yes' | 'no',
+): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const axios = (await import('axios')).default;
+  let market: any;
+  try {
+    const r = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+    market = r.data;
+  } catch {
+    try {
+      const r = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+      market = r.data;
+    } catch {
+      await ctx.reply('❌ Market not found. It may have been closed or removed.');
+      return;
+    }
+  }
+
+  if (!market.active || market.closed) {
+    await ctx.reply('❌ This market is closed and no longer accepting orders.');
+    return;
+  }
+
+  const outcomeIndex = outcome === 'yes' ? 0 : 1;
+  let outcomePrices: string[] = ['0.5', '0.5'];
+  try {
+    outcomePrices = Array.isArray(market.outcomePrices)
+      ? market.outcomePrices
+      : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
+  } catch { /* keep defaults */ }
+
+  const currentPrice = parseFloat(outcomePrices[outcomeIndex] || '0.5');
+  const currentCents = (currentPrice * 100).toFixed(1);
+  const exampleCents = Math.max(1, Math.round(currentPrice * 100) - 5);
+
+  limitTradeState.set(telegramId, {
+    step: 'awaiting_limit_price',
+    marketId,
+    marketQuestion: market.question || 'Unknown Market',
+    outcome,
+    outcomeIndex,
+    currentPrice,
+    timestamp: Date.now(),
+  });
+
+  await ctx.reply(
+    `📋 *Limit Order — BUY ${outcome.toUpperCase()}*\n\n` +
+    `Market: ${market.question}\n\n` +
+    `📊 Current price: *${currentCents}¢*\n\n` +
+    `Enter your limit price in cents (1–99):\n` +
+    `Example: \`${exampleCents}\` (order fills when price ≤ ${exampleCents}¢)`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('❌ Cancel', 'limit_cancel')],
+      ]),
+    }
+  );
+}
+
+/**
+ * Handles text input during limit order flow (price → amount → shows confirmation).
+ * Returns true if the input was consumed.
+ */
+export async function handleLimitTradeInput(ctx: Context, text: string): Promise<boolean> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return false;
+
+  const state = limitTradeState.get(telegramId);
+  if (!state) return false;
+
+  if (Date.now() - state.timestamp > 10 * 60 * 1000) {
+    limitTradeState.delete(telegramId);
+    return false;
+  }
+
+  // In awaiting_confirmation step the user should click a button, not type
+  if (state.step === 'awaiting_confirmation') {
+    await ctx.reply('👆 Please tap ✅ Place Limit Order or ❌ Cancel above.');
+    return true;
+  }
+
+  if (state.step === 'awaiting_limit_price') {
+    const raw = text.trim().replace(/[^\d.]/g, '');
+    const cents = parseFloat(raw);
+
+    if (isNaN(cents) || cents < 1 || cents > 99) {
+      await ctx.reply('❌ Enter a price between 1 and 99 cents. Example: `45`', { parse_mode: 'Markdown' });
+      return true;
+    }
+
+    const limitPrice = parseFloat((cents / 100).toFixed(4));
+    const currentCents = (state.currentPrice * 100).toFixed(1);
+
+    // Warn if limit is above current price (order would fill immediately)
+    const aboveMarketNote = cents > state.currentPrice * 100
+      ? `\n⚠️ _Your limit (${cents}¢) is above current price (${currentCents}¢) — order may fill immediately._\n`
+      : '';
+
+    state.limitPrice = limitPrice;
+    state.step = 'awaiting_limit_amount';
+    state.timestamp = Date.now();
+    limitTradeState.set(telegramId, state);
+
+    await ctx.reply(
+      `📋 *Limit Order — BUY ${state.outcome.toUpperCase()} @ ${cents}¢*\n\n` +
+      `Market: ${state.marketQuestion}\n\n` +
+      `📊 Current price: *${currentCents}¢*\n` +
+      `🎯 Your limit: *${cents}¢*\n` +
+      aboveMarketNote + `\n` +
+      `Enter USD amount to spend:\n` +
+      `⚠️ Min: $1 · Max: $10,000`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancel', 'limit_cancel')],
+        ]),
+      }
+    );
+    return true;
+  }
+
+  if (state.step === 'awaiting_limit_amount') {
+    // Locale-aware parse (same as market order handler)
+    const normalized = (() => {
+      const s = text.trim().replace(/[^\d.,]/g, '');
+      const lastComma = s.lastIndexOf(',');
+      const lastDot = s.lastIndexOf('.');
+      if (lastComma > lastDot) return s.replace(/\./g, '').replace(',', '.');
+      return s.replace(/,/g, '');
+    })();
+    const amount = parseFloat(normalized);
+
+    if (isNaN(amount) || amount < 1 || amount > 10000) {
+      await ctx.reply('❌ Invalid amount. Enter a value between $1 and $10,000.');
+      return true;
+    }
+
+    const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(2));
+    const tradeAmount   = parseFloat((amount - commissionAmt).toFixed(2));
+    const limitPrice    = state.limitPrice!;
+    const limitCents    = (limitPrice * 100).toFixed(1);
+    const estShares     = parseFloat((tradeAmount / limitPrice).toFixed(2));
+    const currentCents  = (state.currentPrice * 100).toFixed(1);
+
+    if (tradeAmount < 1.0) {
+      const minRequired = Math.ceil((1.0 / (1 - COMMISSION_RATE)) * 100) / 100;
+      await ctx.reply(
+        `❌ After the ${(COMMISSION_RATE * 100).toFixed(0)}% fee the trade amount is less than $1.\n` +
+        `Please enter at least *$${minRequired.toFixed(2)}*:`,
+        { parse_mode: 'Markdown' }
+      );
+      return true;
+    }
+
+    state.amount = amount;
+    state.step = 'awaiting_confirmation';
+    state.timestamp = Date.now();
+    limitTradeState.set(telegramId, state);
+
+    await ctx.reply(
+      `📋 *Confirm Limit Order*\n\n` +
+      `Market: ${state.marketQuestion}\n` +
+      `Side: BUY *${state.outcome.toUpperCase()}*\n\n` +
+      `📊 Current price: ${currentCents}¢\n` +
+      `🎯 Limit price: *${limitCents}¢*\n` +
+      `💰 Amount: $${amount.toFixed(2)}\n` +
+      `├ Platform fee (1%): -$${commissionAmt.toFixed(2)}\n` +
+      `└ Trade amount: $${tradeAmount.toFixed(2)}\n` +
+      `📦 Est. shares: ~${estShares}\n\n` +
+      `_Order type: GTC — stays on the book until filled or cancelled._`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Place Limit Order', 'limit_confirm'),
+            Markup.button.callback('❌ Cancel', 'limit_cancel'),
+          ],
+        ]),
+      }
+    );
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Executes the confirmed limit (GTC) order via CLOB API.
+ */
+export async function handleLimitConfirm(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery();
+
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const state = limitTradeState.get(telegramId);
+  if (!state || state.step !== 'awaiting_confirmation' || !state.limitPrice || !state.amount) {
+    await ctx.editMessageText('❌ Session expired. Please start again.').catch(() => {});
+    return;
+  }
+
+  if (Date.now() - state.timestamp > 10 * 60 * 1000) {
+    limitTradeState.delete(telegramId);
+    await ctx.editMessageText('❌ Session expired. Please start again.').catch(() => {});
+    return;
+  }
+
+  limitTradeState.delete(telegramId);
+
+  // Show progress immediately
+  await ctx.editMessageText('⏳ Placing limit order...').catch(() => {});
+
+  await executeLimitTrade(ctx, state.marketId, state.marketQuestion, state.outcome, state.limitPrice, state.amount);
+}
+
+/**
+ * Cancels the limit order flow.
+ */
+export async function handleLimitCancel(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery('Cancelled');
+
+  const telegramId = ctx.from?.id.toString();
+  if (telegramId) limitTradeState.delete(telegramId);
+
+  await ctx.editMessageText('❌ Limit order cancelled.', {
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('« Back to Markets', 'show_categories')],
+    ]),
+  }).catch(() => {});
+}
+
+/**
+ * Submits a GTC limit order to the Polymarket CLOB.
+ */
+async function executeLimitTrade(
+  ctx: Context,
+  marketId: string,
+  marketQuestion: string,
+  outcome: 'yes' | 'no',
+  limitPrice: number,
+  amount: number,
+): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const axios = (await import('axios')).default;
+
+  try {
+    const { getUserByTelegramId } = await import('../../services/user');
+    const user = await getUserByTelegramId(telegramId);
+
+    if (!user) {
+      await ctx.editMessageText('❌ User not found. Use /start to create your wallet.').catch(() => {});
+      return;
+    }
+
+    if (!user.polymarketProxyAddress) {
+      await ctx.editMessageText(
+        '❌ *Trading wallet not set up.*\n\nDeposit funds first to activate trading.',
+        {
+          parse_mode: 'Markdown',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('💰 Deposit', 'deposit_menu')],
+          ]).reply_markup,
+        }
+      ).catch(() => {});
+      return;
+    }
+
+    const { decrypt } = await import('../../utils/encryption');
+    const privateKey  = decrypt(user.encryptedPrivateKey);
+    const apiKey      = decrypt(user.encryptedApiKey);
+    const apiSecret   = decrypt(user.encryptedApiSecret);
+    const passphrase  = decrypt(user.encryptedPassphrase);
+
+    // Fetch CLOB market data for tokenId, tickSize, negRisk
+    const outcomeIdx = outcome === 'yes' ? 0 : 1;
+    let tokenId: string | undefined;
+    let tickSize = '0.01';
+    let isNegRisk = false;
+
+    try {
+      const clobResp = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+      const cm = clobResp.data;
+      tokenId = cm.tokens?.[outcomeIdx]?.token_id;
+      if (cm.minimum_tick_size) tickSize = String(cm.minimum_tick_size);
+      if (cm.neg_risk !== undefined) isNegRisk = !!cm.neg_risk;
+    } catch (err) {
+      logger.warn('[limit] Could not fetch CLOB market data:', err);
+    }
+
+    if (!tokenId) {
+      await ctx.editMessageText('❌ Market not available for trading at the moment.').catch(() => {});
+      return;
+    }
+
+    const { config } = await import('../../config');
+    const { transferCommission } = await import('../../services/commission');
+    const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(6));
+    const tradeAmount   = parseFloat((amount - commissionAmt).toFixed(6));
+
+    // Snap limit price to tick size
+    const tick     = parseFloat(tickSize);
+    const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
+    const snappedPrice = parseFloat(
+      Math.min(Math.round(limitPrice / tick) * tick, 0.99).toFixed(decimals)
+    );
+
+    // Shares = tradeAmount / snappedPrice
+    const sharesToBuy = parseFloat((tradeAmount / snappedPrice).toFixed(4));
+
+    if (sharesToBuy < 0.01) {
+      await ctx.editMessageText('❌ Trade amount too small after fee deduction.').catch(() => {});
+      return;
+    }
+
+    const { ClobClient, Side } = await import('@polymarket/clob-client');
+    const { Wallet } = await import('@ethersproject/wallet');
+
+    const wallet = new Wallet(privateKey);
+    const clobClient = new ClobClient(
+      config.polymarket.host,
+      config.polymarket.chainId,
+      wallet,
+      { key: apiKey, secret: apiSecret, passphrase },
+      2, // GNOSIS_SAFE signature type
+      user.polymarketProxyAddress
+    );
+
+    const orderOptions: any = {};
+    if (tickSize) orderOptions.tickSize = tickSize as any;
+    if (isNegRisk) orderOptions.negRisk = isNegRisk;
+
+    logger.info(
+      `[limit] Placing GTC BUY: ${sharesToBuy} shares of ${outcome.toUpperCase()} ` +
+      `tokenId=${tokenId.substring(0, 16)}... price=${snappedPrice} tickSize=${tickSize} negRisk=${isNegRisk}`
+    );
+
+    const orderResp = await clobClient.createAndPostOrder(
+      { tokenID: tokenId, side: Side.BUY, price: snappedPrice, size: sharesToBuy, feeRateBps: 0 },
+      Object.keys(orderOptions).length > 0 ? orderOptions : undefined
+    );
+
+    if (!orderResp.success || !orderResp.orderID) {
+      const errMsg = orderResp.errorMsg || (orderResp as any).error || 'Order rejected by exchange';
+      throw new Error(errMsg);
+    }
+
+    // Commission transfer (fire-and-forget) — same pattern as market orders
+    if (config.commission?.adminWalletAddress) {
+      transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionAmt, user.id)
+        .catch((err) => logger.warn(`[limit] Commission transfer failed for user ${telegramId}: ${err?.message}`));
+    }
+
+    const limitCents = (snappedPrice * 100).toFixed(1);
+    const message =
+      `✅ *Limit Order Placed*\n\n` +
+      `Market: ${marketQuestion}\n` +
+      `Side: BUY *${outcome.toUpperCase()}*\n\n` +
+      `🎯 Limit price: *${limitCents}¢*\n` +
+      `💰 Amount: $${amount.toFixed(2)}\n` +
+      `├ Platform fee: -$${commissionAmt.toFixed(2)}\n` +
+      `└ Trade amount: $${tradeAmount.toFixed(2)}\n` +
+      `📦 Shares: ~${sharesToBuy}\n` +
+      `🆔 Order ID: \`${orderResp.orderID}\`\n\n` +
+      `_GTC order — rests on the book until filled or cancelled._`;
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('📋 Open Orders',   'portfolio_orders_1')],
+        [Markup.button.callback('📊 My Positions',  'portfolio_open_1')],
+        [Markup.button.callback('🏠 Main Menu',     'back_to_menu')],
+      ]).reply_markup,
+    }).catch(() => {});
+
+    logger.info(
+      `[limit] Order placed: user=${telegramId} market=${marketId} ` +
+      `outcome=${outcome.toUpperCase()} price=${snappedPrice} shares=${sharesToBuy} orderID=${orderResp.orderID}`
+    );
+
+  } catch (error: any) {
+    logger.error('[limit] Error executing limit trade:', error);
+    const safeMd = (s: string) => s.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+    const rawErr = error?.message ?? 'Unknown error';
+    await ctx.editMessageText(
+      `❌ *Limit Order Failed*\n\n${safeMd(rawErr)}`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('« Back to Markets', 'show_categories')],
+          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        ]).reply_markup,
+      }
+    ).catch(() => {});
   }
 }
