@@ -64,11 +64,30 @@ export async function sendPage(
 
   // ── Event-specific image (e.g. Polymarket event cover) ───────────────────
   if (imageUrl) {
-    if (cbMsg) await ctx.deleteMessage().catch(() => {});
     const cached = _urlPhotoCache.get(imageUrl);
-    const media: any = cached ? cached : { url: imageUrl };
+    const mediaId: any = cached || imageUrl;
+
+    if (isPhoto) {
+      // Swap photo in-place — no delete, no flicker
+      try {
+        const result: any = await (ctx as any).editMessageMedia(
+          { type: 'photo', media: mediaId, caption: safeCaption, parse_mode: parseMode },
+          replyMarkup ? { reply_markup: replyMarkup } : undefined,
+        );
+        if (!cached && typeof result === 'object' && result?.photo?.length) {
+          _urlPhotoCache.set(imageUrl, result.photo[result.photo.length - 1].file_id);
+        }
+        return;
+      } catch (err: any) {
+        if (isBenignTelegramError(err)) return;
+        // fall through to delete+send
+      }
+    }
+
+    // Text message → must create a new photo message
+    if (cbMsg) await ctx.deleteMessage().catch(() => {});
     try {
-      const result: any = await ctx.replyWithPhoto(media, {
+      const result: any = await ctx.replyWithPhoto(mediaId, {
         caption: safeCaption,
         parse_mode: parseMode,
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),

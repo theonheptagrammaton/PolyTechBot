@@ -492,12 +492,30 @@ export async function handleBackToMenu(ctx: Context): Promise<void> {
       }
     }
 
-    const caption  = buildMainMenuText(stats);
-    const keyboard = mainMenuKeyboard();
+    const caption     = buildMainMenuText(stats);
+    const keyboard    = mainMenuKeyboard();
+    const replyMarkup = (keyboard as any).reply_markup;
 
-    // Always delete and resend — ensures the menu image (beattheodds.JPG) is shown
-    // even when coming from an event detail page that has a different photo.
-    await ctx.deleteMessage().catch(() => {});
+    const cbMsg   = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : null;
+    const isPhoto = !!(cbMsg && 'photo' in cbMsg);
+
+    if (isPhoto) {
+      // Swap back to menu photo in-place — no delete, no flicker
+      try {
+        const result: any = await (ctx as any).editMessageMedia(
+          { type: 'photo', media: getMenuPhotoMedia(), caption, parse_mode: 'HTML' },
+          replyMarkup ? { reply_markup: replyMarkup } : undefined,
+        );
+        cacheMenuPhotoFileId(result);
+        return;
+      } catch (err: any) {
+        if (isBenignTelegramError(err)) return;
+        // fall through to delete+send
+      }
+    }
+
+    // Text message → send fresh photo
+    if (cbMsg) await ctx.deleteMessage().catch(() => {});
     const result = await ctx.replyWithPhoto(
       getMenuPhotoMedia() as any,
       { caption, parse_mode: 'HTML', ...keyboard }
