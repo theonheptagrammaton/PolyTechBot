@@ -1,8 +1,14 @@
+import fs from 'fs';
+import path from 'path';
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { createUserWithWallet, getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { maskSensitiveData } from '../../utils/encryption';
+import { mainMenuKeyboard, buildMainMenuText } from './markets';
+import { getMainMenuStats } from '../../services/portfolio';
+
+const MENU_IMAGE = path.join(__dirname, '../img/beattheodds.JPG');
 
 export async function handleStart(ctx: Context): Promise<void> {
   try {
@@ -39,10 +45,163 @@ export async function handleStart(ctx: Context): Promise<void> {
       return;
     }
 
-    logger.info(`Start command received from user: ${telegramId}`);
+    if (startParam?.startsWith('updown_market_')) {
+      // User tapped an Up/Down market deep link — show detail page
+      const marketId = startParam.replace('updown_market_', '');
+      logger.info(`Deep link to updown market ${marketId} from user: ${telegramId}`);
 
-    // Send initial message
-    await ctx.reply('🔄 Creating your Polymarket wallet...\n\nPlease wait a moment.');
+      const { handleUpDownMarketDetail } = await import('./cryptoMarkets');
+      await handleUpDownMarketDetail(ctx, marketId, false);
+      return;
+    }
+
+    if (startParam?.startsWith('copy_')) {
+      // Smart Wallet deep link — pre-fill address and start copy add flow
+      const address = startParam.slice(5); // strip 'copy_'
+      logger.info(`Deep link copy trade for ${address} from user: ${telegramId}`);
+
+      const user = await getUserByTelegramId(telegramId);
+      if (user) {
+        const { handleSmartCopyStart } = await import('./copyTrade');
+        await handleSmartCopyStart(ctx, address);
+        return;
+      }
+      // User not registered yet — fall through to normal registration
+    }
+
+    if (startParam?.startsWith('ref_')) {
+      // Referral deep link — record referrer; continue to normal registration flow below
+      const referralCode = startParam.replace('ref_', '');
+      // We store the code temporarily; it's applied after the user is created (see below)
+      logger.info(`[referral] User ${telegramId} arrived via referral code: "${referralCode}"`);
+      // Fall through — don't return here, let registration proceed
+      // The referral application happens after user creation
+    }
+
+    if (startParam?.startsWith('pb_') || startParam?.startsWith('ps_') || startParam?.startsWith('pv_')) {
+      // Deep link from active positions page: buy/sell/view a position by index
+      const parts = startParam.split('_');
+      const action = parts[0]; // 'pb', 'ps', or 'pv'
+      const idx = parseInt(parts[1], 10);
+
+      logger.info(`Deep link position action ${action} idx ${idx} from user: ${telegramId}`);
+
+      const user = await getUserByTelegramId(telegramId);
+      if (!user) {
+        await ctx.reply('❌ User not found. Use /start to create your wallet.');
+        return;
+      }
+
+      // Ensure position cache is populated
+      const { positionListCache, positionTradeState } = await import('./positionTrade');
+      let positions = positionListCache.get(telegramId);
+      if (!positions || positions.length === 0) {
+        const { getActivePositions } = await import('../../services/portfolio');
+        positions = await getActivePositions(user.polymarketProxyAddress || '');
+        positionListCache.set(telegramId, positions);
+      }
+
+      const pos = positions && !isNaN(idx) && idx >= 0 && idx < positions.length ? positions[idx] : null;
+      if (!pos) {
+        await ctx.reply('❌ Position not found. Please open your Positions page and try again.', {
+          ...Markup.inlineKeyboard([[Markup.button.callback('📊 My Positions', 'portfolio_open_1')]]),
+        });
+        return;
+      }
+
+      if (action === 'pv') {
+        // ── View position detail ──
+        const pnlSign = pos.cashPnl >= 0 ? '+' : '';
+        const pnlEmoji = pos.cashPnl >= 0 ? '🟢' : '🔴';
+        const endDate = pos.endDate
+          ? new Date(pos.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          : 'N/A';
+
+        let msg = `📊 *Position Detail*\n\n`;
+        msg += `*${pos.outcome}* — ${pos.title}\n\n`;
+        msg += `💰 *Position*\n`;
+        msg += `├ Shares: ${pos.size.toFixed(4)}\n`;
+        msg += `├ Avg Buy Price: ${(pos.avgPrice * 100).toFixed(2)}¢\n`;
+        msg += `├ Current Price: ${(pos.curPrice * 100).toFixed(2)}¢\n`;
+        msg += `├ Invested: $${pos.initialValue.toFixed(2)}\n`;
+        msg += `└ Current Value: $${pos.currentValue.toFixed(2)}\n\n`;
+        msg += `📈 *P&L*\n`;
+        msg += `├ ${pnlEmoji} Unrealized: ${pnlSign}$${pos.cashPnl.toFixed(2)}\n`;
+        msg += `├ ROI: ${pnlSign}${pos.percentPnl.toFixed(1)}%\n`;
+        msg += `└ Realized: $${pos.realizedPnl.toFixed(2)}\n\n`;
+        msg += `⏰ Market ends: ${endDate}`;
+        if (pos.redeemable) msg += `\n✅ _Redeemable_`;
+
+        await ctx.reply(msg, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [
+              Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
+              Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+            ],
+            [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+          ]),
+        });
+      } else {
+        // ── Buy or Sell flow ──
+        const truncTitle = pos.title.length > 50 ? pos.title.substring(0, 50) + '...' : pos.title;
+        const curCents = (pos.curPrice * 100).toFixed(1);
+
+        positionTradeState.set(telegramId, {
+          action: action === 'pb' ? 'buy' : 'sell',
+          assetId: pos.asset,
+          conditionId: pos.conditionId,
+          negRisk: pos.negativeRisk,
+          title: pos.title,
+          outcome: pos.outcome,
+          currentSize: pos.size,
+          curPrice: pos.curPrice,
+          step: 'awaiting_price_size',
+          timestamp: Date.now(),
+        });
+
+        if (action === 'ps') {
+          const msg =
+            `📉 *Sell Position*\n\n` +
+            `*${pos.outcome}* — ${truncTitle}\n\n` +
+            `You hold: *${pos.size.toFixed(4)} shares* @ avg ${(pos.avgPrice * 100).toFixed(1)}¢\n` +
+            `Current price: *${curCents}¢*  ·  Value: *$${pos.currentValue.toFixed(2)}*\n\n` +
+            `*Enter number of shares to sell:*\n` +
+            `Example: \`${pos.size.toFixed(2)}\` (sell all)\n\n` +
+            `Or choose a quick amount:`;
+
+          await ctx.reply(msg, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback('25%', `pos_pct_${idx}_25`),
+                Markup.button.callback('50%', `pos_pct_${idx}_50`),
+                Markup.button.callback('75%', `pos_pct_${idx}_75`),
+                Markup.button.callback('100%', `pos_pct_${idx}_100`),
+              ],
+              [Markup.button.callback('❌ Cancel', 'pos_cancel')],
+            ]),
+          });
+        } else {
+          const estimatedShares = (10 / pos.curPrice).toFixed(1);
+          const msg =
+            `📈 *Buy More*\n\n` +
+            `*${pos.outcome}* — ${truncTitle}\n\n` +
+            `You already hold: *${pos.size.toFixed(4)} shares*\n` +
+            `Current price: *${curCents}¢*\n\n` +
+            `*Enter USDC amount to spend:*\n` +
+            `Example: \`10\` → buys ~${estimatedShares} shares at ${curCents}¢`;
+
+          await ctx.reply(msg, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'pos_cancel')]]),
+          });
+        }
+      }
+      return;
+    }
+
+    logger.info(`Start command received from user: ${telegramId}`);
 
     try {
       // Check if user already exists
@@ -78,16 +237,27 @@ export async function handleStart(ctx: Context): Promise<void> {
           `\`${existingUser.walletAddress}\`\n\n` +
           '💡 Use the buttons below or /help to see commands.';
 
-        await ctx.reply(welcomeMessage, {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('📊 Browse Markets', 'show_categories')],
-            [Markup.button.callback('🔍 Search Markets', 'search_markets')],
-            [Markup.button.callback('💼 My Wallet', 'show_wallet')],
-          ]),
-        });
+        const stats = await getMainMenuStats(
+          existingUser.encryptedPrivateKey,
+          existingUser.encryptedApiKey,
+          existingUser.encryptedApiSecret,
+          existingUser.encryptedPassphrase,
+          existingUser.polymarketProxyAddress
+        ).catch(() => undefined);
+
+        await ctx.replyWithPhoto(
+          { source: fs.createReadStream(MENU_IMAGE) },
+          {
+            caption: buildMainMenuText(stats),
+            parse_mode: 'HTML',
+            ...mainMenuKeyboard(),
+          }
+        );
         return;
       }
+
+      // New user — show loading message only now
+      await ctx.reply('🔄 Creating your Polymarket wallet...\n\nPlease wait a moment.');
 
       // Create new user with wallet
       const result = await createUserWithWallet(
@@ -98,6 +268,19 @@ export async function handleStart(ctx: Context): Promise<void> {
       );
 
       logger.info(`User created successfully: ${result.user.id}`);
+
+      // Apply referral code if user arrived via referral link
+      if (startParam?.startsWith('ref_')) {
+        const referralCode = startParam.replace('ref_', '');
+        // R14: Guard against empty code (e.g. user clicked a bare "ref_" link)
+        if (referralCode) {
+          const { applyReferralCode } = await import('../../services/referral');
+          const linked = await applyReferralCode(result.user.id, referralCode);
+          if (linked) {
+            logger.info(`[referral] New user ${result.user.id} linked to referrer via code "${referralCode}"`);
+          }
+        }
+      }
 
       // Prepare success message
       let successMessage =
@@ -134,14 +317,16 @@ export async function handleStart(ctx: Context): Promise<void> {
         '3. Start trading immediately!\n\n' +
         '💡 Use buttons below to continue.';
 
-      await ctx.reply(successMessage, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('📊 Browse Markets', 'show_categories')],
-          [Markup.button.callback('🔍 Search Markets', 'search_markets')],
-          [Markup.button.callback('💼 My Wallet', 'show_wallet')],
-        ]),
-      });
+      await ctx.reply(successMessage, { parse_mode: 'Markdown' });
+
+      await ctx.replyWithPhoto(
+        { source: fs.createReadStream(MENU_IMAGE) },
+        {
+          caption: buildMainMenuText(),
+          parse_mode: 'HTML',
+          ...mainMenuKeyboard(),
+        }
+      );
 
       // Log success with masked private key
       logger.info(

@@ -2,6 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { logger } from '../../utils/logger';
 import { getUserByTelegramId } from '../../services/user';
+import { sendPage } from '../../utils/telegram';
 import {
   getAllBalances,
   getChainBalance,
@@ -10,17 +11,6 @@ import {
 } from '../../services/deposit';
 import { updateUserProxyAddress } from '../../services/polymarket';
 import { decrypt } from '../../utils/encryption';
-
-// User state for deposit flow
-export const depositState = new Map<
-  string,
-  {
-    action: string;
-    chain?: string;
-    amount?: string;
-    timestamp: number;
-  }
->();
 
 /**
  * Shows deposit menu
@@ -40,7 +30,7 @@ export async function handleDepositMenu(ctx: Context): Promise<void> {
       '💡 *Minimum deposit:* $10\n' +
       '⚡ *Recommended:* Polygon (lowest fees)';
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🟣 Polygon (Recommended)', 'deposit_polygon')],
@@ -48,6 +38,7 @@ export async function handleDepositMenu(ctx: Context): Promise<void> {
         [Markup.button.callback('🟢 Solana', 'deposit_solana')],
         [Markup.button.callback('📊 Check All Balances', 'deposit_check_all')],
         [Markup.button.callback('« Back to Wallet', 'wallet_page')],
+        [Markup.button.callback('🏠 Main Menu',      'back_to_menu')],
       ]),
     }).catch((err: any) => {
       // Ignore "message is not modified" errors
@@ -81,15 +72,31 @@ export async function handleDepositChain(
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await ctx.editMessageText('❌ User not found. Use /start to create your wallet.', {
+      await sendPage(ctx, '❌ User not found. Use /start to create your wallet.', {
         parse_mode: 'Markdown',
       });
       return;
     }
 
     // Get address based on chain
-    const address =
-      chain === 'solana' ? user.solanaAddress || user.walletAddress : user.walletAddress;
+    let address: string;
+    if (chain === 'solana') {
+      if (!user.solanaAddress) {
+        await sendPage(ctx,
+          '❌ *Solana Wallet Not Set Up*\n\n' +
+          'Your Solana deposit address is not configured.\n\n' +
+          'Please use Polygon or Ethereum for deposits.',
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
+          }
+        );
+        return;
+      }
+      address = user.solanaAddress;
+    } else {
+      address = user.walletAddress;
+    }
 
     // Chain info
     const chainInfo = {
@@ -127,13 +134,14 @@ export async function handleDepositChain(
     message += `💡 *Minimum:* $10 USDC\n`;
     message += `🔍 [View on ${info.name} Explorer](${info.explorer}/address/${address})`;
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },
       ...Markup.inlineKeyboard([
         [Markup.button.callback('✅ I Sent Funds', `deposit_sent_${chain}`)],
         [Markup.button.callback('🔄 Check Balance', `deposit_balance_${chain}`)],
         [Markup.button.callback('« Back', 'deposit_menu')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     }).catch((err: any) => {
       // Ignore "message is not modified" errors
@@ -171,8 +179,16 @@ export async function handleCheckBalance(
       return;
     }
 
-    const address =
-      chain === 'solana' ? user.solanaAddress || user.walletAddress : user.walletAddress;
+    let address: string;
+    if (chain === 'solana') {
+      if (!user.solanaAddress) {
+        await ctx.reply('❌ Solana wallet not configured. Please use Polygon or Ethereum for deposits.');
+        return;
+      }
+      address = user.solanaAddress;
+    } else {
+      address = user.walletAddress;
+    }
 
     // Get balance
     const balance = await getChainBalance(chain, address);
@@ -201,8 +217,9 @@ export async function handleCheckBalance(
 
     buttons.push([Markup.button.callback('🔄 Refresh', `deposit_balance_${chain}`)]);
     buttons.push([Markup.button.callback('« Back', `deposit_${chain}`)]);
+    buttons.push([Markup.button.callback('🏠 Main Menu', 'back_to_menu')]);
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     }).catch((err: any) => {
@@ -215,7 +232,7 @@ export async function handleCheckBalance(
     logger.info(`Balance checked for ${chain}: ${balance.balance}`);
   } catch (error) {
     logger.error(`Error checking ${chain} balance:`, error);
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '❌ *Error Checking Balance*\n\n' +
       'Could not fetch balance from blockchain.\n\n' +
       'This might be a temporary network issue. Please try again.',
@@ -268,7 +285,7 @@ export async function handleCheckAllBalances(ctx: Context): Promise<void> {
       message += 'Select a chain above to deposit funds to Polymarket.';
     }
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🟣 Deposit from Polygon', 'deposit_polygon')],
@@ -276,13 +293,14 @@ export async function handleCheckAllBalances(ctx: Context): Promise<void> {
         [Markup.button.callback('🟢 Deposit from Solana', 'deposit_solana')],
         [Markup.button.callback('🔄 Refresh', 'deposit_check_all')],
         [Markup.button.callback('« Back', 'deposit_menu')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
 
     logger.info(`All balances shown to user: ${telegramId}`);
   } catch (error) {
     logger.error('Error checking all balances:', error);
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '❌ *Error Checking Balances*\n\n' +
       'Could not fetch balances from blockchains.\n\n' +
       'Please try again in a moment.',
@@ -318,7 +336,7 @@ export async function handleApproveDeposit(
 
     // Only Polygon supported for Polymarket deposit
     if (chain !== 'polygon') {
-      await ctx.editMessageText(
+      await sendPage(ctx,
         '⚠️ *Polymarket Only Supports Polygon*\n\n' +
         'To deposit to Polymarket, you need USDC on Polygon.\n\n' +
         'Please:\n' +
@@ -339,7 +357,7 @@ export async function handleApproveDeposit(
     const balanceNum = parseFloat(balance.balance);
 
     if (balanceNum < 10) {
-      await ctx.editMessageText(
+      await sendPage(ctx,
         '⚠️ *Insufficient Balance*\n\n' +
         `Minimum deposit is $10.\n` +
         `You have: ${formatBalance(balance.balance)}\n\n` +
@@ -363,11 +381,12 @@ export async function handleApproveDeposit(
     message += '⚡ *Powered by Relayer API*\n\n';
     message += '✅ Ready to proceed?';
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('✅ Yes, Deposit Now', `deposit_confirm_${chain}`)],
         [Markup.button.callback('❌ Cancel', `deposit_${chain}`)],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
 
@@ -401,7 +420,7 @@ export async function handleConfirmDeposit(
     }
 
     // Send processing message
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '⏳ *Processing Gasless Deposit*\n\n' +
       '🔥 Using Polymarket Relayer (No Gas Fee!)\n' +
       '1️⃣ Approving and depositing...\n' +
@@ -431,7 +450,7 @@ export async function handleConfirmDeposit(
         message += '✅ Transaction submitted via Relayer';
       }
 
-      await ctx.editMessageText(message, {
+      await sendPage(ctx, message, {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
         ...Markup.inlineKeyboard([
@@ -461,7 +480,7 @@ export async function handleConfirmDeposit(
     } catch (error: any) {
       logger.error('Error executing deposit:', error);
 
-      await ctx.editMessageText(
+      await sendPage(ctx,
         '❌ *Deposit Failed*\n\n' +
         'An error occurred while processing your deposit.\n\n' +
         `Error: ${error.message}\n\n` +

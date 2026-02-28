@@ -3,8 +3,17 @@ import { logger } from '../utils/logger';
 import { redisCache } from '../database/redis';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
-const CACHE_TTL = 180; // 3 minutes - shorter cache for more real-time data
+const CACHE_TTL = 120; // 2 minutes — short enough to feel real-time
 const SEARCH_CACHE_TTL = 120; // 2 minutes for search results
+
+/** Gamma API tag IDs for main categories */
+export const CATEGORY_TAG_IDS: Record<string, number> = {
+  'politics':    2,
+  'crypto':      21,
+  'sports':      1,
+  'business':    107,
+  'pop-culture': 596,
+};
 
 export interface Market {
   id: string;
@@ -44,6 +53,181 @@ export interface Category {
   slug: string;
   emoji: string;
   volume24hr: number;
+}
+
+// ─── Up/Down Markets ──────────────────────────────────────────────────────────
+
+/** Coin metadata used to recognise and label up/down markets. */
+const UPDOWN_COIN_MAP: Record<string, { symbol: string; name: string; emoji: string }> = {
+  'bitcoin':   { symbol: 'BTC',  name: 'Bitcoin',   emoji: '₿'  },
+  'ethereum':  { symbol: 'ETH',  name: 'Ethereum',  emoji: 'Ξ'  },
+  'solana':    { symbol: 'SOL',  name: 'Solana',    emoji: '◎'  },
+  'xrp':       { symbol: 'XRP',  name: 'XRP',       emoji: '✕'  },
+  'bnb':       { symbol: 'BNB',  name: 'BNB',       emoji: '🟡' },
+  'dogecoin':  { symbol: 'DOGE', name: 'Dogecoin',  emoji: '🐕' },
+  'cardano':   { symbol: 'ADA',  name: 'Cardano',   emoji: '💙' },
+  'avalanche':    { symbol: 'AVAX', name: 'Avalanche',    emoji: '🔺' },
+  'hyperliquid':  { symbol: 'HYPE', name: 'Hyperliquid',  emoji: '💧' },
+  'trump':        { symbol: 'TRUMP', name: 'TRUMP',       emoji: '🎯' },
+  'melania':      { symbol: 'MELANIA', name: 'Melania',   emoji: '💎' },
+};
+
+export interface UpDownMarket {
+  eventId:      string;
+  marketId:     string;   // Numeric Gamma market ID — used for trade deep links
+  conditionId:  string;   // CLOB condition ID — used for detail deep links
+  coin:         string;   // BTC
+  coinEmoji:    string;   // ₿
+  coinName:     string;   // Bitcoin
+  timeframe:    string;   // 5-Minute | 15-Minute | 1-Hour | 4-Hour | Daily | Weekly
+  startDate:    string;   // ISO date string
+  endDate:      string;   // ISO date string
+  upPrice:      number;   // probability of going Up  (0–1)
+  downPrice:    number;   // probability of going Down (0–1)
+  upTokenId:    string;   // CLOB token ID for Up outcome
+  downTokenId:  string;   // CLOB token ID for Down outcome
+  volume24hr:   number;
+  liquidity:    number;
+  slug:         string;
+}
+
+/** Sort order for timeframes (shorter = higher priority = shown first) */
+const TIMEFRAME_ORDER: Record<string, number> = {
+  '5-Minute':  1,
+  '15-Minute': 2,
+  '1-Hour':    3,
+  '4-Hour':    4,
+  'Daily':     5,
+  'Weekly':    6,
+};
+
+/**
+ * Fetches all active "Up or Down" crypto markets from Polymarket.
+ * Results are cached for 60 s (prices update frequently).
+ */
+export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
+  try {
+    const cacheKey = 'markets:updown:v8';
+    const cached = await redisCache.get<UpDownMarket[]>(cacheKey);
+    if (cached) return cached;
+
+    logger.info('Fetching crypto up/down markets');
+
+    // Two parallel fetches:
+    // 1. Top-200 by volume  → covers popular daily/hourly markets
+    // 2. Soonest-ending 100 → catches new 5-min/15-min markets that have near-zero volume
+    //    and are pushed off the top-200 list (endDate asc = currently-live short-term rounds)
+    const [volResp, shortResp] = await Promise.all([
+      axios.get(`${GAMMA_API_BASE}/events`, {
+        params: { active: true, closed: false, order: 'volume24hr', ascending: false, limit: 200, tag_id: 21 },
+        timeout: 15000,
+      }),
+      // startDate desc = most recently created events first → new 5-min/15-min rounds always appear here
+      axios.get(`${GAMMA_API_BASE}/events`, {
+        params: { active: true, closed: false, order: 'startDate', ascending: false, limit: 100, tag_id: 21 },
+        timeout: 15000,
+      }),
+    ]);
+
+    // Merge and deduplicate by event id
+    const seen = new Set<string>();
+    const merged = [...(Array.isArray(volResp.data) ? volResp.data : []), ...(Array.isArray(shortResp.data) ? shortResp.data : [])];
+    const events: any[] = merged.filter(e => {
+      const id = String(e.id);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    const markets: UpDownMarket[] = [];
+
+    const now = Date.now();
+
+    for (const event of events) {
+      const titleLower = (event.title ?? event.slug ?? '').toLowerCase();
+      const slugLower  = (event.slug ?? '').toLowerCase();
+      if (
+        !titleLower.includes('up or down') &&
+        !titleLower.includes('up-or-down') &&
+        !slugLower.includes('updown')
+      ) continue;
+
+      const market = (event.markets ?? [])[0];
+      if (!market?.conditionId || !market.active || market.closed) continue;
+
+      // Skip markets that have already ended
+      const endMs = new Date(market.endDate ?? event.endDate ?? 0).getTime();
+      if (endMs > 0 && endMs < now) continue;
+
+      // Parse JSON string fields safely
+      let outcomes: string[]  = [];
+      let prices:   string[]  = [];
+      let tokenIds: string[]  = [];
+      try {
+        outcomes = Array.isArray(market.outcomes)      ? market.outcomes      : JSON.parse(market.outcomes      ?? '[]');
+        prices   = Array.isArray(market.outcomePrices) ? market.outcomePrices : JSON.parse(market.outcomePrices ?? '[]');
+        tokenIds = Array.isArray(market.clobTokenIds)  ? market.clobTokenIds  : JSON.parse(market.clobTokenIds  ?? '[]');
+      } catch { continue; }
+
+      if (outcomes.length < 2 || prices.length < 2 || tokenIds.length < 2) continue;
+
+      // Detect coin from event title
+      let coinInfo: { symbol: string; name: string; emoji: string } | null = null;
+      for (const [key, info] of Object.entries(UPDOWN_COIN_MAP)) {
+        if (titleLower.includes(key)) { coinInfo = info; break; }
+      }
+      if (!coinInfo) continue;
+
+      // Detect timeframe from seriesSlug (e.g. "btc-up-or-down-daily", "btc-up-or-down-5m")
+      const seriesSlug = (event.seriesSlug ?? '').toLowerCase();
+      let timeframe = 'Daily';
+      // 15-Minute must be checked before 5-Minute to avoid '15min'.includes('5min') false-match
+      if      (seriesSlug.includes('15-minute') || seriesSlug.includes('15min') || seriesSlug.includes('-15m')) timeframe = '15-Minute';
+      else if (seriesSlug.includes('5-minute')  || seriesSlug.includes('5min')  || seriesSlug.includes('-5m'))  timeframe = '5-Minute';
+      else if (seriesSlug.includes('weekly'))                                                                     timeframe = 'Weekly';
+      else if (seriesSlug.includes('hourly') || seriesSlug.includes('-1h') || seriesSlug.includes('1-hour'))    timeframe = '1-Hour';
+      else if (seriesSlug.includes('-4h') || seriesSlug.includes('4-hour'))                                     timeframe = '4-Hour';
+
+      // Find Up/Down outcome indices
+      const upIdx   = outcomes.findIndex((o: string) => o.toLowerCase() === 'up');
+      const downIdx = outcomes.findIndex((o: string) => o.toLowerCase() === 'down');
+      if (upIdx < 0 || downIdx < 0) continue;
+
+      markets.push({
+        eventId:     String(event.id),
+        marketId:    String(market.id),
+        conditionId: market.conditionId,
+        coin:        coinInfo.symbol,
+        coinEmoji:   coinInfo.emoji,
+        coinName:    coinInfo.name,
+        timeframe,
+        startDate:   event.startDate ?? '',
+        endDate:     market.endDate ?? event.endDate ?? '',
+        upPrice:     parseFloat(prices[upIdx]   ?? '0.5'),
+        downPrice:   parseFloat(prices[downIdx] ?? '0.5'),
+        upTokenId:   tokenIds[upIdx]   ?? '',
+        downTokenId: tokenIds[downIdx] ?? '',
+        volume24hr:  event.volume24hr ?? 0,
+        liquidity:   event.liquidity  ?? 0,
+        slug:        event.slug ?? '',
+      });
+    }
+
+    // Sort: timeframe asc → coin asc → endDate asc (soonest = current active window first)
+    markets.sort((a, b) => {
+      const orderA = TIMEFRAME_ORDER[a.timeframe] ?? 99;
+      const orderB = TIMEFRAME_ORDER[b.timeframe] ?? 99;
+      if (orderA !== orderB) return orderA - orderB;
+      if (a.coin !== b.coin) return a.coin.localeCompare(b.coin);
+      return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
+    });
+
+    await redisCache.set(cacheKey, markets, 60); // 60 s — prices change frequently
+    logger.info(`Fetched ${markets.length} crypto up/down markets`);
+    return markets;
+  } catch (error) {
+    logger.error('Error fetching crypto up/down markets:', error);
+    return [];
+  }
 }
 
 /**
@@ -147,6 +331,45 @@ export async function getTopCategories(): Promise<Category[]> {
 }
 
 /**
+ * Gets trending events sorted by 24h volume from the Gamma API directly.
+ * Uses API-level ordering (order=volume24hr&ascending=false) for true trending.
+ */
+export async function getTrendingEvents(limit: number = 30): Promise<Event[]> {
+  try {
+    const cacheKey = `markets:trending:${limit}`;
+    const cached = await redisCache.get<Event[]>(cacheKey);
+    if (cached) {
+      logger.debug(`Returning ${cached.length} cached trending events`);
+      return cached;
+    }
+
+    logger.info(`Fetching top ${limit} trending events from Gamma API...`);
+
+    const response = await axios.get(`${GAMMA_API_BASE}/events`, {
+      params: {
+        active: true,
+        closed: false,
+        order: 'volume24hr',
+        ascending: false,
+        limit: Math.min(limit + 10, 50), // slight over-fetch to account for filter
+      },
+      timeout: 15000,
+    });
+
+    const events: Event[] = Array.isArray(response.data) ? response.data : [];
+    const result = filterAndSortEvents(events).slice(0, limit);
+    await redisCache.set(cacheKey, result, CACHE_TTL);
+
+    logger.info(`Fetched ${result.length} trending events`);
+    return result;
+  } catch (error) {
+    logger.error('Error fetching trending events:', error);
+    // Fall back to getTopEvents on error
+    return getTopEvents(limit);
+  }
+}
+
+/**
  * Gets top events by volume using events endpoint
  * Returns events instead of individual markets for better UX
  */
@@ -166,84 +389,62 @@ export async function getTopEvents(limit: number = 50): Promise<Event[]> {
       params: {
         active: true,
         closed: false,
-        limit: Math.min(limit * 2, 100),
+        order: 'volume24hr',
+        ascending: false,
+        limit: Math.min(limit + 10, 100),
       },
       timeout: 15000,
     });
 
-    const events: Event[] = response.data;
-
-    // Filter and sort events, and filter out non-tradeable markets
-    const sortedEvents = events
-      .filter(e => {
-        if (!e.volume24hr || e.volume24hr <= 0) return false;
-        if (!e.markets || !Array.isArray(e.markets) || e.markets.length === 0) return false;
-        return true;
-      })
-      .map(e => {
-        // Filter out markets that cannot be traded
-        const tradeableMarkets = e.markets.filter(m => {
-          // Must be active and not closed
-          if (!m.active || m.closed) return false;
-
-          // Must have outcomes (binary markets)
-          const outcomes = Array.isArray(m.outcomes) ? m.outcomes :
-                          typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : [];
-          if (!outcomes || outcomes.length !== 2) return false;
-
-          // Must have outcome prices
-          const prices = Array.isArray(m.outcomePrices) ? m.outcomePrices :
-                        typeof m.outcomePrices === 'string' ? JSON.parse(m.outcomePrices) : [];
-          if (!prices || prices.length !== 2) return false;
-
-          // Prices must be valid numbers between 0 and 1
-          const price0 = parseFloat(prices[0]);
-          const price1 = parseFloat(prices[1]);
-          if (isNaN(price0) || isNaN(price1)) return false;
-          if (price0 < 0 || price0 > 1 || price1 < 0 || price1 > 1) return false;
-
-          // Must have conditionId for CLOB API trading
-          const conditionId = (m as any).conditionId || (m as any).condition_id;
-          if (!conditionId) return false;
-
-          // Must have valid clobTokenIds
-          try {
-            let clobTokenIds: any[] = [];
-            if ((m as any).clobTokenIds) {
-              if (Array.isArray((m as any).clobTokenIds)) {
-                clobTokenIds = (m as any).clobTokenIds;
-              } else if (typeof (m as any).clobTokenIds === 'string') {
-                clobTokenIds = JSON.parse((m as any).clobTokenIds);
-              }
-            }
-
-            // Must have 2 valid token IDs
-            if (clobTokenIds.length !== 2 || !clobTokenIds[0] || !clobTokenIds[1]) {
-              return false;
-            }
-          } catch (e) {
-            // If parsing fails, filter out this market
-            return false;
-          }
-
-          return true;
-        });
-
-        // Return event with filtered markets
-        return { ...e, markets: tradeableMarkets };
-      })
-      .filter(e => e.markets.length > 0) // Remove events with no tradeable markets
-      .sort((a, b) => (b.volume24hr || 0) - (a.volume24hr || 0))
-      .slice(0, limit);
+    const events: Event[] = Array.isArray(response.data) ? response.data : [];
+    const sortedEvents = filterAndSortEvents(events).slice(0, limit);
 
     await redisCache.set(cacheKey, sortedEvents, CACHE_TTL);
-
     logger.info(`Fetched ${sortedEvents.length} top events`);
     return sortedEvents;
   } catch (error) {
     logger.error('Error fetching top events:', error);
     throw new Error('Failed to fetch top events');
   }
+}
+
+/**
+ * Shared helper: filters out non-tradeable markets and sorts events by 24h volume.
+ */
+function filterAndSortEvents(events: Event[]): Event[] {
+  return events
+    .filter(e => e.volume24hr > 0 && Array.isArray(e.markets) && e.markets.length > 0)
+    .map(e => {
+      const tradeableMarkets = e.markets.filter(m => {
+        if (!m.active || m.closed) return false;
+        try {
+          const outcomes = Array.isArray(m.outcomes) ? m.outcomes :
+            (typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : []);
+          if (outcomes.length !== 2) return false;
+
+          const prices = Array.isArray(m.outcomePrices) ? m.outcomePrices :
+            (typeof m.outcomePrices === 'string' ? JSON.parse(m.outcomePrices) : []);
+          if (prices.length !== 2) return false;
+
+          const p0 = parseFloat(prices[0]);
+          const p1 = parseFloat(prices[1]);
+          if (isNaN(p0) || isNaN(p1) || p0 < 0 || p0 > 1 || p1 < 0 || p1 > 1) return false;
+
+          if (!(m as any).conditionId && !(m as any).condition_id) return false;
+
+          const raw = (m as any).clobTokenIds;
+          const ids: any[] = Array.isArray(raw) ? raw :
+            (typeof raw === 'string' ? JSON.parse(raw) : []);
+          if (ids.length !== 2 || !ids[0] || !ids[1]) return false;
+        } catch {
+          return false;
+        }
+        return true;
+      });
+      return { ...e, markets: tradeableMarkets };
+    })
+    .filter(e => e.markets.length > 0)
+    .sort((a, b) => (b.volume24hr || 0) - (a.volume24hr || 0));
 }
 
 /**
@@ -346,102 +547,50 @@ export async function getTopMarkets(limit: number = 50): Promise<Market[]> {
 }
 
 /**
- * Gets events by category using events endpoint
- * Returns events instead of individual markets for better UX
+ * Gets events by category using the Gamma API's tag_id parameter.
+ * Falls back to keyword filtering if tag_id is unknown.
  */
-export async function getEventsByCategory(category: string, limit: number = 50): Promise<Event[]> {
+export async function getEventsByCategory(category: string, limit: number = 30): Promise<Event[]> {
   try {
     const cacheKey = `events:category:${category}:${limit}`;
     const cached = await redisCache.get<Event[]>(cacheKey);
-
     if (cached) {
       logger.debug(`Returning ${cached.length} cached events for category ${category}`);
       return cached;
     }
 
-    logger.info(`Fetching events for category: ${category}`);
+    logger.info(`Fetching events for category: ${category} (tag_id=${CATEGORY_TAG_IDS[category] ?? 'keyword'})`);
+
+    const tagId = CATEGORY_TAG_IDS[category];
+    const params: Record<string, any> = {
+      active: true,
+      closed: false,
+      order: 'volume24hr',
+      ascending: false,
+      limit: Math.min(limit + 15, 50),
+    };
+
+    if (tagId) {
+      params.tag_id = tagId;
+    }
 
     const response = await axios.get(`${GAMMA_API_BASE}/events`, {
-      params: {
-        active: true,
-        closed: false,
-        limit: 100,
-      },
+      params,
       timeout: 15000,
     });
 
-    const events: Event[] = response.data;
+    let events: Event[] = Array.isArray(response.data) ? response.data : [];
 
-    // Filter events based on category keywords
-    const categoryKeywords = getCategoryKeywords(category);
-    const filteredEvents = events.filter(event => {
-      const searchText = `${event.title} ${event.slug} ${event.description || ''}`.toLowerCase();
-      return categoryKeywords.some(keyword => searchText.includes(keyword.toLowerCase()));
-    });
+    // Keyword fallback for unknown categories
+    if (!tagId) {
+      const keywords = getCategoryKeywords(category);
+      events = events.filter(event => {
+        const searchText = `${event.title} ${event.slug} ${event.description || ''}`.toLowerCase();
+        return keywords.some(kw => searchText.includes(kw.toLowerCase()));
+      });
+    }
 
-    // Sort by volume and filter out non-tradeable markets
-    const sortedEvents = filteredEvents
-      .filter(e => {
-        if (!e.volume24hr || e.volume24hr <= 0) return false;
-        if (!e.markets || !Array.isArray(e.markets) || e.markets.length === 0) return false;
-        return true;
-      })
-      .map(e => {
-        // Filter out markets that cannot be traded
-        const tradeableMarkets = e.markets.filter(m => {
-          // Must be active and not closed
-          if (!m.active || m.closed) return false;
-
-          // Must have outcomes (binary markets)
-          const outcomes = Array.isArray(m.outcomes) ? m.outcomes :
-                          typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : [];
-          if (!outcomes || outcomes.length !== 2) return false;
-
-          // Must have outcome prices
-          const prices = Array.isArray(m.outcomePrices) ? m.outcomePrices :
-                        typeof m.outcomePrices === 'string' ? JSON.parse(m.outcomePrices) : [];
-          if (!prices || prices.length !== 2) return false;
-
-          // Prices must be valid numbers between 0 and 1
-          const price0 = parseFloat(prices[0]);
-          const price1 = parseFloat(prices[1]);
-          if (isNaN(price0) || isNaN(price1)) return false;
-          if (price0 < 0 || price0 > 1 || price1 < 0 || price1 > 1) return false;
-
-          // Must have conditionId for CLOB API trading
-          const conditionId = (m as any).conditionId || (m as any).condition_id;
-          if (!conditionId) return false;
-
-          // Must have valid clobTokenIds
-          try {
-            let clobTokenIds: any[] = [];
-            if ((m as any).clobTokenIds) {
-              if (Array.isArray((m as any).clobTokenIds)) {
-                clobTokenIds = (m as any).clobTokenIds;
-              } else if (typeof (m as any).clobTokenIds === 'string') {
-                clobTokenIds = JSON.parse((m as any).clobTokenIds);
-              }
-            }
-
-            // Must have 2 valid token IDs
-            if (clobTokenIds.length !== 2 || !clobTokenIds[0] || !clobTokenIds[1]) {
-              return false;
-            }
-          } catch (e) {
-            // If parsing fails, filter out this market
-            return false;
-          }
-
-          return true;
-        });
-
-        // Return event with filtered markets
-        return { ...e, markets: tradeableMarkets };
-      })
-      .filter(e => e.markets.length > 0) // Remove events with no tradeable markets
-      .sort((a, b) => (b.volume24hr || 0) - (a.volume24hr || 0))
-      .slice(0, limit);
-
+    const sortedEvents = filterAndSortEvents(events).slice(0, limit);
     await redisCache.set(cacheKey, sortedEvents, CACHE_TTL);
 
     logger.info(`Fetched ${sortedEvents.length} events for category ${category}`);
@@ -667,6 +816,33 @@ export async function getMarketDetails(marketId: string): Promise<Market | null>
 }
 
 /**
+ * Fetches a single event by its slug.
+ * Returns { id, title, slug, markets, ... } or null if not found.
+ */
+export async function getEventBySlug(slug: string): Promise<Event | null> {
+  try {
+    const cacheKey = `event:slug:${slug}`;
+    const cached = await redisCache.get<Event>(cacheKey);
+    if (cached) return cached;
+
+    const response = await axios.get(`${GAMMA_API_BASE}/events`, {
+      params: { slug },
+      timeout: 10000,
+    });
+
+    const data = response.data;
+    const event: Event | null = Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+    if (!event) return null;
+
+    await redisCache.set(cacheKey, event, CACHE_TTL);
+    return event;
+  } catch (error) {
+    logger.error(`Error fetching event by slug "${slug}":`, error);
+    return null;
+  }
+}
+
+/**
  * Formats volume for display
  */
 export function formatVolume(volume: number): string {
@@ -829,5 +1005,47 @@ export async function searchMarkets(keyword: string): Promise<Market[]> {
   } catch (error) {
     logger.error(`Error searching markets for "${keyword}":`, error);
     throw new Error('Failed to search markets');
+  }
+}
+
+/**
+ * Search active events by keyword. Returns up to `limit` Event objects
+ * sorted by 24h volume, cached for 2 minutes.
+ */
+export async function searchEventsByKeyword(keyword: string, limit = 8): Promise<Event[]> {
+  try {
+    const normalized = keyword.toLowerCase().trim();
+    if (!normalized || normalized.length < 2) return [];
+
+    // v2 cache key (busts stale empty caches from previous search approach)
+    const cacheKey = `events:kw:v2:${normalized}`;
+    const cached = await redisCache.get<Event[]>(cacheKey);
+    if (cached) return cached;
+
+    // Use the dedicated /public-search endpoint — server-side keyword matching
+    const response = await axios.get(`${GAMMA_API_BASE}/public-search`, {
+      params: {
+        q: normalized,
+        events_status: 'active',
+        limit_per_type: Math.max(limit, 10),
+        search_tags: false,
+        search_profiles: false,
+      },
+      timeout: 15000,
+    });
+
+    const rawEvents: any[] = response.data?.events ?? [];
+
+    const sorted = rawEvents
+      .filter((e: any) => Array.isArray(e.markets) && e.markets.length > 0)
+      .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0))
+      .slice(0, limit) as Event[];
+
+    await redisCache.set(cacheKey, sorted, 2 * 60);
+    logger.info(`[search] "${keyword}" → ${sorted.length} events via /public-search`);
+    return sorted;
+  } catch (error) {
+    logger.error(`[search] Error searching events for "${keyword}":`, error);
+    return [];
   }
 }

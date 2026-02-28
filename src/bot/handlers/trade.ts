@@ -1,6 +1,7 @@
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { logger } from '../../utils/logger';
+import { COMMISSION_RATE } from '../../services/commission';
 
 // Trade state management
 export const tradeState = new Map<string, {
@@ -11,6 +12,14 @@ export const tradeState = new Map<string, {
   price: number;
   timestamp: number;
 }>();
+
+// R6: Periodic cleanup of abandoned state entries (every 30 min, remove entries > 10 min old)
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [key, state] of tradeState.entries()) {
+    if (state.timestamp < cutoff) tradeState.delete(key);
+  }
+}, 30 * 60 * 1000);
 
 /**
  * Handles trade deep link flow
@@ -62,14 +71,23 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
     } else {
       // Direct trade with specific amount
       const outcome = parts[1] as 'yes' | 'no';
-      const amount = parseInt(parts[2] || '25', 10);
 
       if (outcome !== 'yes' && outcome !== 'no') {
         await ctx.reply('❌ Invalid outcome.');
         return;
       }
 
-      if (amount < 1 || amount > 10000) {
+      // 'default' token: fetch user's current defaultTradeAmount from DB
+      let amount: number;
+      if (!parts[2] || parts[2] === 'default') {
+        const { getUserByTelegramId } = await import('../../services/user');
+        const user = await getUserByTelegramId(telegramId);
+        amount = user?.defaultTradeAmount ?? 25;
+      } else {
+        amount = parseInt(parts[2], 10);
+      }
+
+      if (isNaN(amount) || amount < 1 || amount > 10000) {
         await ctx.reply('❌ Invalid amount. Must be between $1 and $10,000.');
         return;
       }
@@ -244,13 +262,17 @@ async function handleLargeTradeConfirmation(
     const priceRaw = parseFloat(outcomePrices[outcomeIndex] || '0.5');
     const price = isNaN(priceRaw) ? 0.5 : priceRaw;
     const priceDisplay = (price * 100).toFixed(1);
-    const estimatedShares = Math.floor(amount / price);
+    const commissionAmt = amount * COMMISSION_RATE;
+    const tradeAmount = amount - commissionAmt;
+    const estimatedShares = Math.floor(tradeAmount / price);
 
     const message =
       '⚠️ *Confirm Large Trade*\n\n' +
       `Market: ${market.question}\n` +
       `Outcome: ${outcome.toUpperCase()} (${priceDisplay}¢)\n` +
-      `Amount: $${amount}\n` +
+      `Amount: $${amount.toFixed(2)}\n` +
+      `Platform fee (1%): -$${commissionAmt.toFixed(2)}\n` +
+      `Trade amount: $${tradeAmount.toFixed(2)}\n` +
       `Estimated Shares: ~${estimatedShares}\n\n` +
       'This is a large trade. Please confirm:';
 
@@ -339,70 +361,157 @@ async function executeTrade(
     );
 
     const { ethers } = await import('ethers');
-    const provider = new ethers.providers.JsonRpcProvider('https://polygon-bor-rpc.publicnode.com');
 
-    // USDC contract on Polygon
+    // Try multiple RPCs in order — use the first responsive one
+    const RPC_LIST = [
+      'https://polygon-rpc.com',
+      'https://rpc-mainnet.matic.network',
+      'https://polygon-bor-rpc.publicnode.com',
+    ];
+    let provider: any;
+    for (const rpcUrl of RPC_LIST) {
+      try {
+        const p = new ethers.providers.JsonRpcProvider(rpcUrl);
+        await Promise.race([
+          p.getBlockNumber(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('rpc timeout')), 4000)),
+        ]);
+        provider = p;
+        break;
+      } catch { /* try next */ }
+    }
+    if (!provider) provider = new ethers.providers.JsonRpcProvider('https://polygon-bor-rpc.publicnode.com');
+
+    // USDC.e contract on Polygon
     const usdcAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-    const usdcAbi = ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)'];
+    const usdcAbi = ['function balanceOf(address) view returns (uint256)'];
     const usdcContract = new ethers.Contract(usdcAddress, usdcAbi, provider);
 
     const balance = await usdcContract.balanceOf(user.polymarketProxyAddress);
-    const decimals = await usdcContract.decimals();
-    const balanceUSD = parseFloat(ethers.utils.formatUnits(balance, decimals));
+    const balanceUSD = parseFloat(ethers.utils.formatUnits(balance, 6)); // USDC.e has 6 decimals
 
     if (balanceUSD < amount) {
+      if (balanceUSD < 1) {
+        // Not enough even for the minimum trade — only deposit option makes sense
+        await ctx.telegram.editMessageText(
+          ctx.chat!.id,
+          progressMsg.message_id,
+          undefined,
+          `❌ *Insufficient Balance*\n\n` +
+          `Your balance: *$${balanceUSD.toFixed(2)}*\n` +
+          `A minimum of $1 is required to trade.\n\n` +
+          `Please deposit funds to continue.`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: Markup.inlineKeyboard([
+              [Markup.button.callback('💰 Deposit', 'deposit_menu')],
+              [Markup.button.callback('💼 My Wallet', 'wallet_page')],
+              [Markup.button.callback('« Back to Markets', 'show_categories')],
+            ]).reply_markup,
+          }
+        );
+      } else {
+        // Has some balance — save state and let user enter a custom amount
+        const outcomeIndex = outcome === 'yes' ? 0 : 1;
+        let outcomePricesArr: string[] = ['0.5', '0.5'];
+        try {
+          outcomePricesArr = Array.isArray(market.outcomePrices)
+            ? market.outcomePrices
+            : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
+        } catch { /* keep defaults */ }
+        const price = parseFloat(outcomePricesArr[outcomeIndex] ?? '0.5');
+
+        tradeState.set(telegramId, {
+          marketId,
+          marketQuestion: market.question || 'Unknown Market',
+          outcome,
+          outcomeIndex,
+          price,
+          timestamp: Date.now(),
+        });
+
+        const maxAmount = Math.floor(balanceUSD);
+        await ctx.telegram.editMessageText(
+          ctx.chat!.id,
+          progressMsg.message_id,
+          undefined,
+          `⚠️ *Insufficient Balance*\n\n` +
+          `Your balance: *$${balanceUSD.toFixed(2)}*\n` +
+          `Default amount: $${amount.toFixed(2)}\n\n` +
+          `Enter a smaller amount within your balance to continue:\n` +
+          `Example: \`${Math.max(1, maxAmount)}\`\n\n` +
+          `⚠️ Min: $1 · Max: $${maxAmount}`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: Markup.inlineKeyboard([
+              [Markup.button.callback('❌ Cancel', 'trade_cancel')],
+            ]).reply_markup,
+          }
+        );
+      }
+      return;
+    }
+
+    // Step 4: Ensure trading approvals are set (on-chain check, no-op if already approved)
+    await ctx.telegram.editMessageText(
+      ctx.chat!.id,
+      progressMsg.message_id,
+      undefined,
+      '⏳ *Step 3/5:* Checking trading approvals...'
+    );
+
+    const { enableTrading } = await import('../../services/deposit');
+    const enableResult = await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress);
+
+    if (enableResult.success && !enableResult.alreadyEnabled) {
+      // Update DB flag so next check is skipped
+      const { prisma } = await import('../../database/prisma');
+      await prisma.user.update({ where: { id: user.id }, data: { tradingEnabled: true } }).catch(() => {});
+      logger.info(`Trading approvals confirmed for user: ${user.id}`);
+    }
+    if (!enableResult.success) {
+      logger.warn(`[trade] Could not verify trading approvals for user ${user.id} — proceeding anyway`);
+    }
+
+    // Calculate commission and trade amount (commission collected after successful trade)
+    const { config } = await import('../../config');
+    const { transferCommission, COMMISSION_RATE } = await import('../../services/commission');
+    const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(6));
+    const tradeAmount = parseFloat((amount - commissionAmt).toFixed(6));
+
+    // CLOB requires minimum $1.00 for marketable BUY orders — check after commission deduction
+    if (tradeAmount < 1.0) {
+      const minRequired = Math.ceil((1.0 / (1 - COMMISSION_RATE)) * 100) / 100; // e.g. $1.02
+      const oi = outcome === 'yes' ? 0 : 1;
+      let pricesArr: string[] = ['0.5', '0.5'];
+      try {
+        pricesArr = Array.isArray(market.outcomePrices)
+          ? market.outcomePrices
+          : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
+      } catch { /* keep defaults */ }
+      tradeState.set(telegramId, {
+        marketId,
+        marketQuestion: market.question || 'Unknown Market',
+        outcome,
+        outcomeIndex: oi,
+        price: parseFloat(pricesArr[oi] ?? '0.5'),
+        timestamp: Date.now(),
+      });
       await ctx.telegram.editMessageText(
-        ctx.chat!.id,
-        progressMsg.message_id,
-        undefined,
-        `❌ *Insufficient Balance*\n\n` +
-        `Your balance: $${balanceUSD.toFixed(2)}\n` +
-        `Required: $${amount.toFixed(2)}\n\n` +
-        `Please deposit more funds to continue.`,
+        ctx.chat!.id, progressMsg.message_id, undefined,
+        `⚠️ *Minimum Trade Amount*\n\n` +
+        `After the ${(COMMISSION_RATE * 100).toFixed(0)}% fee, CLOB requires a minimum of $1.00.\n\n` +
+        `Entered: $${amount.toFixed(2)} → Trade amount: $${tradeAmount.toFixed(2)}\n\n` +
+        `Please enter at least *$${minRequired.toFixed(2)}*:`,
         {
           parse_mode: 'Markdown',
-          reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback('💼 Go to Wallet', 'wallet_page')],
-            [Markup.button.callback('💰 Deposit Now', 'deposit_menu')],
-            [Markup.button.callback('« Back to Markets', 'show_categories')],
-          ]).reply_markup,
+          reply_markup: Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'trade_cancel')]]).reply_markup,
         }
       );
       return;
     }
 
-    // Step 4: Check and enable trading if needed (for existing users)
-    if (!user.tradingEnabled) {
-      await ctx.telegram.editMessageText(
-        ctx.chat!.id,
-        progressMsg.message_id,
-        undefined,
-        '⏳ *Step 3/5:* Enabling trading (one-time)...'
-      );
-
-      const { enableTrading } = await import('../../services/deposit');
-      const enableResult = await enableTrading(user.encryptedPrivateKey);
-
-      if (enableResult.success) {
-        // Update database
-        const { prisma } = await import('../../database/prisma');
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { tradingEnabled: true },
-        });
-        logger.info(`Trading enabled for existing user: ${user.id}`);
-
-        // Wait for blockchain confirmation before proceeding
-        // This ensures Polymarket API recognizes the approval
-        logger.info('Waiting 8 seconds for blockchain confirmation...');
-        await new Promise(resolve => setTimeout(resolve, 8000));
-        logger.info('Blockchain confirmation wait complete, proceeding with order...');
-      } else {
-        logger.warn(`Could not enable trading for user ${user.id} - will retry next time`);
-      }
-    }
-
-    // Step 5: Create CLOB client
+    // Step 4: Create CLOB client
     await ctx.telegram.editMessageText(
       ctx.chat!.id,
       progressMsg.message_id,
@@ -410,259 +519,216 @@ async function executeTrade(
       '⏳ *Step 4/5:* Connecting to exchange...'
     );
 
-    const { ClobClient } = await import('@polymarket/clob-client');
+    const { ClobClient, Side } = await import('@polymarket/clob-client');
     const { Wallet } = await import('@ethersproject/wallet');
-    const { config } = await import('../../config');
 
     const wallet = new Wallet(privateKey);
     const clobClient = new ClobClient(
       config.polymarket.host,
       config.polymarket.chainId,
       wallet,
-      {
-        key: apiKey,
-        secret: apiSecret,
-        passphrase: passphrase,
-      },
-      2, // Signature type 2 for GNOSIS_SAFE (Polymarket proxy wallet)
-      user.polymarketProxyAddress // Funder address (proxy wallet, not EOA)
+      { key: apiKey, secret: apiSecret, passphrase },
+      2, // signatureType=2 GNOSIS_SAFE — proxy wallet
+      user.polymarketProxyAddress
     );
 
-    // Step 6: Fetch latest market data and validate
+    // Step 5: Resolve token ID, tick size, and negRisk from market data
     await ctx.telegram.editMessageText(
       ctx.chat!.id,
       progressMsg.message_id,
       undefined,
-      '⏳ *Step 5/6:* Preparing order...'
+      '⏳ *Step 5/5:* Preparing order...'
     );
 
-    // Get token ID for the outcome
-    // Try different field names based on API source
-    let tokenId;
+    const outcomeIdx = outcome === 'yes' ? 0 : 1;
+    let tokenId: string | undefined;
+    let tickSize = '0.01';      // safe default; will be fetched from CLOB
+    let isNegRisk = !!(market.negRisk || market.neg_risk);
 
-    logger.info(`Market data for ${marketId}:`, {
-      hasTokens: !!market.tokens,
-      hasClobTokenIds: !!market.clobTokenIds,
-      hasConditionId: !!market.conditionId,
-      hasCondition_id: !!market.condition_id,
-      conditionIdValue: market.conditionId || market.condition_id
-    });
-
+    // Extract token ID from Gamma API response (clobTokenIds field)
     if (market.tokens && Array.isArray(market.tokens)) {
-      tokenId = market.tokens[outcome === 'yes' ? 0 : 1]?.token_id;
+      tokenId = market.tokens[outcomeIdx]?.token_id;
     } else if (market.clobTokenIds && Array.isArray(market.clobTokenIds)) {
-      tokenId = market.clobTokenIds[outcome === 'yes' ? 0 : 1];
+      tokenId = market.clobTokenIds[outcomeIdx];
     }
 
-    // If token ID not found yet, try fetching from CLOB API
-    if (!tokenId) {
-      try {
-        // Try with conditionId first (CLOB API uses conditionId, not marketId)
-        const conditionId = market.conditionId || market.condition_id;
-        const idToTry = conditionId || marketId;
+    // Always fetch from CLOB to get tick size + negRisk; also resolves missing tokenId
+    try {
+      const conditionId = market.conditionId || market.condition_id;
+      const idToTry = conditionId || marketId;
+      logger.info(`[trade] Fetching CLOB market: ${idToTry}`);
 
-        logger.info(`Fetching token ID from CLOB - marketId: ${marketId}, conditionId: ${conditionId}, using: ${idToTry}`);
+      const clobResp = await axios.get(`https://clob.polymarket.com/markets/${idToTry}`, { timeout: 10000 });
+      const cm = clobResp.data;
 
-        const clobResponse = await axios.get(`https://clob.polymarket.com/markets/${idToTry}`, {
-          timeout: 10000,
-        });
-        const clobMarket = clobResponse.data;
-        tokenId = clobMarket.tokens?.[outcome === 'yes' ? 0 : 1]?.token_id;
+      if (!tokenId) tokenId = cm.tokens?.[outcomeIdx]?.token_id;
+      if (cm.minimum_tick_size) tickSize = String(cm.minimum_tick_size);
+      if (cm.neg_risk !== undefined) isNegRisk = !!cm.neg_risk;
 
-        // If still not found and we haven't tried marketId yet, try that as fallback
-        if (!tokenId && conditionId && conditionId !== marketId) {
-          const clobResponse2 = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, {
-            timeout: 10000,
-          });
-          const clobMarket2 = clobResponse2.data;
-          tokenId = clobMarket2.tokens?.[outcome === 'yes' ? 0 : 1]?.token_id;
-        }
-      } catch (err) {
-        logger.error('Error fetching CLOB market for token ID:', err);
+      // Last-resort: try with raw marketId
+      if (!tokenId && conditionId && conditionId !== marketId) {
+        const fb = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+        if (!tokenId) tokenId = fb.data.tokens?.[outcomeIdx]?.token_id;
+        if (fb.data.minimum_tick_size) tickSize = String(fb.data.minimum_tick_size);
       }
+    } catch (err) {
+      logger.error('[trade] Error fetching CLOB market data:', err);
     }
 
     if (!tokenId) {
       await ctx.telegram.editMessageText(
-        ctx.chat!.id,
-        progressMsg.message_id,
-        undefined,
-        '❌ *Market Not Available for Trading*\n\n' +
-        'This market cannot be traded at the moment.\n\n' +
-        'Possible reasons:\n' +
-        '• Market is not yet active\n' +
-        '• Market has been closed\n' +
-        '• Trading is temporarily disabled\n\n' +
-        'Please try a different market.',
-        {
-          parse_mode: 'Markdown',
-          reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback('« Back to Markets', 'show_categories')],
-          ]).reply_markup,
-        }
+        ctx.chat!.id, progressMsg.message_id, undefined,
+        '❌ *Market Not Available for Trading*\n\nThis market cannot be traded at the moment.',
+        { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Back to Markets', 'show_categories')]]).reply_markup }
       );
       return;
     }
 
-    // Check if market is active
     if (!market.active || market.closed) {
       await ctx.telegram.editMessageText(
-        ctx.chat!.id,
-        progressMsg.message_id,
-        undefined,
-        '❌ *Market Closed*\n\n' +
-        'This market is no longer accepting trades.',
-        {
-          parse_mode: 'Markdown',
-        }
+        ctx.chat!.id, progressMsg.message_id, undefined,
+        '❌ *Market Closed*\n\nThis market is no longer accepting trades.',
+        { parse_mode: 'Markdown' }
       );
       return;
     }
 
-    // Get current order book to determine best price
-    const orderBook = await clobClient.getOrderBook(tokenId);
+    // Read user's slippage tolerance (default 1%)
+    const slippagePct  = user.slippageTolerance ?? 1.0;
+    const slippageMult = 1 + slippagePct / 100;
 
-    // For buying, we look at asks (sell orders)
-    const asks = orderBook.asks || [];
-
-    if (asks.length === 0) {
-      throw new Error('No liquidity available for this outcome');
-    }
-
-    // Calculate price from market (in cents)
-    const outcomeIndex = outcome === 'yes' ? 0 : 1;
-    const marketPriceRaw = parseFloat(market.outcomePrices?.[outcomeIndex] || '0.5');
+    // Calculate market price and snap worst-case price to tick size
+    const marketPriceRaw = parseFloat(
+      (Array.isArray(market.outcomePrices) ? market.outcomePrices[outcomeIdx] : null) || '0.5'
+    );
     const marketPrice = isNaN(marketPriceRaw) ? 0.5 : marketPriceRaw;
 
-    // Add 2% slippage tolerance
-    const priceWithSlippage = marketPrice * 1.02;
-    const price = Math.min(priceWithSlippage, 0.99); // Cap at 99 cents
-
-    // Calculate size (shares to buy)
-    const size = amount / price;
-
-    // Step 7: Create and place order
-    await ctx.telegram.editMessageText(
-      ctx.chat!.id,
-      progressMsg.message_id,
-      undefined,
-      '⏳ *Step 6/6:* Executing trade...'
+    // Worst-case price = market price + user slippage%, snapped to tick size, capped at 0.99
+    const tick = parseFloat(tickSize);
+    const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
+    const worstPrice = parseFloat(
+      Math.min(Math.round((marketPrice * slippageMult) / tick) * tick, 0.99).toFixed(decimals)
     );
 
-    // Create market buy order
-    const orderArgs = {
-      tokenID: tokenId,
-      price: price,
-      size: size,
-      side: 0, // 0 = BUY, 1 = SELL
-      feeRateBps: 0,
-    } as any;
+    // Estimated shares (for display only — FAK fills whatever is available at the price)
+    const estimatedSize = parseFloat((tradeAmount / worstPrice).toFixed(4));
 
-    const signedOrder = await clobClient.createOrder(orderArgs);
-    const orderResponse = await clobClient.postOrder(signedOrder);
+    // Build order options
+    const orderOptions: any = {};
+    if (tickSize)   orderOptions.tickSize = tickSize as any;
+    if (isNegRisk)  orderOptions.negRisk  = isNegRisk;
+
+    // FAK market order — executes immediately against best available asks up to worstPrice
+    // amount = USD to spend (tradeAmount after commission deduction)
+    const { OrderType } = await import('@polymarket/clob-client');
+
+    logger.info(`[trade] Placing FAK BUY: ~${estimatedSize} shares of ${outcome.toUpperCase()} tokenId=${tokenId.substring(0,16)}... maxPrice=${worstPrice} slippage=${slippagePct}% tickSize=${tickSize} negRisk=${isNegRisk}`);
+
+    const orderResponse = await clobClient.createAndPostMarketOrder(
+      { tokenID: tokenId, side: Side.BUY, amount: tradeAmount, price: worstPrice } as any,
+      Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
+      OrderType.FAK
+    );
 
     if (!orderResponse.success || !orderResponse.orderID) {
-      const errorMsg = orderResponse.errorMsg || 'Order placement failed';
+      const errMsg = orderResponse.errorMsg || (orderResponse as any).error || 'Order placement failed';
+      logger.error(`[trade] CLOB rejected order for user ${telegramId}: ${errMsg}`);
 
-      // Handle specific error cases
-      if (errorMsg.includes('balance') || errorMsg.includes('allowance')) {
+      // User-friendly messages for known CLOB errors
+      if (errMsg.includes('balance') || errMsg.includes('allowance')) {
         await ctx.telegram.editMessageText(
-          ctx.chat!.id,
-          progressMsg.message_id,
-          undefined,
-          '❌ *Insufficient Balance*\n\n' +
-          'You need to deposit USDC to your Polymarket account first.\n\n' +
-          '*How to deposit:*\n' +
-          '1. Go to Wallet → Deposit\n' +
-          '2. Send USDC to your address\n' +
-          '3. Click "I sent funds" to approve\n' +
-          '4. Wait for confirmation\n\n' +
-          'Then you can trade! 🚀',
-          {
-            parse_mode: 'Markdown',
-            reply_markup: Markup.inlineKeyboard([
-              [Markup.button.callback('💰 Deposit Now', 'deposit_menu')],
-              [Markup.button.callback('💼 Go to Wallet', 'wallet_page')],
-              [Markup.button.callback('« Back to Markets', 'show_categories')],
-            ]).reply_markup,
-          }
+          ctx.chat!.id, progressMsg.message_id, undefined,
+          '❌ *Insufficient Balance*\n\nYou need USDC.e in your Polymarket proxy wallet.\n\nGo to 💼 My Wallet → Deposit to add funds.',
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('💰 Deposit Now', 'deposit_menu')], [Markup.button.callback('« Back', 'show_categories')]]).reply_markup }
         );
         return;
       }
+      if (errMsg.includes('no orders found') || errMsg.includes('liquidity') || errMsg.includes('FOK') || errMsg.includes('FAK')) {
+        await ctx.telegram.editMessageText(
+          ctx.chat!.id, progressMsg.message_id, undefined,
+          `❌ *No Liquidity*\n\nNo sellers available within the current slippage range (${slippagePct}%).\n\n• Increase slippage in ⚙️ Settings\n• Or try again shortly`,
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')]]).reply_markup }
+        );
+        return;
+      }
+      if (errMsg.includes('lower than the minimum') || (errMsg.includes('Size') && errMsg.includes('minimum'))) {
+        const minMatch = errMsg.match(/minimum[:\s]+(\d+(?:\.\d+)?)/i);
+        const minShares = minMatch ? parseFloat(minMatch[1]) : 5;
+        const minUsd = (minShares * worstPrice).toFixed(2);
+        logger.warn(`[trade] CLOB minimum size not met for user ${telegramId}: ${errMsg}`);
+        await ctx.telegram.editMessageText(
+          ctx.chat!.id, progressMsg.message_id, undefined,
+          `❌ *Trade Amount Too Small*\n\n` +
+          `This market requires a minimum of *${minShares} shares* per order.\n\n` +
+          `At the current price (${(worstPrice * 100).toFixed(1)}¢), you need at least *$${minUsd}*.\n\n` +
+          `Please increase your trade amount and try again.`,
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')]]).reply_markup }
+        );
+        return;
+      }
+      if (errMsg.includes('tick size') || errMsg.includes('minimum_tick')) {
+        throw new Error(`Price precision error: ${errMsg}`);
+      }
 
-      throw new Error(errorMsg);
+      throw new Error(errMsg);
     }
 
-    // Wait a moment and check order status
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Collect platform commission (1%) after successful trade — fire-and-forget
+    if (config.commission?.adminWalletAddress) {
+      transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionAmt, user.id)
+        .catch((err) => logger.warn(`[trade] Commission transfer failed for user ${telegramId}:`, err?.message || err));
+    }
 
-    const orderStatus = await clobClient.getOrder(orderResponse.orderID);
+    // Fetch current balance after order (non-blocking on error)
+    let newBalance = '';
+    try {
+      const balanceData = await clobClient.getBalanceAllowance({ asset_type: 'COLLATERAL' as any });
+      if (balanceData?.balance) {
+        newBalance = (parseFloat(balanceData.balance) / 1_000_000).toFixed(2);
+      }
+    } catch { /* balance fetch is best-effort */ }
 
-    const executedSize = parseFloat((orderStatus as any).size_matched || '0');
-    const avgPrice = parseFloat((orderStatus as any).price || price.toString());
-    const actualCost = executedSize * avgPrice;
-    const executedShares = Math.floor(executedSize);
+    // Invalidate portfolio caches so next view is fresh
+    const { invalidatePortfolioCache } = await import('../../services/portfolio');
+    await invalidatePortfolioCache(user.encryptedPrivateKey);
 
-    // Success message with real order details
-    const priceDisplay = (avgPrice * 100).toFixed(2);
-    const currentValue = executedShares * marketPrice;
-    const pnl = currentValue - actualCost;
-    const pnlPercent = ((pnl / actualCost) * 100).toFixed(2);
-
-    const statusEmoji = orderStatus.status === 'MATCHED' ? '🎉' : '⏳';
-    const statusText = orderStatus.status === 'MATCHED' ? 'Trade Successful!' : 'Trade Pending...';
-
+    const balanceLine = newBalance ? `\n💳 *Balance:* $${newBalance}` : '';
+    const feeLine = config.commission?.adminWalletAddress
+      ? `\n• Platform fee (1%): -$${commissionAmt.toFixed(2)}\n• Trade amount: $${tradeAmount.toFixed(2)}`
+      : '';
     const message =
-      `${statusEmoji} *${statusText}*\n\n` +
+      `✅ *Market Order Submitted*\n\n` +
       `Market: ${market.question}\n` +
-      `Outcome: ${outcome.toUpperCase()}\n\n` +
-      `💰 *Trade Details:*\n` +
-      `• Amount: $${actualCost.toFixed(2)}\n` +
-      `• Shares: ${executedShares}\n` +
-      `• Avg Price: ${priceDisplay}¢\n` +
-      `• Order ID: \`${orderResponse.orderID}\`\n\n` +
-      `📊 *Position:*\n` +
-      `• Entry: ${priceDisplay}¢\n` +
-      `• Current: ${(marketPrice * 100).toFixed(2)}¢\n` +
-      `• Value: $${currentValue.toFixed(2)}\n` +
-      `• P&L: $${pnl.toFixed(2)} (${pnlPercent}%)\n\n` +
-      `🔗 [View on Polymarket](https://polymarket.com/event/${market.slug})`;
+      `Outcome: *${outcome.toUpperCase()}*\n\n` +
+      `💰 *Order Details:*\n` +
+      `• Total: ~$${amount.toFixed(2)}` +
+      feeLine + `\n` +
+      `• ~Est. Shares: ${estimatedSize}\n` +
+      `• Max price: ${(worstPrice * 100).toFixed(2)}¢ (slippage: ${slippagePct}%)\n` +
+      `• Order ID: \`${orderResponse.orderID}\`\n` +
+      balanceLine + `\n\n` +
+      `_FAK market order — fills immediately at best available ask. Unfilled remainder is cancelled._`;
 
     await ctx.telegram.editMessageText(
-      ctx.chat!.id,
-      progressMsg.message_id,
-      undefined,
-      message,
+      ctx.chat!.id, progressMsg.message_id, undefined, message,
       {
         parse_mode: 'Markdown',
         reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback('📊 View Portfolio', 'wallet_page')],
-          [Markup.button.callback('🔄 Trade Again', `trade_${marketId}_custom`)],
-          [Markup.button.callback('« Back to Markets', 'show_categories')],
+          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+          [Markup.button.callback('📋 Open Orders',  'portfolio_orders_1')],
+          [Markup.button.callback('🔄 Trade Again',  `trade_${marketId}_custom`)],
         ]).reply_markup,
       }
     );
 
-    logger.info(`Trade executed successfully: User ${telegramId} - Market ${marketId} - ${outcome.toUpperCase()} - $${actualCost.toFixed(2)} - Order ${orderResponse.orderID}`);
+    logger.info(`[trade] Order placed: user=${telegramId} market=${marketId} outcome=${outcome.toUpperCase()} amount=$${amount} orderID=${orderResponse.orderID}`);
 
   } catch (error: any) {
     logger.error('Error executing trade:', error);
 
-    let errorMessage = '❌ *Trade Failed*\n\n';
-
-    if (error.message?.includes('insufficient')) {
-      errorMessage += 'Insufficient balance or liquidity.\n\n';
-    } else if (error.message?.includes('closed') || error.message?.includes('inactive')) {
-      errorMessage += 'This market is no longer active.\n\n';
-    } else if (error.message?.includes('liquidity')) {
-      errorMessage += 'Not enough liquidity available.\n\n';
-    } else if (error.message?.includes('timeout')) {
-      errorMessage += 'Request timed out. Please try again.\n\n';
-    } else {
-      errorMessage += 'An unexpected error occurred.\n\n';
-    }
-
-    errorMessage += `Error: ${error.message || 'Unknown error'}`;
+    const rawErr = error.message ?? 'Unknown error';
+    const safeMd = (s: string) => s.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+    const errorMessage = `❌ *Trade Failed*\n\n${safeMd(rawErr)}`;
 
     try {
       if (progressMsg && ctx.chat) {
@@ -683,8 +749,8 @@ async function executeTrade(
         await ctx.reply(errorMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)],
-            [Markup.button.callback('« Back', 'show_categories')],
+            [Markup.button.callback('🔄 Tekrar Dene', `trade_${marketId}_custom`)],
+            [Markup.button.callback('« Geri', 'show_categories')],
           ]),
         });
       }
@@ -715,18 +781,26 @@ export async function handleTradeAmountInput(ctx: Context, amountText: string): 
       return;
     }
 
-    // Parse amount
-    const amount = parseFloat(amountText.replace(/[^0-9.]/g, ''));
+    // R8: Locale-aware amount parsing (handles European "25,50" and US "25.50" formats)
+    const normalized = (() => {
+      const s = amountText.trim().replace(/[^\d.,]/g, '');
+      const lastComma = s.lastIndexOf(',');
+      const lastDot = s.lastIndexOf('.');
+      if (lastComma > lastDot) {
+        // Comma is last separator → European decimal (e.g. "1.234,56")
+        return s.replace(/\./g, '').replace(',', '.');
+      }
+      // Dot is last separator or no comma → remove commas (thousand separators)
+      return s.replace(/,/g, '');
+    })();
+    const amount = parseFloat(normalized);
 
     if (isNaN(amount) || amount < 1 || amount > 10000) {
       await ctx.reply('❌ Invalid amount. Please enter a value between $1 and $10,000.');
       return;
     }
 
-    // Clear state
-    tradeState.delete(telegramId);
-
-    // Fetch market for latest data (try Gamma first, then CLOB)
+    // Fetch market for latest data BEFORE clearing state (if fetch fails, state is preserved for retry)
     const axios = (await import('axios')).default;
     let market;
 
@@ -749,6 +823,9 @@ export async function handleTradeAmountInput(ctx: Context, amountText: string): 
         return;
       }
     }
+
+    // Clear state only after market fetch succeeds
+    tradeState.delete(telegramId);
 
     // Check if amount >= $100, require confirmation
     if (amount >= 100) {

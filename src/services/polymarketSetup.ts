@@ -65,15 +65,17 @@ export async function setupPolymarketAccount(privateKey: string): Promise<Polyma
 
     logger.info(`EOA Address: ${eoaAddress}`);
 
-    // Step 1: Create/Derive API Credentials (these work for both CLOB and Builder)
-    logger.info('Step 1: Creating Polymarket API credentials...');
-    const apiCreds = await createApiCredentials(wallet);
-    logger.info('✅ API credentials created');
-
-    // Step 2: Deploy Proxy Wallet using Builder Relayer (uses Builder credentials from config)
-    logger.info('Step 2: Deploying Proxy wallet via Builder Relayer v2...');
+    // Step 1: Deploy Proxy Wallet first (needed to derive API key with correct funder)
+    logger.info('Step 1: Deploying Proxy wallet via Builder Relayer v2...');
     const proxyAddress = await deployProxyWallet(privateKey);
     logger.info(`✅ Proxy deployed: ${proxyAddress}`);
+
+    // Step 2: Create/Derive API Credentials with signatureType=2 (GNOSIS_SAFE) and proxy as funder.
+    // This is critical: the CLOB uses the funder address to check balances. If derived without
+    // the proxy address, the CLOB will check EOA balances (which has 0 tokens) and reject orders.
+    logger.info('Step 2: Creating Polymarket API credentials (GNOSIS_SAFE with proxy funder)...');
+    const apiCreds = await createApiCredentials(wallet, proxyAddress);
+    logger.info('✅ API credentials created (GNOSIS_SAFE type)');
 
     // Step 3: Enable Trading (Approve USDC & CTF automatically via Relayer)
     logger.info('Step 3: Enabling trading automatically via Relayer...');
@@ -111,23 +113,29 @@ export async function setupPolymarketAccount(privateKey: string): Promise<Polyma
 }
 
 /**
- * Step 1: Create/Derive API Credentials
+ * Step 2: Create/Derive API Credentials with GNOSIS_SAFE signature type
+ * IMPORTANT: proxyAddress must be provided so the CLOB registers the proxy as the funder.
+ * Without this, the CLOB uses the EOA as funder and rejects SELL orders because it can't
+ * find conditional tokens in the EOA (they're in the proxy wallet).
  */
-async function createApiCredentials(wallet: Wallet): Promise<{
+async function createApiCredentials(wallet: Wallet, proxyAddress: string): Promise<{
   apiKey: string;
   apiSecret: string;
   passphrase: string;
 }> {
   try {
-    // Create CLOB client
+    // Create CLOB client with signatureType=2 (GNOSIS_SAFE) and proxy as funder
     const clobClient = new ClobClient(
       config.polymarket.host,
       config.polymarket.chainId,
-      wallet
+      wallet,
+      undefined,  // no existing creds
+      2,          // GNOSIS_SAFE — required for proxy wallet trading
+      proxyAddress
     );
 
-    // Create or derive API key (works for both CLOB and Builder)
-    logger.info('Calling createOrDeriveApiKey...');
+    // Create or derive API key registered for this proxy wallet as funder
+    logger.info('Calling createOrDeriveApiKey (GNOSIS_SAFE, proxy funder)...');
     const apiCreds = await clobClient.createOrDeriveApiKey();
 
     if (!apiCreds || !apiCreds.key || !apiCreds.secret || !apiCreds.passphrase) {

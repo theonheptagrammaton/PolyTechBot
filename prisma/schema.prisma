@@ -45,8 +45,21 @@ model User {
   backupCodes         String?  // JSON array of backup codes
 
   // Trading settings
-  defaultTradeAmount  Int      @default(25) // Default trade amount in USD
+  defaultTradeAmount  Int      @default(25)  // Default trade amount in USD
+  slippageTolerance   Float    @default(1.0) // Max slippage % for market orders (0.1–25)
   tradingEnabled      Boolean  @default(false) // Whether CTF trading is enabled (one-time approval)
+
+  // Referral system
+  referralCode        String?  @unique        // User's referral code (username or random)
+  referredById        String?                 // ID of the user who referred this user
+  referredBy          User?    @relation("Referrals", fields: [referredById], references: [id])
+  referrals           User[]   @relation("Referrals")
+  referralClaimable   Float    @default(0)    // Accumulated claimable earnings (USD)
+  referralEarnedTotal Float    @default(0)    // Total lifetime referral earnings (USD)
+
+  // Copy trading
+  copySubscriptions CopySubscription[]
+  copiedTrades      CopiedTrade[]
 
   isAdmin          Boolean  @default(false)
   isActive         Boolean  @default(true)
@@ -56,5 +69,56 @@ model User {
 
   @@index([telegramId])
   @@index([walletAddress])
+  @@index([referralCode])
   @@map("users")
+}
+
+model CopySubscription {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  traderAddress  String   // tracked wallet (normalized lowercase)
+  label          String?  // optional user-defined label
+
+  // Sizing: exactly one of these is set
+  fixedAmount    Float?   // fixed USD amount
+  multiplier     Float?   // proportional multiplier (0.1–5.0)
+
+  // Stop condition
+  autoStopBelowBalance Float @default(1.0)
+
+  // Take Profit / Stop Loss (per-subscription)
+  takeProfitPct Float?   // e.g. 50.0 → sell when +50% from entry
+  stopLossPct   Float?   // e.g. 25.0 → sell when −25% from entry
+
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, traderAddress])
+  @@index([isActive])
+  @@map("copy_subscriptions")
+}
+
+model CopiedTrade {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  traderAddress  String
+  marketId       String
+  outcome        String   // YES | NO
+  side           String   // BUY | SELL
+  sourceSize     Float    // trader's USD size
+  copiedSize     Float    // applied USD size for user
+  price          Float
+  assetId        String?  // CLOB token ID — stored at BUY fill time for TP/SL price lookup
+  orderID        String?
+  status         String   @default("pending")  // pending|filled|failed|skipped
+  tpSlStatus     String?  // 'tp_triggered' | 'sl_triggered' — prevents double-exit
+  errorMsg       String?
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([traderAddress])
+  @@map("copied_trades")
 }

@@ -6,6 +6,7 @@ dotenv.config();
 interface Config {
   telegram: {
     botToken: string;
+    botUsername: string;
     adminUserIds: number[];
   };
   polymarket: {
@@ -29,6 +30,13 @@ interface Config {
     nodeEnv: string;
     logLevel: string;
     encryptionKey: string;
+  };
+  commission: {
+    adminWalletAddress: string;
+    platformExecutorKey: string;
+  };
+  referral: {
+    treasuryKey: string;
   };
 }
 
@@ -62,6 +70,7 @@ function validateConfig(): Config {
   return {
     telegram: {
       botToken: process.env.TELEGRAM_BOT_TOKEN!,
+      botUsername: process.env.BOT_USERNAME || '',
       adminUserIds: adminIds,
     },
     polymarket: {
@@ -85,6 +94,13 @@ function validateConfig(): Config {
       nodeEnv: process.env.NODE_ENV || 'development',
       logLevel: process.env.LOG_LEVEL || 'info',
       encryptionKey: process.env.ENCRYPTION_KEY!,
+    },
+    commission: {
+      adminWalletAddress: process.env.ADMIN_WALLET_ADDRESS || '',
+      platformExecutorKey: process.env.PLATFORM_EXECUTOR_KEY || '',
+    },
+    referral: {
+      treasuryKey: process.env.REFERRAL_TREASURY_KEY || '',
     },
   };
 }

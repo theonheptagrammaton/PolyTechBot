@@ -3,6 +3,7 @@ import { Markup } from 'telegraf';
 import { getUserByTelegramId, isUserAdmin, getAllUsers } from '../../services/user';
 import { getAdminStats, formatStatsMessage } from '../../services/adminStats';
 import { logger } from '../../utils/logger';
+import { sendPage } from '../../utils/telegram';
 
 export async function handleStats(ctx: Context): Promise<void> {
   try {
@@ -25,8 +26,8 @@ export async function handleStats(ctx: Context): Promise<void> {
       parse_mode: 'Markdown',
     });
 
-    // Get comprehensive stats
-    const stats = await getAdminStats();
+    // Get comprehensive stats (always fresh)
+    const stats = await getAdminStats(true);
     const statsMessage = formatStatsMessage(stats);
 
     // Delete loading message
@@ -37,7 +38,7 @@ export async function handleStats(ctx: Context): Promise<void> {
     }
 
     // Send stats with refresh button
-    await ctx.reply(statsMessage, {
+    await sendPage(ctx, statsMessage, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🔄 Refresh Stats', 'admin_refresh_stats')],
@@ -77,7 +78,7 @@ export async function handleRefreshStats(ctx: Context): Promise<void> {
     const statsMessage = formatStatsMessage(stats);
 
     // Update message
-    await ctx.editMessageText(statsMessage, {
+    await sendPage(ctx, statsMessage, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🔄 Refresh Stats', 'admin_refresh_stats')],
@@ -181,7 +182,7 @@ export async function handleUsers(ctx: Context, page: number = 1): Promise<void>
     // Back button
     buttons.push([Markup.button.callback('« Back to Stats', 'admin_back_to_stats')]);
 
-    await ctx.reply(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -230,13 +231,13 @@ export async function handleDeleteUserConfirm(ctx: Context, userId: string): Pro
     });
 
     if (!userToDelete) {
-      await ctx.editMessageText('❌ User not found.');
+      await sendPage(ctx, '❌ User not found.');
       return;
     }
 
     // Don't allow deleting admins
     if (userToDelete.isAdmin) {
-      await ctx.editMessageText('❌ Cannot delete admin users.');
+      await sendPage(ctx, '❌ Cannot delete admin users.');
       return;
     }
 
@@ -254,7 +255,7 @@ export async function handleDeleteUserConfirm(ctx: Context, userId: string): Pro
       '⚠️ *Note:* User can re-register with /start\n\n' +
       'Are you sure?';
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [
@@ -308,7 +309,7 @@ export async function handleDeleteUserConfirmed(ctx: Context, userId: string): P
       '🗑 All data has been permanently deleted.\n' +
       '💡 User can re-register anytime using /start';
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([[Markup.button.callback('👥 Back to Users', 'admin_view_users')]]),
     });
@@ -316,10 +317,9 @@ export async function handleDeleteUserConfirmed(ctx: Context, userId: string): P
     logger.info(`User deleted by admin ${telegramId}: ${deletedUser.telegramId} (${name})`);
   } catch (error: any) {
     logger.error('Error deleting user:', error);
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '❌ *Error Deleting User*\n\n' +
-      'An error occurred while deleting the user.\n\n' +
-      `Error: ${error.message}`,
+      'An error occurred while deleting the user. Please try again or check server logs.',
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'admin_view_users')]]),
@@ -375,7 +375,7 @@ export async function handleResetMe(ctx: Context): Promise<void> {
       '⚠️ *Note:* You can re-register immediately with /start\n\n' +
       'Are you sure you want to reset?';
 
-    await ctx.reply(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [
@@ -410,8 +410,21 @@ export async function handleResetMeConfirmed(ctx: Context): Promise<void> {
       return;
     }
 
-    // Delete user from database (including admin)
+    // Prevent deleting the last admin (bot would become unmanageable)
     const { prisma } = await import('../../database/prisma');
+    const otherAdminCount = await prisma.user.count({
+      where: { isAdmin: true, id: { not: user.id } },
+    });
+    if (otherAdminCount === 0) {
+      await sendPage(ctx,
+        '❌ *Cannot Reset Last Admin*\n\n' +
+        'You are the only admin. Add another admin before resetting your account.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    // Delete user from database (including admin)
     await prisma.user.delete({
       where: { id: user.id },
     });
@@ -429,17 +442,16 @@ export async function handleResetMeConfirmed(ctx: Context): Promise<void> {
       '3. Experience the new user journey\n\n' +
       '💡 You can now see exactly what new users see!';
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
     });
 
     logger.info(`Admin self-reset completed: ${telegramId} (${user.firstName || user.username})`);
   } catch (error: any) {
     logger.error('Error resetting admin account:', error);
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '❌ *Error Resetting Account*\n\n' +
-      'An error occurred while resetting your account.\n\n' +
-      `Error: ${error.message}`,
+      'An error occurred while resetting your account. Please check server logs.',
       { parse_mode: 'Markdown' }
     );
   }
@@ -451,7 +463,7 @@ export async function handleResetMeConfirmed(ctx: Context): Promise<void> {
 export async function handleResetMeCancel(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery('Reset cancelled');
-    await ctx.editMessageText('❌ Reset cancelled. Your account is unchanged.', {
+    await sendPage(ctx, '❌ Reset cancelled. Your account is unchanged.', {
       parse_mode: 'Markdown',
     });
   } catch (error) {

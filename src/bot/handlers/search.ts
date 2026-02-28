@@ -1,104 +1,67 @@
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
-import { searchMarkets, formatVolume, parseOutcomePrices, parseOutcomes } from '../../services/market';
+import { getEventBySlug, searchEventsByKeyword, formatVolume, Event } from '../../services/market';
 import { logger } from '../../utils/logger';
 
+// Matches polymarket.com/event/<slug> anywhere in a message
+const POLYMARKET_EVENT_RE = /polymarket\.com\/event\/([a-zA-Z0-9_-]+)/i;
+
 /**
- * Shows search prompt
+ * Shows a short hint when user taps "🔍 Search Markets".
+ * No state required — links work at any time.
  */
 export async function handleSearchPrompt(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery();
 
-    const message =
-      '🔍 *Search Markets*\n\n' +
-      'Send me a keyword to search for markets.\n\n' +
-      '*Examples:*\n' +
-      '• `Trump`\n' +
-      '• `Bitcoin`\n' +
-      '• `NFL`\n' +
-      '• `election`\n\n' +
-      '💡 _Minimum 3 characters required_';
-
-    await ctx.editMessageText(message, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('« Back', 'back_to_menu')],
-      ]),
-    });
-
-    logger.info(`Search prompt shown to user: ${ctx.from?.id}`);
+    await ctx.editMessageText(
+      '🔗 *Paste Event Link*\n\n' +
+      'Send a Polymarket event link anytime and I\'ll show the markets ready to trade.\n\n' +
+      '*Example:*\n' +
+      '`https://polymarket.com/event/will-trump-be-impeached`',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('« Back', 'back_to_menu')],
+        ]),
+      }
+    );
   } catch (error) {
-    logger.error('Error showing search prompt:', error);
+    logger.error('Error showing link prompt:', error);
     await ctx.reply('❌ An error occurred. Please try again.');
   }
 }
 
 /**
- * Handles search command
+ * Detects a Polymarket event URL in a message.
+ * Returns the slug string, or null if no match.
  */
-export async function handleSearchCommand(ctx: Context): Promise<void> {
-  try {
-    // @ts-ignore - Telegraf types
-    const message = ctx.message?.text || '';
-    const keyword = message.replace('/search', '').trim();
-
-    if (!keyword) {
-      await ctx.reply(
-        '🔍 *Search Markets*\n\n' +
-        'Usage: `/search [keyword]`\n\n' +
-        '*Examples:*\n' +
-        '• `/search Trump`\n' +
-        '• `/search Bitcoin`\n' +
-        '• `/search NFL`\n\n' +
-        '💡 _Minimum 3 characters required_',
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-
-    if (keyword.length < 3) {
-      await ctx.reply(
-        '⚠️ *Keyword too short*\n\n' +
-        'Please enter at least 3 characters to search.',
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-
-    await handleSearch(ctx, keyword, 1);
-  } catch (error) {
-    logger.error('Error in search command:', error);
-    await ctx.reply('❌ An error occurred while searching. Please try again.');
-  }
+export function detectPolymarketLink(text: string): string | null {
+  const match = text.match(POLYMARKET_EVENT_RE);
+  return match ? match[1] : null;
 }
 
 /**
- * Performs market search with pagination
+ * Fetches the event for a given slug and shows its details with trade buttons.
+ * Called whenever any message contains a polymarket.com/event link.
  */
-export async function handleSearch(ctx: Context, keyword: string, page: number = 1): Promise<void> {
+export async function handleLinkInput(ctx: Context, slug: string): Promise<void> {
+  const loadingMsg = await ctx.reply('🔍 Loading event...');
+
   try {
-    const loadingMsg = await ctx.reply(`🔍 Searching for "${keyword}"...`);
+    const event = await getEventBySlug(slug);
 
-    const markets = await searchMarkets(keyword);
-
-    // Delete loading message
     try {
       await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
-    } catch {}
+    } catch { /* non-critical */ }
 
-    if (markets.length === 0) {
+    if (!event) {
       await ctx.reply(
-        '😔 *No Results Found*\n\n' +
-        `No markets found for "${keyword}".\n\n` +
-        '💡 *Try:*\n' +
-        '• Using different keywords\n' +
-        '• Checking spelling\n' +
-        '• Using shorter terms',
+        '❌ *Event Not Found*\n\n' +
+        'No active event found for this link. It may have ended or the link may be incorrect.',
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔍 New Search', 'search_markets')],
             [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
           ]),
         }
@@ -106,78 +69,140 @@ export async function handleSearch(ctx: Context, keyword: string, page: number =
       return;
     }
 
-    // Pagination
-    const MARKETS_PER_PAGE = 5;
-    const totalPages = Math.ceil(markets.length / MARKETS_PER_PAGE);
-    const currentPage = Math.min(Math.max(1, page), totalPages);
-    const startIndex = (currentPage - 1) * MARKETS_PER_PAGE;
-    const endIndex = startIndex + MARKETS_PER_PAGE;
-    const pageMarkets = markets.slice(startIndex, endIndex);
+    const { handleEventDetails } = await import('./markets');
+    await handleEventDetails(ctx, String(event.id));
 
-    // Build message
-    let message = `🔍 *Search Results for "${keyword}"*\n\n`;
-    message += `Found ${markets.length} market${markets.length > 1 ? 's' : ''}\n\n`;
+  } catch (error) {
+    logger.error(`Error loading event for slug "${slug}":`, error);
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+    } catch { /* non-critical */ }
+    await ctx.reply('❌ Failed to load the event. Please try again.', {
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]),
+    });
+  }
+}
 
-    pageMarkets.forEach((market, index) => {
-      const number = startIndex + index + 1;
-      const volume = formatVolume(market.volume24hr);
-      const liquidity = formatVolume(market.liquidity || 0);
-      const endDate = new Date(market.endDate).toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric'
-      });
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-      message += `${number}) ${market.question}\n`;
+/** Sanitize a user query string for display in Markdown v1 messages. */
+function safeQuery(q: string): string {
+  return q.replace(/[*_`[\]()~>#+=|{}.!]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
 
-      // Show prices
-      const prices = parseOutcomePrices(market);
-      const outcomes = parseOutcomes(market);
+/** Build a compact event card for search results (Markdown v1). */
+function buildSearchCard(event: Event, num: number, botUsername: string): string {
+  const title = event.title
+    .replace(/[*_`[\]()~>#+=|{}.!]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
 
-      if (prices.length >= 2 && outcomes.length >= 2) {
-        const price1 = parseFloat(prices[0] || '0');
-        const price2 = parseFloat(prices[1] || '0');
+  const vol = formatVolume(event.volume24hr || 0);
+  const liq = formatVolume(event.liquidity || 0);
+  const mktCount = event.markets.length > 1 ? ` · ${event.markets.length} mkts` : '';
 
-        if (!isNaN(price1) && !isNaN(price2)) {
-          const yesPrice = (price1 * 100).toFixed(1);
-          const noPrice = (price2 * 100).toFixed(1);
-          message += `├ ${outcomes[0]} ${yesPrice}¢ · ${outcomes[1]} ${noPrice}¢\n`;
-        }
+  // Top market price row
+  let priceRow = '';
+  const topMarket = [...(event.markets || [])]
+    .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0))[0] as any;
+
+  if (topMarket) {
+    try {
+      const prices = Array.isArray(topMarket.outcomePrices)
+        ? topMarket.outcomePrices
+        : JSON.parse(topMarket.outcomePrices || '[]');
+      const outcomes = Array.isArray(topMarket.outcomes)
+        ? topMarket.outcomes
+        : JSON.parse(topMarket.outcomes || '[]');
+      const p0 = parseFloat(prices[0]);
+      const p1 = parseFloat(prices[1]);
+      if (!isNaN(p0) && !isNaN(p1) && outcomes.length >= 2) {
+        const filled = Math.round(Math.max(0, Math.min(1, p0)) * 8);
+        const bar = '▓'.repeat(filled) + '░'.repeat(8 - filled);
+        const o0 = String(outcomes[0]).slice(0, 10);
+        const o1 = String(outcomes[1]).slice(0, 10);
+        priceRow = `${bar}  ${o0} *${(p0 * 100).toFixed(0)}¢* · ${o1} ${(p1 * 100).toFixed(0)}¢\n`;
       }
+    } catch { /* skip price row */ }
+  }
 
-      message += `├ 24h Vol ${volume} · Liq ${liquidity} · Exp ${endDate}\n`;
-      message += `└ [Trade](https://polymarket.com/event/${market.slug}) · [View](https://polymarket.com/event/${market.slug})\n\n`;
+  return (
+    `*${num}.* 📊 ${title}\n` +
+    priceRow +
+    `📊 ${vol} · 💧 ${liq}${mktCount}\n` +
+    `└ [Details](https://polymarket.com/event/${event.slug}) · [Trade](https://t.me/${botUsername}?start=event_${event.id})\n\n`
+  );
+}
+
+// ─── Global Keyword Search ────────────────────────────────────────────────────
+
+/**
+ * Called when user types free text (not a command, not in an input-awaiting state).
+ * Searches Polymarket events by keyword and shows results.
+ */
+export async function handleKeywordSearch(ctx: Context, query: string): Promise<void> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return; // too short — silently ignore
+
+  const loadingMsg = await ctx.reply('🔍 Searching...');
+
+  try {
+    const events = await searchEventsByKeyword(trimmed, 5);
+
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+    } catch { /* non-critical */ }
+
+    const botUsername = (ctx.botInfo?.username) || process.env.BOT_USERNAME || 'PolymarketBot';
+
+    if (events.length === 0) {
+      await ctx.reply(
+        `🔍 *No results for "${safeQuery(trimmed)}"*\n\n` +
+        'No active events matched your search.\n\n' +
+        '💡 Try a different keyword or browse by category.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('📂 Browse Categories', 'show_categories')],
+            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          ]),
+        }
+      );
+      return;
+    }
+
+    let message = `🔍 *Results for "${safeQuery(trimmed)}"* (${events.length})\n\n`;
+    events.forEach((event, idx) => {
+      message += buildSearchCard(event, idx + 1, botUsername);
     });
 
-    // Build buttons
-    const buttons: any[] = [];
-
-    // Pagination row
-    const navRow: any[] = [];
-    if (currentPage > 1) {
-      navRow.push(Markup.button.callback('◀️ Prev', `search_page_${keyword}_${currentPage - 1}`));
-    }
-    navRow.push(Markup.button.callback(`Page ${currentPage}/${totalPages}`, 'noop'));
-    if (currentPage < totalPages) {
-      navRow.push(Markup.button.callback('Next ▶️', `search_page_${keyword}_${currentPage + 1}`));
-    }
-    buttons.push(navRow);
-
-    // Action buttons
-    buttons.push([
-      Markup.button.callback('🔍 New Search', 'search_markets'),
-      Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
-    ]);
+    // Numbered quick-open buttons
+    const tradeRow = events.map((e, idx) =>
+      Markup.button.callback(`${idx + 1}️⃣`, `sev_${e.id}`)
+    );
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },
-      ...Markup.inlineKeyboard(buttons),
+      ...Markup.inlineKeyboard([
+        tradeRow,
+        [
+          Markup.button.callback('📂 Categories', 'show_categories'),
+          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        ],
+      ]),
     });
 
-    logger.info(`Search results for "${keyword}" shown to user: ${ctx.from?.id}`);
   } catch (error) {
-    logger.error(`Error searching for "${keyword}":`, error);
-    await ctx.reply('❌ An error occurred while searching. Please try again.');
+    logger.error(`[search] handleKeywordSearch error for "${trimmed}":`, error);
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+    } catch { /* non-critical */ }
+    await ctx.reply('❌ Search failed. Please try again.', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
+    });
   }
 }

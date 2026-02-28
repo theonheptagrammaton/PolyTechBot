@@ -2,7 +2,6 @@ import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { getAllUsers } from './user';
 import { getPortfolioData } from './portfolio';
-import { decrypt } from '../utils/encryption';
 
 export interface AdminStats {
   // User Stats
@@ -86,17 +85,13 @@ export async function getAdminStats(forceRefresh: boolean = false): Promise<Admi
           continue;
         }
 
-        const privateKey = decrypt(user.encryptedPrivateKey);
-        const apiKey = decrypt(user.encryptedApiKey);
-        const apiSecret = decrypt(user.encryptedApiSecret);
-        const passphrase = decrypt(user.encryptedPassphrase);
-
-        // Get portfolio data
+        // Get portfolio data (pass encrypted — getPortfolioData decrypts internally)
         const portfolio = await getPortfolioData(
-          privateKey,
-          apiKey,
-          apiSecret,
-          passphrase
+          user.encryptedPrivateKey,
+          user.encryptedApiKey,
+          user.encryptedApiSecret,
+          user.encryptedPassphrase,
+          user.polymarketProxyAddress || ''
         );
 
         // Count open orders

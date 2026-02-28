@@ -3,6 +3,9 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { ClobClient } from '@polymarket/clob-client';
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client';
 import { BuilderConfig } from '@polymarket/builder-signing-sdk';
+import { privateKeyToAccount } from 'viem/accounts';
+import { createWalletClient, http } from 'viem';
+import { polygon } from 'viem/chains';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
@@ -328,29 +331,41 @@ export async function depositToPolymarket(
  * 3. CTF tokens → Neg Risk CTF Exchange (to trade neg-risk markets)
  */
 export async function enableTrading(
-  encryptedPrivateKey: string
+  encryptedPrivateKey: string,
+  proxyAddress?: string
 ): Promise<{ success: boolean; txHash?: string; alreadyEnabled?: boolean }> {
   try {
     logger.info('[Relayer] Enabling trading with all required approvals...');
 
     const privateKey = decrypt(encryptedPrivateKey);
     const provider = new providers.JsonRpcProvider(RPC_URLS.polygon);
-    const wallet = new Wallet(privateKey, provider);
+    const ethersWallet = new Wallet(privateKey, provider);
 
-    // Check if already approved (check one of the approvals)
+    // Check approval on the proxy wallet (Safe), not the EOA signer
+    const checkAddress = proxyAddress || ethersWallet.address;
     const ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, provider);
-    const isApproved = await ctfContract.isApprovedForAll(
-      wallet.address,
-      NEG_RISK_OPERATOR
-    );
 
-    if (isApproved) {
-      logger.info('[Relayer] Trading already enabled');
+    const [stdApproved, negRiskApproved] = await Promise.all([
+      ctfContract.isApprovedForAll(checkAddress, POLYMARKET_ADDRESSES.CTF_EXCHANGE),
+      ctfContract.isApprovedForAll(checkAddress, NEG_RISK_OPERATOR),
+    ]);
+
+    logger.info(`[Relayer] On-chain approvals — CTF Exchange: ${stdApproved}, NegRisk Exchange: ${negRiskApproved}`);
+
+    if (stdApproved && negRiskApproved) {
+      logger.info('[Relayer] Trading already enabled (all approvals confirmed on-chain)');
       return { success: true, alreadyEnabled: true };
     }
 
-    // Create BuilderConfig with builder credentials from env
-    logger.info('[Relayer] Creating BuilderConfig with builder credentials...');
+    // Use viem wallet + RelayerTxType.PROXY (same as polymarketSetup.ts — the version that works)
+    logger.info('[Relayer] Setting missing approvals via Builder Relayer (PROXY type)...');
+    const viemAccount = privateKeyToAccount(privateKey as `0x${string}`);
+    const viemWallet = createWalletClient({
+      account: viemAccount,
+      chain: polygon,
+      transport: http(RPC_URLS.polygon),
+    });
+
     const builderConfig = new BuilderConfig({
       localBuilderCreds: {
         key: config.polymarket.builder.apiKey,
@@ -359,70 +374,65 @@ export async function enableTrading(
       },
     });
 
-    logger.info('[Relayer] BuilderConfig created successfully');
-
-    // Initialize Relayer Client with builder config
-    logger.info('[Relayer] Initializing RelayClient...');
     const relayerClient = new RelayClient(
       POLYMARKET_RELAYER_URL,
       137,
-      wallet,
+      viemWallet as any,
       builderConfig,
-      RelayerTxType.SAFE
+      RelayerTxType.PROXY   // PROXY matches the wallet type deployed during setup
     );
 
-    // Prepare all 3 approval transactions
     const erc20Interface = new ethers.utils.Interface(ERC20_ABI);
     const ctfInterface = new ethers.utils.Interface(CTF_ABI);
 
-    const transactions = [
-      // 1. Approve USDC.e for CTF Contract (to split USDC into outcome tokens)
-      {
-        to: POLYMARKET_ADDRESSES.USDCe,
-        data: erc20Interface.encodeFunctionData('approve', [
-          POLYMARKET_ADDRESSES.CTF,
-          ethers.constants.MaxUint256,
-        ]),
-        value: '0',
-      },
-      // 2. Approve CTF tokens for CTF Exchange (to trade outcome tokens)
-      {
+    // Only include transactions for approvals that are actually missing
+    const transactions: Array<{ to: string; data: string; value: string }> = [];
+
+    // 1. USDC.e → CTF (needed for buying, set always if NegRisk is missing too)
+    transactions.push({
+      to: POLYMARKET_ADDRESSES.USDCe,
+      data: erc20Interface.encodeFunctionData('approve', [
+        POLYMARKET_ADDRESSES.CTF,
+        ethers.constants.MaxUint256,
+      ]),
+      value: '0',
+    });
+
+    if (!stdApproved) {
+      logger.info('[Relayer]   + Adding CTF → CTF Exchange approval');
+      transactions.push({
         to: POLYMARKET_ADDRESSES.CTF,
         data: ctfInterface.encodeFunctionData('setApprovalForAll', [
           POLYMARKET_ADDRESSES.CTF_EXCHANGE,
           true,
         ]),
         value: '0',
-      },
-      // 3. Approve CTF tokens for Neg Risk CTF Exchange (to trade neg-risk markets)
-      {
+      });
+    }
+
+    if (!negRiskApproved) {
+      logger.info('[Relayer]   + Adding CTF → NegRisk CTF Exchange approval');
+      transactions.push({
         to: POLYMARKET_ADDRESSES.CTF,
         data: ctfInterface.encodeFunctionData('setApprovalForAll', [
           POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE,
           true,
         ]),
         value: '0',
-      },
-    ];
+      });
+    }
 
-    logger.info('[Relayer] Executing 3 gasless approval transactions...');
-    logger.info('  1. USDC.e → CTF Contract');
-    logger.info('  2. CTF → CTF Exchange');
-    logger.info('  3. CTF → Neg Risk Exchange');
-
-    // Execute all 3 approvals in one batch (gasless)
+    logger.info(`[Relayer] Executing ${transactions.length} gasless approval transaction(s)...`);
     const response = await relayerClient.execute(
       transactions,
-      'Enable trading on Polymarket (3 approvals)'
+      'Enable trading on Polymarket'
     );
 
-    logger.info('[Relayer] Waiting for transaction confirmation...');
+    logger.info('[Relayer] Waiting for on-chain confirmation...');
     const result = await response.wait();
-
-    logger.info('[Relayer] All trading approvals completed!', result);
+    logger.info('[Relayer] Approvals confirmed!', result);
 
     const txHash = result?.transactionHash || 'relayer_submitted';
-
     return { success: true, txHash };
   } catch (error) {
     logger.error('[Relayer] Error enabling trading:', error);
