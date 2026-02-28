@@ -74,7 +74,7 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     const eWallet  = ce('5424976816530014958', '👛');
     const ePoly    = ce('5837001288457392898', '🟣');
     const eEth     = ce(EMOJI.ethDeposit,      '🔹');
-    const eSol     = ce('5837001288457392898', '🟣');
+    const eSol     = ce(EMOJI.solanaDeposit,   '🟣');
     const eUsdc    = ce(EMOJI.usdc, '💲');
 
     let message = `${eWallet} <b>WALLET</b>\n\n`;
