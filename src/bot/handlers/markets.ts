@@ -1,3 +1,4 @@
+import path from 'path';
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import {
@@ -15,6 +16,9 @@ import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage, getMenuPhotoMedia, cacheMenuPhotoFileId } from '../../utils/telegram';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
+
+const IMG_BUSINESS     = path.join(__dirname, '../img/business.PNG');
+const IMG_SMARTWALLET  = path.join(__dirname, '../img/smartwallet.PNG');
 
 // ─── OG Image helper ──────────────────────────────────────────────────────────
 
@@ -269,6 +273,7 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
       await sendPage(ctx, message, {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
+        ...(category === 'business' ? { image_path: IMG_BUSINESS } : {}),
         ...Markup.inlineKeyboard(buttons),
       });
     } catch (editError: any) {
@@ -515,6 +520,7 @@ export function mainMenuKeyboard() {
     [
       Markup.button.callback('📁 Portfolio', 'portfolio'),
       Markup.button.callback('👛 Wallet', 'wallet_page'),
+      Markup.button.callback('💰 Deposit', 'deposit_menu'),
     ],
     [
       Markup.button.callback('🔓 Smart Wallets', 'show_wallet'),
@@ -625,14 +631,7 @@ const SW_CAT_SPECIALTIES: Record<string, string[]> = {
   'economy':  ['🌍 Geopolitics'],
 };
 
-const SW_TIME_META: Record<string, { label: string; api: string }> = {
-  '1d':     { label: '1d',       api: '1D'  },
-  '7d':     { label: '7d',       api: '7D'  },
-  '30d':    { label: '30d',      api: '30D' },
-  'alltime':{ label: 'All Time', api: 'ALL' },
-};
-
-const SW_SORT_META: Record<string, { label: string; api: string }> = {
+const SW_SORT_META: Record<string, { label: string; api: 'PNL' | 'VOL' }> = {
   'pnl': { label: 'by P&L',    api: 'PNL' },
   'vol': { label: 'by Volume', api: 'VOL' },
 };
@@ -640,7 +639,6 @@ const SW_SORT_META: Record<string, { label: string; api: string }> = {
 export async function handleSmartWallets(
   ctx: Context,
   category = 'all',
-  time = '7d',
   sort = 'pnl',
   page = 1,
 ): Promise<void> {
@@ -648,11 +646,10 @@ export async function handleSmartWallets(
     if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const { getTopSmartWallets, fmtUsd } = await import('../../services/smartWallets');
-    const timeMeta = SW_TIME_META[time]    ?? SW_TIME_META['7d'];
-    const sortMeta = SW_SORT_META[sort]    ?? SW_SORT_META['pnl'];
+    const sortMeta = SW_SORT_META[sort] ?? SW_SORT_META['pnl'];
     const catMeta  = SW_CAT_META[category] ?? SW_CAT_META['all'];
 
-    const allWallets = await getTopSmartWallets(50, timeMeta.api, sortMeta.api);
+    const allWallets = await getTopSmartWallets(50, 'ALL', sortMeta.api);
 
     // Post-filter by specialty for specific categories
     let filtered = allWallets;
@@ -669,7 +666,7 @@ export async function handleSmartWallets(
     const botUsername = config.telegram.botUsername;
 
     let msg = `🏆 <b>Discover Traders</b>\n\n`;
-    msg += `${catMeta.emoji} ${esc(catMeta.label)} · ${timeMeta.label} · ${sortMeta.label}\n\n`;
+    msg += `${catMeta.emoji} ${esc(catMeta.label)} · ${sortMeta.label}\n\n`;
 
     if (pageWallets.length === 0) {
       msg += 'No traders found for this filter.';
@@ -687,11 +684,12 @@ export async function handleSmartWallets(
       }
     }
 
-    const prevCb = currentPage > 1        ? `sw_${currentPage - 1}_${category}_${time}_${sort}` : 'noop';
-    const nextCb = currentPage < totalPages ? `sw_${currentPage + 1}_${category}_${time}_${sort}` : 'noop';
+    const prevCb = currentPage > 1        ? `sw_${currentPage - 1}_${category}_${sort}` : 'noop';
+    const nextCb = currentPage < totalPages ? `sw_${currentPage + 1}_${category}_${sort}` : 'noop';
 
     await sendPage(ctx, msg, {
       parse_mode: 'HTML',
+      image_path: IMG_SMARTWALLET,
       ...Markup.inlineKeyboard([
         [
           Markup.button.callback('◀️ Prev', prevCb),
@@ -699,9 +697,8 @@ export async function handleSmartWallets(
           Markup.button.callback('Next ▶️', nextCb),
         ],
         [
-          Markup.button.callback('📁 Category', `sw_fc_${category}_${time}_${sort}`),
-          Markup.button.callback('⏱ Time',      `sw_ft_${category}_${time}_${sort}`),
-          Markup.button.callback('📊 Sort',      `sw_fs_${category}_${time}_${sort}`),
+          Markup.button.callback('📁 Category', `sw_fc_${category}_${sort}`),
+          Markup.button.callback('📊 Sort',      `sw_fs_${category}_${sort}`),
         ],
         [
           Markup.button.callback('⬅️ Back', 'back_to_menu'),
@@ -710,7 +707,7 @@ export async function handleSmartWallets(
       ]),
     });
 
-    logger.info(`[smartWallets] Page ${currentPage}/${totalPages} cat=${category} time=${time} sort=${sort}`);
+    logger.info(`[smartWallets] Page ${currentPage}/${totalPages} cat=${category} sort=${sort}`);
   } catch (err) {
     logger.error('[smartWallets] handleSmartWallets error:', err);
     await ctx.reply('❌ An error occurred loading Smart Wallets. Please try again.');
@@ -720,7 +717,6 @@ export async function handleSmartWallets(
 export async function handleSwCategoryFilter(
   ctx: Context,
   cat: string,
-  time: string,
   sort: string,
 ): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
@@ -734,14 +730,14 @@ export async function handleSwCategoryFilter(
 
   const buttons: any[] = catRows.map(row =>
     row.map(c => {
-      const meta = SW_CAT_META[c] ?? { label: c, emoji: '' };
+      const meta  = SW_CAT_META[c] ?? { label: c, emoji: '' };
       const label = c === cat ? `✓ ${meta.emoji} ${meta.label}` : `${meta.emoji} ${meta.label}`;
-      const cb    = c === cat ? 'noop' : `sw_1_${c}_${time}_${sort}`;
+      const cb    = c === cat ? 'noop' : `sw_1_${c}_${sort}`;
       return Markup.button.callback(label, cb);
     })
   );
   buttons.push([
-    Markup.button.callback('⬅️ Back', `sw_1_${cat}_${time}_${sort}`),
+    Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}`),
     Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
   ]);
 
@@ -751,40 +747,9 @@ export async function handleSwCategoryFilter(
   );
 }
 
-export async function handleSwTimeFilter(
-  ctx: Context,
-  cat: string,
-  time: string,
-  sort: string,
-): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const timeRow = (['1d', '7d', '30d', 'alltime'] as const).map(t => {
-    const meta  = SW_TIME_META[t];
-    const label = t === time ? `✓ ${meta.label}` : meta.label;
-    const cb    = t === time ? 'noop' : `sw_1_${cat}_${t}_${sort}`;
-    return Markup.button.callback(label, cb);
-  });
-
-  await sendPage(ctx,
-    `⏱ <b>Time Period</b>\n\nSelect the time period for ranking:`,
-    {
-      parse_mode: 'HTML',
-      ...Markup.inlineKeyboard([
-        timeRow,
-        [
-          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${time}_${sort}`),
-          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
-        ],
-      ]),
-    }
-  );
-}
-
 export async function handleSwSortFilter(
   ctx: Context,
   cat: string,
-  time: string,
   sort: string,
 ): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
@@ -792,7 +757,7 @@ export async function handleSwSortFilter(
   const sortRow = (['pnl', 'vol'] as const).map(s => {
     const meta  = SW_SORT_META[s];
     const label = s === sort ? `✓ ${meta.label}` : meta.label;
-    const cb    = s === sort ? 'noop' : `sw_1_${cat}_${time}_${s}`;
+    const cb    = s === sort ? 'noop' : `sw_1_${cat}_${s}`;
     return Markup.button.callback(label, cb);
   });
 
@@ -803,7 +768,7 @@ export async function handleSwSortFilter(
       ...Markup.inlineKeyboard([
         sortRow,
         [
-          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${time}_${sort}`),
+          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}`),
           Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
         ],
       ]),

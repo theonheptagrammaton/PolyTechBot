@@ -56,26 +56,32 @@ export async function sendPage(
   }
   const parseMode   = extra?.parse_mode ?? 'Markdown';
   const replyMarkup = extra?.reply_markup;
-  const imageUrl    = extra?.image_url as string | undefined;
+  const imageUrl    = extra?.image_url  as string | undefined;
+  const imagePath   = extra?.image_path as string | undefined;
 
   const cbMsg = ctx.callbackQuery && 'message' in ctx.callbackQuery
     ? ctx.callbackQuery.message : null;
   const isPhoto = !!(cbMsg && 'photo' in cbMsg);
 
-  // ── Event-specific image (e.g. Polymarket event cover) ───────────────────
-  if (imageUrl) {
-    const cached = _urlPhotoCache.get(imageUrl);
-    const mediaId: any = cached || imageUrl;
+  // ── Custom image (URL or local file path) ────────────────────────────────
+  if (imageUrl || imagePath) {
+    const cacheKey = imageUrl || imagePath!;
+    const cached   = _urlPhotoCache.get(cacheKey);
+    // For first send: URLs go directly, local paths become a ReadStream
+    const mediaId: any = cached
+      ? cached
+      : imageUrl
+        ? imageUrl
+        : { source: fs.createReadStream(imagePath!) };
 
     if (isPhoto) {
-      // Swap photo in-place — no delete, no flicker
       try {
         const result: any = await (ctx as any).editMessageMedia(
           { type: 'photo', media: mediaId, caption: safeCaption, parse_mode: parseMode },
           replyMarkup ? { reply_markup: replyMarkup } : undefined,
         );
         if (!cached && typeof result === 'object' && result?.photo?.length) {
-          _urlPhotoCache.set(imageUrl, result.photo[result.photo.length - 1].file_id);
+          _urlPhotoCache.set(cacheKey, result.photo[result.photo.length - 1].file_id);
         }
         return;
       } catch (err: any) {
@@ -93,10 +99,10 @@ export async function sendPage(
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       });
       if (!cached && result?.photo?.length) {
-        _urlPhotoCache.set(imageUrl, result.photo[result.photo.length - 1].file_id);
+        _urlPhotoCache.set(cacheKey, result.photo[result.photo.length - 1].file_id);
       }
     } catch {
-      // URL failed — fall back to static menu image
+      // URL/file failed — fall back to static menu image
       const fallback: any = _cachedPhotoFileId
         ? _cachedPhotoFileId
         : { source: fs.createReadStream(MENU_IMAGE) };

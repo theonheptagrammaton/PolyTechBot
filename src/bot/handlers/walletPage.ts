@@ -1,8 +1,12 @@
+import path from 'path';
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage } from '../../utils/telegram';
+
+const IMG_WALLET    = path.join(__dirname, '../img/wallet.PNG');
+const IMG_PORTFOLIO = path.join(__dirname, '../img/portfolio.PNG');
 import { config } from '../../config';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import {
@@ -77,23 +81,21 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
 
     // Show deposit addresses from Bridge API
     if (user.depositAddressEvm) {
-      message += `${eEvm} <b>EVM (ETH/Arbitrum/Base/Optimism):</b>\n`;
+      message += `${eEvm} <b>Polygon:</b>\n`;
+      message += `<code>${esc(user.depositAddressEvm)}</code>\n\n`;
+
+      message += `${eEvm} <b>ETH/Arbitrum/Base/Optimism:</b>\n`;
       message += `<code>${esc(user.depositAddressEvm)}</code>\n\n`;
 
       message += `${eSol} <b>Solana:</b>\n`;
       message += `<code>${esc(user.depositAddressSvm || '')}</code>\n\n`;
 
-      message += `🟠 <b>Bitcoin:</b>\n`;
-      message += `<code>${esc(user.depositAddressBtc || '')}</code>\n\n`;
-
-      message += `🔴 <b>Tron:</b>\n`;
-      message += `<code>${esc(user.depositAddressTvm || '')}</code>\n\n`;
     } else {
       message += `⚠️ <b>Legacy Wallet - Please contact support</b>\n\n`;
     }
 
     // Polymarket Trading Wallet
-    message += `🏦 <b>Polymarket Trading Wallet:</b>\n`;
+    message += `🏦 <b>Polymarket Trading Wallet (Don't deposit here):</b>\n`;
     if (user.polymarketProxyAddress) {
       message += `<code>${esc(user.polymarketProxyAddress)}</code>\n\n`;
     } else {
@@ -129,6 +131,7 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
 
     await sendPage(ctx, message, {
       parse_mode: 'HTML',
+      image_path: IMG_WALLET,
       ...Markup.inlineKeyboard(buttons),
     });
 
@@ -197,6 +200,7 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
+      image_path: IMG_PORTFOLIO,
       ...Markup.inlineKeyboard([
         [Markup.button.callback('📊 Active Positions', 'portfolio_open_1')],
         [Markup.button.callback('📋 Open Orders',      'portfolio_orders_1')],
