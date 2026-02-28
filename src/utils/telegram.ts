@@ -6,6 +6,9 @@ import { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
 const MENU_IMAGE = path.join(__dirname, '../bot/img/beattheodds.JPG');
 let _cachedPhotoFileId: string | null = null;
 
+/** Per-URL file_id cache — avoids re-uploading the same event image */
+const _urlPhotoCache = new Map<string, string>();
+
 /**
  * Sends a photo page.
  *
@@ -20,20 +23,60 @@ export async function sendPage(
   caption: string,
   extra?: Record<string, any>
 ): Promise<void> {
-  // Truncate at last complete HTML tag boundary to avoid "Unclosed start tag" errors
+  // Truncate safely within 1024 chars (Telegram caption limit)
   let safeCaption = caption;
   if (caption.length > 1024) {
     const cut = caption.slice(0, 1024);
     const lastGt = cut.lastIndexOf('>');
-    safeCaption = lastGt >= 0 ? cut.slice(0, lastGt + 1) : cut;
+    if (lastGt >= 0) {
+      // HTML: cut at last closed tag
+      safeCaption = cut.slice(0, lastGt + 1);
+    } else {
+      // Markdown: cut at last paragraph break to avoid splitting *bold* / `code` syntax
+      const lastPara = cut.lastIndexOf('\n\n');
+      safeCaption = lastPara > 200 ? cut.slice(0, lastPara) : cut;
+    }
   }
   const parseMode   = extra?.parse_mode ?? 'Markdown';
   const replyMarkup = extra?.reply_markup;
+  const imageUrl    = extra?.image_url as string | undefined;
 
   const cbMsg = ctx.callbackQuery && 'message' in ctx.callbackQuery
     ? ctx.callbackQuery.message : null;
   const isPhoto = !!(cbMsg && 'photo' in cbMsg);
 
+  // ── Event-specific image (e.g. Polymarket event cover) ───────────────────
+  if (imageUrl) {
+    if (cbMsg) await ctx.deleteMessage().catch(() => {});
+    const cached = _urlPhotoCache.get(imageUrl);
+    const media: any = cached ? cached : { url: imageUrl };
+    try {
+      const result: any = await ctx.replyWithPhoto(media, {
+        caption: safeCaption,
+        parse_mode: parseMode,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      });
+      if (!cached && result?.photo?.length) {
+        _urlPhotoCache.set(imageUrl, result.photo[result.photo.length - 1].file_id);
+      }
+    } catch {
+      // URL failed — fall back to static menu image
+      const fallback: any = _cachedPhotoFileId
+        ? _cachedPhotoFileId
+        : { source: fs.createReadStream(MENU_IMAGE) };
+      const result: any = await ctx.replyWithPhoto(fallback, {
+        caption: safeCaption,
+        parse_mode: parseMode,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      });
+      if (!_cachedPhotoFileId && result?.photo?.length) {
+        _cachedPhotoFileId = result.photo[result.photo.length - 1].file_id;
+      }
+    }
+    return;
+  }
+
+  // ── Default: static menu image ────────────────────────────────────────────
   if (isPhoto) {
     try {
       // editMessageCaption only updates caption + keyboard — photo stays untouched
@@ -44,7 +87,18 @@ export async function sendPage(
       return;
     } catch (err: any) {
       if (isBenignTelegramError(err)) return;
-      // fall through to delete+send
+      // If Markdown is still broken after truncation, strip it and retry — photo stays
+      const errMsg = err?.message || err?.description || '';
+      if (errMsg.includes('parse entities') || errMsg.includes("can't parse")) {
+        try {
+          const stripped = safeCaption.replace(/[*_`[\]()]/g, '');
+          await (ctx as any).editMessageCaption(stripped, {
+            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+          });
+          return;
+        } catch { /* fall through only in extreme cases */ }
+      }
+      // fall through to delete+send only as last resort
     }
   }
 

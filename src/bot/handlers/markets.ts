@@ -14,7 +14,7 @@ import {
 import { getMainMenuStats, MainMenuStats } from '../../services/portfolio';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
-import { isBenignTelegramError, sendPage, editOrReply } from '../../utils/telegram';
+import { isBenignTelegramError, sendPage } from '../../utils/telegram';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
 
@@ -169,7 +169,6 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
   try {
     await ctx.answerCbQuery('Loading...');
 
-    const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
     const cat = CATEGORY_META[category] ?? { name: category, emoji: '📊' };
 
     const events = await fetchCategoryEvents(category);
@@ -201,9 +200,6 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
     // ── Event cards ───────────────────────────────────────────────────────────
     pageEvents.forEach((event, idx) => {
       message += buildEventCard(event, idx, category);
-      // Deep link to event details
-      message += `└ [Details](https://polymarket.com/event/${event.slug}) · `;
-      message += `[Trade](https://t.me/${botUsername}?start=event_${event.id})\n\n`;
     });
 
     // ── Numbered quick-trade buttons ──────────────────────────────────────────
@@ -327,8 +323,19 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
 
     // ── Markets ───────────────────────────────────────────────────────────────
     const allMarkets = (event.markets || []) as any[];
-    const withVolume = allMarkets.filter((m: any) => (m.volume24hr || 0) > 0);
-    const sortedMarkets = (withVolume.length > 0 ? withVolume : allMarkets)
+
+    // Filter out resolved/settled markets (any outcome at 0¢ or 100¢)
+    const activeMarkets = allMarkets.filter((m: any) => {
+      const prices = parseOutcomePrices(m);
+      return prices.length > 0 && prices.every(p => {
+        const v = parseFloat(p || '0');
+        return v > 0.01 && v < 0.99;
+      });
+    });
+
+    const pool = activeMarkets.length > 0 ? activeMarkets : allMarkets;
+    const withVolume = pool.filter((m: any) => (m.volume24hr || 0) > 0);
+    const sortedMarkets = (withVolume.length > 0 ? withVolume : pool)
       .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0))
       .slice(0, 8);
 
@@ -370,6 +377,7 @@ export async function handleEventDetails(ctx: Context, eventId: string): Promise
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
+      image_url: event.image || undefined,
       link_preview_options: { is_disabled: true },
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
@@ -540,10 +548,11 @@ export async function handleSmartWallets(ctx: Context): Promise<void> {
     if (ctx.callbackQuery) await ctx.answerCbQuery('Loading...').catch(() => {});
 
     const { getTopSmartWallets, fmtUsd } = await import('../../services/smartWallets');
-    const wallets = await getTopSmartWallets(10);
+    const allWallets = await getTopSmartWallets(10);
+    const wallets    = allWallets.slice(0, 5);
 
     if (wallets.length === 0) {
-      await editOrReply(ctx,
+      await sendPage(ctx,
         '🏦 *Smart Wallets*\n\n' +
         '❌ Polymarket leaderboard could not be fetched right now.\n\n' +
         'Try again in a moment or discover top traders via the links below.',
@@ -556,7 +565,7 @@ export async function handleSmartWallets(ctx: Context): Promise<void> {
             ],
             [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
           ]),
-        } as any
+        }
       );
       return;
     }
@@ -564,33 +573,29 @@ export async function handleSmartWallets(ctx: Context): Promise<void> {
     const botUsername = config.telegram.botUsername;
     const medals = ['🥇', '🥈', '🥉'];
 
+    // Compact 3-line format so 5 wallets fit within the 1024-char caption limit
     let msg =
-      '🏦 *Smart Wallets — All-Time Top 10*\n' +
-      '_Polymarket Official Leaderboard · Refreshes every 5 min_\n\n';
+      '🏦 *Smart Wallets — Top 5*\n' +
+      '_Official Leaderboard · 5 min cache_\n\n';
 
     for (const [i, w] of wallets.entries()) {
-      const rank       = i + 1;
-      const medal      = medals[i] ?? `${rank}.`;
-      const pnlAbs        = w.pnlAbs          ?? 0;
-      const pnlPct        = w.pnlPct          ?? 0;
-      const vol           = w.volume          ?? 0;
-      const tradeCount    = w.tradeCount      ?? 0;
-      const avgSize       = w.avgTradeSizeUsd ?? 0;
-      const pnlSign       = pnlAbs >= 0 ? '+' : '';
-      const pnlEmoji      = pnlAbs >= 0 ? '📈' : '📉';
-      const short         = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
-      const deepLink      = `https://t.me/${botUsername}?start=copy_${w.address}`;
+      const rank     = i + 1;
+      const medal    = medals[i] ?? `${rank}.`;
+      const pnlAbs   = w.pnlAbs  ?? 0;
+      const pnlPct   = w.pnlPct  ?? 0;
+      const vol      = w.volume   ?? 0;
+      const pnlSign  = pnlAbs >= 0 ? '+' : '';
+      const pnlEmoji = pnlAbs >= 0 ? '📈' : '📉';
+      const short    = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+      const deepLink = `https://t.me/${botUsername}?start=copy_${w.address}`;
 
       msg += `${medal} *${w.displayName.slice(0, 20)}* \`${short}\`\n`;
-      msg += `   ${w.specialty ?? '📊 General'}\n`;
-      msg += `   ${pnlEmoji} PnL: *${pnlSign}${fmtUsd(pnlAbs)}* (${pnlSign}${pnlPct}%) · 📊 Vol: ${fmtUsd(vol)}\n`;
-      msg += `   🔄 ${tradeCount} trades · 💵 Avg: ${fmtUsd(avgSize)}\n`;
+      msg += `   ${pnlEmoji} *${pnlSign}${fmtUsd(pnlAbs)}* (${pnlSign}${pnlPct}%) · Vol: ${fmtUsd(vol)}\n`;
       msg += `   [▶ Copy Trade](${deepLink})\n\n`;
     }
 
-    await editOrReply(ctx, msg, {
+    await sendPage(ctx, msg, {
       parse_mode: 'Markdown',
-      disable_web_page_preview: true,
       ...Markup.inlineKeyboard([
         [
           Markup.button.url('📊 PredictFolio', PREDICTFOLIO_URL),
@@ -599,7 +604,7 @@ export async function handleSmartWallets(ctx: Context): Promise<void> {
         [Markup.button.callback('🔄 Refresh', 'show_wallet')],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
-    } as any);
+    });
 
     logger.info(`[smartWallets] Detailed page shown, ${wallets.length} wallets`);
   } catch (err) {
