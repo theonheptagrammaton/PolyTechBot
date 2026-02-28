@@ -67,7 +67,6 @@ export async function sendPage(
   if (imageUrl || imagePath) {
     const cacheKey = imageUrl || imagePath!;
     const cached   = _urlPhotoCache.get(cacheKey);
-    // For first send: URLs go directly, local paths become a ReadStream
     const mediaId: any = cached
       ? cached
       : imageUrl
@@ -75,6 +74,7 @@ export async function sendPage(
         : { source: fs.createReadStream(imagePath!) };
 
     if (isPhoto) {
+      // Try to swap photo in-place
       try {
         const result: any = await (ctx as any).editMessageMedia(
           { type: 'photo', media: mediaId, caption: safeCaption, parse_mode: parseMode },
@@ -86,12 +86,18 @@ export async function sendPage(
         return;
       } catch (err: any) {
         if (isBenignTelegramError(err)) return;
-        // fall through to delete+send
+        // editMessageMedia failed — update caption only, keep whatever photo is there
+        try {
+          await (ctx as any).editMessageCaption(safeCaption, {
+            parse_mode: parseMode,
+            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+          });
+        } catch { /* ignore */ }
+        return;
       }
     }
 
-    // Text message → must create a new photo message
-    if (cbMsg) await ctx.deleteMessage().catch(() => {});
+    // Not a photo message — send a new photo (no deletion)
     try {
       const result: any = await ctx.replyWithPhoto(mediaId, {
         caption: safeCaption,
@@ -118,9 +124,8 @@ export async function sendPage(
     return;
   }
 
-  // ── Default: static menu image ────────────────────────────────────────────
-  // Always swap to the menu photo explicitly so a previous page's photo
-  // (e.g. an event OG image) is never left behind on an unrelated page.
+  // ── Default: static menu image ─────────────────────────────────────────────
+  // Always swap to menu photo so a previous page's photo is never left behind.
   if (isPhoto) {
     const menuMedia: any = _cachedPhotoFileId
       ? _cachedPhotoFileId
@@ -136,12 +141,18 @@ export async function sendPage(
       return;
     } catch (err: any) {
       if (isBenignTelegramError(err)) return;
-      // fall through to delete+send
+      // editMessageMedia failed — update caption only, keep whatever photo is there
+      try {
+        await (ctx as any).editMessageCaption(safeCaption, {
+          parse_mode: parseMode,
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+        });
+      } catch { /* ignore */ }
+      return;
     }
   }
 
-  if (cbMsg) await ctx.deleteMessage().catch(() => {});
-
+  // Not a photo message — send a new photo (no deletion)
   const media = _cachedPhotoFileId
     ? _cachedPhotoFileId
     : { source: fs.createReadStream(MENU_IMAGE) };
@@ -203,7 +214,7 @@ export async function editOrReply(
   const isPhoto = msg && 'photo' in msg && Array.isArray((msg as any).photo);
 
   if (isPhoto) {
-    await ctx.deleteMessage().catch(() => {});
+    // Never delete — send text as a new message alongside the photo
     await ctx.reply(text, extra as any);
   } else {
     try {

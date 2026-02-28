@@ -179,8 +179,7 @@ export async function handleWithdrawToken(ctx: Context, tokenKey: string): Promi
     let msgId: number | undefined;
 
     if (cbMsg && 'photo' in cbMsg) {
-      // Previous message is the main menu photo — delete it, send a plain text reply
-      await ctx.deleteMessage().catch(() => {});
+      // Photo message — send a new text reply without deleting the photo
       const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
       msgId = sent.message_id;
     } else if (cbMsg) {

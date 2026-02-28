@@ -61,13 +61,6 @@ const CATEGORY_META: Record<string, { name: string; emoji: string }> = {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Build a visual probability bar (8 chars wide). */
-function probBar(probability: number): string {
-  const n = 8;
-  const filled = Math.round(Math.max(0, Math.min(1, probability)) * n);
-  return '▓'.repeat(filled) + '░'.repeat(n - filled);
-}
-
 /** Sanitize a title so it doesn't break Telegram Markdown v1. */
 function safeTitle(s: string, maxLen = 62): string {
   const cleaned = s.replace(/[*_`[\]()~>#+=|{}.!]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -133,12 +126,11 @@ function buildEventCard(event: Event, pageIdx: number, category: string): string
       const p0 = parseFloat(prices[0] || '0');
       const p1 = parseFloat(prices[1] || '0');
       if (!isNaN(p0) && !isNaN(p1)) {
-        const bar = probBar(p0);
         const y = (p0 * 100).toFixed(0);
         const n = (p1 * 100).toFixed(0);
         const o0 = outcomes[0].length > 10 ? outcomes[0].slice(0, 10) + '…' : outcomes[0];
         const o1 = outcomes[1].length > 10 ? outcomes[1].slice(0, 10) + '…' : outcomes[1];
-        priceRow = `${bar}  ${o0} *${y}¢* · ${o1} ${n}¢\n`;
+        priceRow = `${o0} *${y}¢* · ${o1} ${n}¢\n`;
       }
     }
   }
@@ -192,7 +184,10 @@ export async function handleShowCategories(ctx: Context): Promise<void> {
           ],
           [Markup.button.callback('📹 Pop Culture', 'category_pop-culture')],
           [Markup.button.callback('📊 All Markets',  'category_all')],
-          [Markup.button.callback('« Back', 'back_to_menu')],
+          [
+            Markup.button.callback('« Back', 'back_to_menu'),
+            Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+          ],
         ]),
       }
     );
@@ -221,7 +216,10 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
         '😔 No active events found right now.\n\nTry another category or check back later!',
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('« Categories', 'show_categories')]]),
+          ...Markup.inlineKeyboard([[
+            Markup.button.callback('« Categories', 'show_categories'),
+            Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+          ]]),
         }
       );
       return;
@@ -289,7 +287,10 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
         '❌ *Error Loading Markets*\n\nCould not fetch markets right now. Please try again.',
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('« Categories', 'show_categories')]]),
+          ...Markup.inlineKeyboard([[
+            Markup.button.callback('« Categories', 'show_categories'),
+            Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+          ]]),
         }
       );
     } catch { /* ignore */ }
@@ -318,7 +319,7 @@ export async function handleEventFromPage(
       return;
     }
 
-    await handleEventDetails(ctx, String(event.id));
+    await handleEventDetails(ctx, String(event.id), 1, category, page);
   } catch (error) {
     logger.error('Error loading event from page button:', error);
     await ctx.reply('❌ Could not load event details. Please try again.');
@@ -337,6 +338,8 @@ export async function handleEventDetails(
   ctx: Context,
   eventId: string,
   marketPage: number = 1,
+  backCategory?: string,
+  backPage: number = 1,
 ): Promise<void> {
   try {
     if (ctx.callbackQuery) await ctx.answerCbQuery('Loading…').catch(() => {});
@@ -379,10 +382,16 @@ export async function handleEventDetails(
 
     const totalMarkets = sortedMarkets.length;
 
+    const backCb     = backCategory ? `page_${backCategory}_${backPage}` : 'show_categories';
+    const backSuffix = backCategory ? `_${backCategory}_${backPage}` : '';
+
     if (totalMarkets === 0) {
       await sendPage(ctx, `${ce(EMOJI.eventTitle, '💰')} <b>${esc(safeTitle(event.title, 60))}</b>\n\n<i>No active markets found.</i>`, {
         parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
+        ...Markup.inlineKeyboard([[
+          Markup.button.callback('« Back', backCb),
+          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        ]]),
       });
       return;
     }
@@ -413,33 +422,48 @@ export async function handleEventDetails(
       const p0 = parseFloat(prices[0] || '0');
       const p1 = parseFloat(prices[1] || '0');
       if (!isNaN(p0) && !isNaN(p1)) {
-        const bar = probBar(p0);
         const y = (p0 * 100).toFixed(1);
         const n = (p1 * 100).toFixed(1);
-        message += `${bar}  ${eUp}${esc(outcomes[0])} <b>${y}¢</b> · ${eDown}${esc(outcomes[1])} ${n}¢\n`;
+        message += `${eUp}${esc(outcomes[0])} <b>${y}¢</b> · ${eDown}${esc(outcomes[1])} ${n}¢\n`;
       }
     }
 
     message += `${eStats} ${vol}`;
     message += `  <a href="https://t.me/${botUsername}?start=trade_${marketId}_yes_default">YES $${defaultAmount}</a>`;
-    message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>`;
-    message += ` · <a href="https://t.me/${botUsername}?start=mkt_${marketId}">🔍 Trade</a>\n\n`;
+    message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>\n`;
+    message += ` · <a href="https://t.me/${botUsername}?start=mkt_${marketId}">Details Trade</a>\n\n`;
     message += `🔗 <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
 
     // ── Keyboard ──────────────────────────────────────────────────────────────
     const buttons: any[] = [];
 
+    // Row 1 — Buy buttons (custom amount)
+    buttons.push([
+      Markup.button.url(`✅ Buy YES`, `https://t.me/${botUsername}?start=trade_${marketId}_yes_custom`),
+      Markup.button.url(`❌ Buy NO`,  `https://t.me/${botUsername}?start=trade_${marketId}_no_custom`),
+    ]);
+
+    // Row 2 — Limit order buttons
+    buttons.push([
+      Markup.button.url(`📋 Limit YES`, `https://t.me/${botUsername}?start=limit_${marketId}_yes`),
+      Markup.button.url(`📋 Limit NO`,  `https://t.me/${botUsername}?start=limit_${marketId}_no`),
+    ]);
+
+    // Row 3 — Navigation (only for multi-market events)
     if (totalMarkets > 1) {
       const navRow: any[] = [];
       if (currentPage > 1)
-        navRow.push(Markup.button.callback('◀️', `evd_mkt_${event.id}_${currentPage - 1}`));
+        navRow.push(Markup.button.callback('◀️ Prev', `evd_mkt_${event.id}_${currentPage - 1}${backSuffix}`));
       navRow.push(Markup.button.callback(`${currentPage}/${totalMarkets}`, 'noop'));
       if (currentPage < totalMarkets)
-        navRow.push(Markup.button.callback('▶️', `evd_mkt_${event.id}_${currentPage + 1}`));
+        navRow.push(Markup.button.callback('▶️ Next', `evd_mkt_${event.id}_${currentPage + 1}${backSuffix}`));
       buttons.push(navRow);
     }
 
-    buttons.push([Markup.button.callback('🏠 Main Menu', 'back_to_menu')]);
+    buttons.push([
+      Markup.button.callback('« Back', backCb),
+      Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+    ]);
 
     const ogImage = event.slug
       ? await fetchOgImage(`https://polymarket.com/event/${event.slug}`)
@@ -520,7 +544,6 @@ export function mainMenuKeyboard() {
     [
       Markup.button.callback('📁 Portfolio', 'portfolio'),
       Markup.button.callback('👛 Wallet', 'wallet_page'),
-      Markup.button.callback('💰 Deposit', 'deposit_menu'),
     ],
     [
       Markup.button.callback('🔓 Smart Wallets', 'show_wallet'),
@@ -533,6 +556,9 @@ export function mainMenuKeyboard() {
     [
       Markup.button.callback('💼 Active Positions', 'portfolio_open_1'),
       Markup.button.callback('⚙️ Settings', 'settings_menu'),
+    ],
+    [
+      Markup.button.callback('💰 Deposit', 'deposit_menu'),
     ],
   ]);
 }
@@ -575,12 +601,18 @@ export async function handleBackToMenu(ctx: Context): Promise<void> {
         return;
       } catch (err: any) {
         if (isBenignTelegramError(err)) return;
-        // fall through to delete+send
+        // editMessageMedia failed — update caption only, keep current photo
+        try {
+          await (ctx as any).editMessageCaption(caption, {
+            parse_mode: 'HTML',
+            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+          });
+        } catch { /* ignore */ }
+        return;
       }
     }
 
-    // Text message → send fresh photo
-    if (cbMsg) await ctx.deleteMessage().catch(() => {});
+    // Not a photo message — send fresh photo (no deletion)
     const result = await ctx.replyWithPhoto(
       getMenuPhotoMedia() as any,
       { caption, parse_mode: 'HTML', ...keyboard }
@@ -919,7 +951,7 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
     const eventId = market.events?.[0]?.id;
     const backBtn = eventId && /^\d+$/.test(String(eventId))
       ? Markup.button.callback('← Back to Event', `evd_mkt_${eventId}_1`)
-      : Markup.button.callback('🏠 Main Menu', 'back_to_menu');
+      : Markup.button.callback('« Markets', 'show_categories');
 
     await sendPage(ctx, message, {
       parse_mode: 'HTML',
@@ -928,6 +960,10 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
         [
           Markup.button.url(`✅ YES $${defaultAmount}`, `https://t.me/${botUsername}?start=trade_${marketId}_yes_default`),
           Markup.button.url(`❌ NO $${defaultAmount}`,  `https://t.me/${botUsername}?start=trade_${marketId}_no_default`),
+        ],
+        [
+          Markup.button.url(`📋 Limit YES`, `https://t.me/${botUsername}?start=limit_${marketId}_yes`),
+          Markup.button.url(`📋 Limit NO`,  `https://t.me/${botUsername}?start=limit_${marketId}_no`),
         ],
         [Markup.button.url('💬 Custom Trade', `https://t.me/${botUsername}?start=trade_${marketId}_custom`)],
         [backBtn, Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
