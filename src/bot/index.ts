@@ -24,6 +24,9 @@ import {
   handleMarketDetails,
   handleBackToMenu,
   handleSmartWallets,
+  handleSwCategoryFilter,
+  handleSwTimeFilter,
+  handleSwSortFilter,
   handleRefreshCategory,
 } from './handlers/markets';
 import {
@@ -122,6 +125,7 @@ import {
   handleCopyHistory,
   handleCopyCancel,
   handleCopyTpSlChoice,
+  handleCopyNicknameSkip,
   handleSmartCopyStart,
   copyAddState,
 } from './handlers/copyTrade';
@@ -223,7 +227,24 @@ export class TelegramBot {
     // Callback query handlers for buttons
     this.bot.action('show_categories', handleShowCategories);
     this.bot.action('back_to_menu', handleBackToMenu);
-    this.bot.action('show_wallet', handleSmartWallets);
+    this.bot.action('show_wallet', async (ctx) => await handleSmartWallets(ctx));
+
+    // Discover Traders paginated list: sw_{page}_{cat}_{time}_{sort}
+    this.bot.action(/^sw_(\d+)_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSmartWallets(ctx, ctx.match[2], ctx.match[3], ctx.match[4], parseInt(ctx.match[1], 10));
+    });
+    // Category filter: sw_fc_{cat}_{time}_{sort}
+    this.bot.action(/^sw_fc_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwCategoryFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
+    });
+    // Time filter: sw_ft_{cat}_{time}_{sort}
+    this.bot.action(/^sw_ft_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwTimeFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
+    });
+    // Sort filter: sw_fs_{cat}_{time}_{sort}
+    this.bot.action(/^sw_fs_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwSortFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
+    });
     this.bot.action('wallet_page', handleWalletPage);
     this.bot.action('portfolio', handlePortfolio);
     this.bot.action('withdraw', handleWithdraw);
@@ -275,6 +296,13 @@ export class TelegramBot {
       await ctx.answerCbQuery('Loading...');
       const { handleEventDetails } = await import('./handlers/markets');
       await handleEventDetails(ctx, ctx.match[1]);
+    });
+
+    // Event detail market pagination: evd_mkt_{eventId}_{page}
+    this.bot.action(/^evd_mkt_(\d+)_(\d+)$/, async (ctx) => {
+      await ctx.answerCbQuery();
+      const { handleEventDetails } = await import('./handlers/markets');
+      await handleEventDetails(ctx, ctx.match[1], parseInt(ctx.match[2], 10));
     });
 
     // Portfolio handlers
@@ -433,6 +461,7 @@ export class TelegramBot {
     this.bot.action('copy_mode_multiplier', handleCopyModeMultiplier);
     this.bot.action('copy_stop_all', handleCopyStopAllAction);
     this.bot.action('copy_cancel', handleCopyCancel);
+    this.bot.action('copy_nickname_skip', handleCopyNicknameSkip);
     this.bot.action('copy_tpsl_none', async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'none'); });
     this.bot.action('copy_tpsl_tp',   async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'tp'); });
     this.bot.action('copy_tpsl_sl',   async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'sl'); });

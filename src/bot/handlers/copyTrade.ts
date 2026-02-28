@@ -9,9 +9,10 @@ import { ce, esc, EMOJI } from '../../utils/customEmoji';
 // ─── State ─────────────────────────────────────────────────────────────────────
 
 interface CopyAddState {
-  step: 'awaiting_address' | 'awaiting_mode' | 'awaiting_amount'
+  step: 'awaiting_address' | 'awaiting_nickname' | 'awaiting_mode' | 'awaiting_amount'
       | 'awaiting_tp_sl_choice' | 'awaiting_tp' | 'awaiting_sl';
   address?: string;
+  nickname?: string;
   mode?: 'fixed' | 'multiplier';
   amount?: number;
   takeProfitPct?: number;
@@ -81,8 +82,6 @@ export async function handleCopyList(ctx: Context): Promise<void> {
     return;
   }
 
-  const eTitle = ce(EMOJI.refHub, '👥');
-
   const subs = await prisma.copySubscription.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
@@ -90,7 +89,7 @@ export async function handleCopyList(ctx: Context): Promise<void> {
 
   if (subs.length === 0) {
     await sendPage(ctx,
-      `${eTitle} <b>Copy Trading</b>\n\nYou have no traders followed yet.\n\nUse /copy add to follow a new trader.`,
+      `🎯 <b>Copy Trading</b>\n\nYou have no traders followed yet.\n\nUse /copy add to follow a new trader.`,
       {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
@@ -119,25 +118,33 @@ export async function handleCopyList(ctx: Context): Promise<void> {
     countMap.set(row.traderAddress, existing);
   }
 
-  const lines: string[] = [`${eTitle} <b>Active Copy Subscriptions</b>\n`];
+  const activeSubs = subs.filter(s => s.isActive).length;
+  const lines: string[] = [
+    `🎯 <b>Copy Trading</b>\n\nYou are currently copying ${activeSubs} trader${activeSubs !== 1 ? 's' : ''}.\n`,
+  ];
 
   for (const s of subs) {
     const short = `${s.traderAddress.slice(0, 6)}...${s.traderAddress.slice(-4)}`;
     const sizeLabel = s.fixedAmount
-      ? `$${s.fixedAmount} fixed`
-      : `×${(s.multiplier ?? 1).toFixed(2)}`;
+      ? `$${s.fixedAmount} Fixed`
+      : `${(s.multiplier ?? 1).toFixed(0)}% Percentage`;
     const counts = countMap.get(s.traderAddress) ?? { filled: 0, failed: 0, skipped: 0 };
-    const countLine = `✅ ${counts.filled} | ❌ ${counts.failed} | ⏭ ${counts.skipped}`;
-    const status = s.isActive ? '🟢' : '🔴';
+    const statusDot = s.isActive ? '🟢' : '🔴';
+
+    const displayName = s.label
+      ? `${statusDot} <b>${esc(s.label)}</b>`
+      : `${statusDot} <code>${esc(short)}</code>`;
 
     const tpSlParts: string[] = [];
     if (s.takeProfitPct != null) tpSlParts.push(`📈 TP: +${s.takeProfitPct}%`);
     if (s.stopLossPct  != null) tpSlParts.push(`🛑 SL: −${s.stopLossPct}%`);
-    const tpSlLine = tpSlParts.length > 0 ? `\n   ${tpSlParts.join('   ')}` : '';
+    const tpSlLine = tpSlParts.length > 0 ? `├ ${tpSlParts.join('   ')}\n` : '';
 
     lines.push(
-      `${status} <code>${esc(short)}</code>${s.label ? ` (${esc(s.label)})` : ''}\n` +
-      `   Size: ${esc(sizeLabel)} · ${countLine}${tpSlLine}`
+      `• ${displayName}\n` +
+      `├ Mode: ${esc(sizeLabel)}\n` +
+      tpSlLine +
+      `└ ✅ ${counts.filled} | ❌ ${counts.failed} | ⏭ ${counts.skipped}`
     );
   }
 
@@ -227,15 +234,39 @@ export async function handleCopyAddInput(ctx: Context, text: string): Promise<bo
       }
     }
 
-    // Move to mode selection
-    state.step = 'awaiting_mode';
+    // Move to nickname step
+    state.step = 'awaiting_nickname';
     state.address = addr;
     state.timestamp = Date.now();
     copyAddState.set(telegramId, state);
 
-    const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
     await sendPage(ctx,
-      `✅ Address: <code>${esc(short)}</code>\n\nHow should the copy size be set?`,
+      `➕ <b>Add Copytrade</b> | Step 2/7\n\n` +
+      `Wallet:\n<code>${esc(addr)}</code>\n\n` +
+      `Give this trader a nickname:\n\n` +
+      `📝 Example:\n"Smart Whale", "Alpha Caller"`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('⏭ Skip', 'copy_nickname_skip')],
+          [Markup.button.callback('❌ Cancel', 'copy_cancel')],
+        ]),
+      }
+    );
+    return true;
+  }
+
+  if (state.step === 'awaiting_nickname') {
+    const nickname = text.trim().slice(0, 20);
+    state.nickname = nickname || undefined;
+    state.step = 'awaiting_mode';
+    state.timestamp = Date.now();
+    copyAddState.set(telegramId, state);
+
+    const short = `${state.address!.slice(0, 6)}...${state.address!.slice(-4)}`;
+    const nickLine = nickname ? `Nickname: <b>${esc(nickname)}</b>\n` : '';
+    await sendPage(ctx,
+      `${nickLine}Wallet: <code>${esc(short)}</code>\n\nHow should the copy size be set?`,
       {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
@@ -422,6 +453,7 @@ async function saveCopySubscription(
       create: {
         userId: user.id,
         traderAddress: addr,
+        label: state.nickname ?? null,
         fixedAmount: state.mode === 'fixed' ? value : null,
         multiplier: state.mode === 'multiplier' ? value : null,
         takeProfitPct: state.takeProfitPct ?? null,
@@ -429,6 +461,7 @@ async function saveCopySubscription(
         isActive: true,
       },
       update: {
+        label: state.nickname ?? null,
         fixedAmount: state.mode === 'fixed' ? value : null,
         multiplier: state.mode === 'multiplier' ? value : null,
         takeProfitPct: state.takeProfitPct ?? null,
@@ -437,17 +470,18 @@ async function saveCopySubscription(
       },
     });
 
-    const eTitle = ce(EMOJI.refHub, '👥');
     const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
     const modeLabel = state.mode === 'fixed'
       ? `$${value.toFixed(2)} fixed amount`
       : `×${value.toFixed(2)} multiplier`;
+    const nickLine = state.nickname ? `Nickname: <b>${esc(state.nickname)}</b>\n` : '';
     const tpLine = state.takeProfitPct != null ? `\n📈 TP: +${state.takeProfitPct}%` : '';
     const slLine = state.stopLossPct  != null ? `\n🛑 SL: −${state.stopLossPct}%`  : '';
 
     await sendPage(ctx,
-      `${eTitle} <b>Trader Added</b>\n\n` +
-      `Address: <code>${esc(short)}</code>\n` +
+      `🎯 <b>Trader Added</b>\n\n` +
+      nickLine +
+      `Wallet: <code>${esc(short)}</code>\n` +
       `Size: ${esc(modeLabel)}${tpLine}${slLine}\n\n` +
       `Trades will be automatically copied now.`,
       {
@@ -464,6 +498,38 @@ async function saveCopySubscription(
     logger.error('[copy] Failed to save subscription:', err?.message);
     await ctx.reply('❌ Failed to save subscription. Please try again.');
   }
+}
+
+// ─── Nickname Skip Callback ───────────────────────────────────────────────────
+
+export async function handleCopyNicknameSkip(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery();
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const state = copyAddState.get(telegramId);
+  if (!state || state.step !== 'awaiting_nickname' || isExpired(state.timestamp)) {
+    copyAddState.delete(telegramId);
+    await sendPage(ctx, '❌ Session expired. Try /copy add again.');
+    return;
+  }
+
+  state.step = 'awaiting_mode';
+  state.timestamp = Date.now();
+  copyAddState.set(telegramId, state);
+
+  const short = `${state.address!.slice(0, 6)}...${state.address!.slice(-4)}`;
+  await sendPage(ctx,
+    `Wallet: <code>${esc(short)}</code>\n\nHow should the copy size be set?`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💵 Fixed Amount ($)', 'copy_mode_fixed')],
+        [Markup.button.callback('✖️ Proportional Multiplier (×)', 'copy_mode_multiplier')],
+        [Markup.button.callback('❌ Cancel', 'copy_cancel')],
+      ]),
+    }
+  );
 }
 
 // ─── Mode selection callbacks ─────────────────────────────────────────────────
@@ -698,21 +764,22 @@ export async function handleSmartCopyStart(ctx: Context, address: string): Promi
     return;
   }
 
-  // Pre-fill address, jump to mode selection
+  // Pre-fill address, go to nickname step
   copyAddState.set(telegramId, {
-    step: 'awaiting_mode',
+    step: 'awaiting_nickname',
     address,
     timestamp: Date.now(),
   });
 
-  const short = `${address.slice(0, 6)}...${address.slice(-4)}`;
   await sendPage(ctx,
-    `✅ Address: <code>${esc(short)}</code>\n\nHow should the copy size be set?`,
+    `➕ <b>Add Copytrade</b> | Step 2/7\n\n` +
+    `Wallet:\n<code>${esc(address)}</code>\n\n` +
+    `Give this trader a nickname:\n\n` +
+    `📝 Example:\n"Smart Whale", "Alpha Caller"`,
     {
       parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('💵 Fixed Amount ($)', 'copy_mode_fixed')],
-        [Markup.button.callback('✖️ Proportional Multiplier (×)', 'copy_mode_multiplier')],
+        [Markup.button.callback('⏭ Skip', 'copy_nickname_skip')],
         [Markup.button.callback('❌ Cancel', 'copy_cancel')],
       ]),
     }

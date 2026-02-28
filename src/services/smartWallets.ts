@@ -23,10 +23,10 @@ export interface SmartWalletInfo {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Fetch top traders from Polymarket's official leaderboard (all-time PnL). */
-async function fetchLeaderboard(limit: number): Promise<any[]> {
+/** Fetch top traders from Polymarket's official leaderboard. */
+async function fetchLeaderboard(limit: number, timePeriod = 'ALL', orderBy = 'PNL'): Promise<any[]> {
   try {
-    const url = `${LEADERBOARD_API}?timePeriod=ALL&orderBy=PNL&limit=${limit}`;
+    const url = `${LEADERBOARD_API}?timePeriod=${timePeriod}&orderBy=${orderBy}&limit=${limit}`;
     const res = await fetch(url, {
       signal: AbortSignal.timeout(10000),
       headers: { Accept: 'application/json' },
@@ -168,12 +168,16 @@ export function fmtUsd(n: number | undefined | null): string {
  * Enriched with win rate, trade count, and specialty from the activity feed.
  * Results are cached for 5 minutes.
  */
-export async function getTopSmartWallets(limit = 10): Promise<SmartWalletInfo[]> {
-  const cacheKey = `smart_wallets:top:v5:${limit}`;
+export async function getTopSmartWallets(
+  limit = 50,
+  timePeriod = 'ALL',
+  orderBy = 'PNL',
+): Promise<SmartWalletInfo[]> {
+  const cacheKey = `sw:v7:${limit}:${timePeriod}:${orderBy}`;
   const cached = await redisCache.get<SmartWalletInfo[]>(cacheKey);
   if (cached && cached.length > 0) return cached;
 
-  const entries = await fetchLeaderboard(limit);
+  const entries = await fetchLeaderboard(limit, timePeriod, orderBy);
   if (entries.length === 0) return [];
 
   const results = await Promise.allSettled(

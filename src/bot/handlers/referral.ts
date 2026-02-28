@@ -15,6 +15,9 @@ const BOT_USERNAME = config.telegram.botUsername;
 
 export async function handleReferralHub(ctx: Context): Promise<void> {
   try {
+    // Answer immediately to clear the loading spinner (Telegram times out after 10s)
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
@@ -79,10 +82,6 @@ export async function handleReferralHub(ctx: Context): Promise<void> {
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
-
-    if (ctx.callbackQuery) {
-      await ctx.answerCbQuery().catch(() => {});
-    }
   } catch (err) {
     logger.error('[referral] handleReferralHub error:', err);
     await ctx.reply('❌ An error occurred. Please try again.');

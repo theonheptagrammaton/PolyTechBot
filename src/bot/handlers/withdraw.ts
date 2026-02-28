@@ -20,6 +20,12 @@ const POLYGON_TOKENS: Record<string, {
   'USDT':   { address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', decimals: 6,  symbol: 'USDT',   amountLabel: 'USD' },
 };
 
+/** Format a token balance for display (POL is not USD-denominated). */
+function formatBalance(balance: string | undefined, symbol: string | undefined): string {
+  const bal = balance ?? '0';
+  return symbol === 'POL' ? `${bal} POL` : `$${bal}`;
+}
+
 const TOKEN_CONTRACT_DISPLAY: Record<string, string> = {
   'USDC':   '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
   'POL':    'Native POL (gas token)',
@@ -72,8 +78,7 @@ export async function handleWithdrawMenu(ctx: Context): Promise<void> {
         ]),
       }
     );
-    const msgId = undefined;
-    logger.info(`[withdraw] Chain selection shown, msgId=${msgId}`);
+    logger.info('[withdraw] Chain selection shown');
   } catch (error) {
     logger.error('[withdraw] handleWithdrawMenu error:', error);
   }
@@ -156,20 +161,41 @@ export async function handleWithdrawToken(ctx: Context, tokenKey: string): Promi
 
     const text =
       `🏦 *Withdraw ${token.symbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* $${balance}\n` +
+      `💵 *Available Balance:* ${formatBalance(balance, token.symbol)}\n` +
       `🌐 *Token Address:*\n\`${contractDisplay}\`\n\n` +
       `📍 Please enter your Polygon wallet address:`;
 
-    await sendPage(ctx, text, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('← Back', 'wd_chain_polygon')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-      ]),
-    });
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('← Back', 'wd_chain_polygon')],
+      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+    ]);
 
-    const msgId = undefined;
+    // Send the state message and capture its message_id for future in-place edits.
+    // Cannot use sendPage() here because it returns void and the withdraw flow
+    // must track the exact message to edit it when the user types their address/amount.
+    const cbMsg = ctx.callbackQuery && 'message' in ctx.callbackQuery
+      ? ctx.callbackQuery.message : null;
     const chatId = ctx.chat?.id;
+    let msgId: number | undefined;
+
+    if (cbMsg && 'photo' in cbMsg) {
+      // Previous message is the main menu photo — delete it, send a plain text reply
+      await ctx.deleteMessage().catch(() => {});
+      const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+      msgId = sent.message_id;
+    } else if (cbMsg) {
+      // Edit the existing text message in place
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+        msgId = cbMsg.message_id;
+      } catch {
+        const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+        msgId = sent.message_id;
+      }
+    } else {
+      const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+      msgId = sent.message_id;
+    }
 
     // Save state
     withdrawState.set(telegramId, {
@@ -223,7 +249,7 @@ async function handleAddressInput(
   if (!ethers.utils.isAddress(address)) {
     await editWithdrawMessage(ctx, state,
       `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* $${state.balance}\n` +
+      `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
       `🌐 *Token Address:*\n\`${TOKEN_CONTRACT_DISPLAY[state.token!]}\`\n\n` +
       `❌ *Invalid address.* Please enter a valid Polygon wallet address:`,
       [[Markup.button.callback('← Back', `wd_token_${state.token}`)]]
@@ -243,7 +269,7 @@ async function handleAddressInput(
 
   await editWithdrawMessage(ctx, state,
     `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-    `💵 *Available Balance:* $${state.balance}\n` +
+    `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
     `🌐 *Token Address:*\n\`${TOKEN_CONTRACT_DISPLAY[state.token!]}\`\n` +
     `📍 *Destination:*\n\`${checksummed}\`\n\n` +
     `💰 Please enter the amount to withdraw (in ${amountLabel}):`,
@@ -277,7 +303,7 @@ async function handleAmountInput(
   if (isNaN(amount) || amount <= 0) {
     await editWithdrawMessage(ctx, state,
       `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* $${state.balance}\n` +
+      `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
       `📍 *Destination:*\n\`${state.destinationAddress}\`\n\n` +
       `❌ *Invalid amount.* Please enter a positive number:`,
       [[Markup.button.callback('← Cancel', 'wd_cancel')]]
@@ -289,7 +315,7 @@ async function handleAmountInput(
   if (amount > available) {
     await editWithdrawMessage(ctx, state,
       `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* $${state.balance}\n` +
+      `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
       `📍 *Destination:*\n\`${state.destinationAddress}\`\n\n` +
       `❌ *Insufficient balance.* Max: ${state.balance} ${state.tokenSymbol}\n\nPlease enter a smaller amount:`,
       [[Markup.button.callback('← Cancel', 'wd_cancel')]]
@@ -305,17 +331,20 @@ async function handleAmountInput(
     []
   );
 
-  // Execute
+  // Fetch user BEFORE deleting state so a DB lookup failure allows a clean retry
+  const user = await getUserByTelegramId(telegramId).catch(() => null);
+  if (!user?.encryptedPrivateKey || !user?.polymarketProxyAddress) {
+    await editWithdrawMessage(ctx, state, '❌ Wallet not found. Please contact support.', [
+      [Markup.button.callback('🔄 Try Again', 'withdraw_menu')],
+      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+    ]);
+    return;
+  }
+
+  // State deleted here — prevents double-submission on re-click
   withdrawState.delete(telegramId);
 
   try {
-    const user = await getUserByTelegramId(telegramId);
-    if (!user?.encryptedPrivateKey || !user?.polymarketProxyAddress) {
-      await editWithdrawMessage(ctx, state, '❌ Wallet not found. Please contact support.', [
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-      ]);
-      return;
-    }
 
     const result = await executeWithdraw({
       encryptedPrivateKey: user.encryptedPrivateKey,

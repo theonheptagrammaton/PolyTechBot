@@ -267,7 +267,7 @@ async function executeCopyOrder(
       // replicate the trade without knowing the trader's full position size.
       const traderShares = parseFloat((trade.sizeUsd / trade.price).toFixed(4));
 
-      if (traderShares >= pos.size) {
+      if (traderShares > pos.size) {
         return { status: 'skipped', errorMsg: `trader sold ${traderShares.toFixed(4)} shares but user only holds ${pos.size.toFixed(4)}` };
       }
 
@@ -365,11 +365,13 @@ async function tickForTrader(
   if (newTrades.length > 0) {
   // Y5: Fetch balance once per user at tick start (not once per trade×subscription)
   const balanceCache = new Map<string, number>();
+  // Tracks users whose balance fetch failed this tick — skip auto-stop for them
+  const balanceFetchFailed = new Set<string>();
   // Fetch positions once per proxy address at tick start (needed for first-entry detection)
   const positionCache = new Map<string, ActivePosition[]>();
 
   for (const sub of subs) {
-    if (balanceCache.has(sub.userId)) continue;
+    if (balanceCache.has(sub.userId) || balanceFetchFailed.has(sub.userId)) continue;
     try {
       const client = await createClobClientForUser(
         sub.user.encryptedPrivateKey,
@@ -381,7 +383,7 @@ async function tickForTrader(
       balanceCache.set(sub.userId, balData?.balance ? parseFloat(balData.balance) / 1_000_000 : 0);
     } catch (err: any) {
       logger.warn(`[copy] Failed to fetch balance for user ${sub.user.telegramId}: ${err?.message}`);
-      balanceCache.set(sub.userId, 0);
+      balanceFetchFailed.add(sub.userId);
     }
 
     // Pre-fetch positions for users with fixedAmount so we can detect first-entry BUYs
@@ -403,6 +405,9 @@ async function tickForTrader(
 
       // Auto-stop check using cached balance
       try {
+        // Skip if balance fetch failed this tick — avoid false auto-stops
+        if (balanceFetchFailed.has(sub.userId)) continue;
+
         const balance = balanceCache.get(sub.userId) ?? 0;
 
         if (balance < sub.autoStopBelowBalance) {
@@ -680,11 +685,15 @@ async function checkTpSlPositions(
 
     const result = await executeCopyOrder(user, syntheticTrade, pos.copiedSize);
 
-    // Mark as TP/SL exited regardless of order result (prevents retry loops)
-    await prisma.copiedTrade.update({
-      where: { id: pos.id },
-      data: { tpSlStatus: triggerType },
-    });
+    // Mark as TP/SL exited only when order was placed or skipped (not on hard failure,
+    // so the next tick can retry). 'skipped' means user has no position to sell —
+    // marking it prevents repeated pointless retries.
+    if (result.status !== 'failed') {
+      await prisma.copiedTrade.update({
+        where: { id: pos.id },
+        data: { tpSlStatus: triggerType },
+      });
+    }
 
     // Send notification
     const shortAddr = `${sub.traderAddress.slice(0, 6)}...${sub.traderAddress.slice(-4)}`;

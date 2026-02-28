@@ -277,6 +277,10 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
       return;
     }
 
+    // Refresh timestamp so the 10-min cleanup interval doesn't delete state
+    // between the % click and the confirm button press
+    positionTradeState.set(telegramId, { ...state, timestamp: Date.now() });
+
     await showSellConfirmation(ctx, telegramId, state, price, shares);
   } catch (error) {
     logger.error('Error in quick pct sell:', error);

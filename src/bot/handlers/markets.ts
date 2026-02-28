@@ -16,6 +16,31 @@ import { isBenignTelegramError, sendPage, getMenuPhotoMedia, cacheMenuPhotoFileI
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
 
+// ─── OG Image helper ──────────────────────────────────────────────────────────
+
+const _ogImageCache = new Map<string, string | null>();
+
+async function fetchOgImage(pageUrl: string): Promise<string | null> {
+  if (_ogImageCache.has(pageUrl)) return _ogImageCache.get(pageUrl) ?? null;
+  try {
+    const axios = (await import('axios')).default;
+    const r = await axios.get<string>(pageUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' },
+      timeout: 5000,
+    });
+    const html = typeof r.data === 'string' ? r.data : '';
+    const match =
+      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    const url = match ? match[1] : null;
+    _ogImageCache.set(pageUrl, url);
+    return url;
+  } catch {
+    _ogImageCache.set(pageUrl, null);
+    return null;
+  }
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EVENTS_PER_PAGE = 3;
@@ -411,9 +436,13 @@ export async function handleEventDetails(
 
     buttons.push([Markup.button.callback('🏠 Main Menu', 'back_to_menu')]);
 
+    const ogImage = event.slug
+      ? await fetchOgImage(`https://polymarket.com/event/${event.slug}`)
+      : null;
+
     await sendPage(ctx, message, {
       parse_mode: 'HTML',
-      image_url: event.image || undefined,
+      image_url: ogImage || event.image || undefined,
       ...Markup.inlineKeyboard(buttons),
     });
 
@@ -570,81 +599,216 @@ export async function handleShowWallet(ctx: Context): Promise<void> {
   }
 }
 
-// ─── Smart Wallets ─────────────────────────────────────────────────────────────
+// ─── Discover Traders / Smart Wallets ─────────────────────────────────────────
 
-// Update these URLs to match the exact sites you want to link to
-const PREDICTFOLIO_URL    = 'https://predictfolio.com/';
-const POLYMARKET_ANALYTICS_URL = 'https://polymarketanalytics.com/traders';
+const WALLETS_PER_PAGE = 5;
 
+const SW_CAT_META: Record<string, { label: string; emoji: string }> = {
+  'all':      { label: 'All Markets', emoji: '🌍' },
+  'politics': { label: 'Politics',    emoji: '🏛' },
+  'sports':   { label: 'Sports',      emoji: '🥇' },
+  'crypto':   { label: 'Crypto',      emoji: '🌙' },
+  'culture':  { label: 'Culture',     emoji: '🎉' },
+  'tech':     { label: 'Tech',        emoji: '💻' },
+  'finance':  { label: 'Finance',     emoji: '💵' },
+  'economy':  { label: 'Economy',     emoji: '📊' },
+};
 
-export async function handleSmartWallets(ctx: Context): Promise<void> {
+/** Maps category key → specialty strings from deriveSpecialty() in smartWallets service. */
+const SW_CAT_SPECIALTIES: Record<string, string[]> = {
+  'politics': ['🏛️ Politics'],
+  'sports':   ['⚽ Sports', '🎮 E-Sports'],
+  'crypto':   ['₿ Crypto'],
+  'culture':  ['🎬 Entertainment'],
+  'tech':     ['💻 Tech'],
+  'finance':  ['📊 General'],
+  'economy':  ['🌍 Geopolitics'],
+};
+
+const SW_TIME_META: Record<string, { label: string; api: string }> = {
+  '1d':     { label: '1d',       api: '1D'  },
+  '7d':     { label: '7d',       api: '7D'  },
+  '30d':    { label: '30d',      api: '30D' },
+  'alltime':{ label: 'All Time', api: 'ALL' },
+};
+
+const SW_SORT_META: Record<string, { label: string; api: string }> = {
+  'pnl': { label: 'by P&L',    api: 'PNL' },
+  'vol': { label: 'by Volume', api: 'VOL' },
+};
+
+export async function handleSmartWallets(
+  ctx: Context,
+  category = 'all',
+  time = '7d',
+  sort = 'pnl',
+  page = 1,
+): Promise<void> {
   try {
-    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading...').catch(() => {});
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const { getTopSmartWallets, fmtUsd } = await import('../../services/smartWallets');
-    const allWallets = await getTopSmartWallets(10);
-    const wallets    = allWallets.slice(0, 5);
+    const timeMeta = SW_TIME_META[time]    ?? SW_TIME_META['7d'];
+    const sortMeta = SW_SORT_META[sort]    ?? SW_SORT_META['pnl'];
+    const catMeta  = SW_CAT_META[category] ?? SW_CAT_META['all'];
 
-    if (wallets.length === 0) {
-      await sendPage(ctx,
-        '🏦 *Smart Wallets*\n\n' +
-        '❌ Polymarket leaderboard could not be fetched right now.\n\n' +
-        'Try again in a moment or discover top traders via the links below.',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [
-              Markup.button.url('📊 PredictFolio', PREDICTFOLIO_URL),
-              Markup.button.url('📈 Analytics', POLYMARKET_ANALYTICS_URL),
-            ],
-            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-          ]),
-        }
-      );
-      return;
+    const allWallets = await getTopSmartWallets(50, timeMeta.api, sortMeta.api);
+
+    // Post-filter by specialty for specific categories
+    let filtered = allWallets;
+    if (category !== 'all' && SW_CAT_SPECIALTIES[category]) {
+      const bySpec = allWallets.filter(w => SW_CAT_SPECIALTIES[category].includes(w.specialty));
+      filtered = bySpec.length > 0 ? bySpec : allWallets;
     }
+
+    const totalPages  = Math.max(1, Math.ceil(filtered.length / WALLETS_PER_PAGE));
+    const currentPage = Math.min(Math.max(1, page), totalPages);
+    const startIdx    = (currentPage - 1) * WALLETS_PER_PAGE;
+    const pageWallets = filtered.slice(startIdx, startIdx + WALLETS_PER_PAGE);
 
     const botUsername = config.telegram.botUsername;
-    const medals = ['🥇', '🥈', '🥉'];
 
-    // Compact 3-line format so 5 wallets fit within the 1024-char caption limit
-    let msg =
-      '🏦 *Smart Wallets — Top 5*\n' +
-      '_Official Leaderboard · 5 min cache_\n\n';
+    let msg = `🏆 <b>Discover Traders</b>\n\n`;
+    msg += `${catMeta.emoji} ${esc(catMeta.label)} · ${timeMeta.label} · ${sortMeta.label}\n\n`;
 
-    for (const [i, w] of wallets.entries()) {
-      const rank     = i + 1;
-      const medal    = medals[i] ?? `${rank}.`;
-      const pnlAbs   = w.pnlAbs  ?? 0;
-      const pnlPct   = w.pnlPct  ?? 0;
-      const vol      = w.volume   ?? 0;
-      const pnlSign  = pnlAbs >= 0 ? '+' : '';
-      const pnlEmoji = pnlAbs >= 0 ? '📈' : '📉';
-      const short    = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
-      const deepLink = `https://t.me/${botUsername}?start=copy_${w.address}`;
+    if (pageWallets.length === 0) {
+      msg += 'No traders found for this filter.';
+    } else {
+      for (const [i, w] of pageWallets.entries()) {
+        const rank    = startIdx + i + 1;
+        const pnlSign = w.pnlAbs >= 0 ? '+' : '';
+        const copyUrl = `https://t.me/${botUsername}?start=copy_${w.address}`;
+        const viewUrl = `https://polymarket.com/profile/${w.address}`;
+        const name    = esc(w.displayName.slice(0, 25));
 
-      msg += `${medal} *${w.displayName.slice(0, 20)}* \`${short}\`\n`;
-      msg += `   ${pnlEmoji} *${pnlSign}${fmtUsd(pnlAbs)}* (${pnlSign}${pnlPct}%) · Vol: ${fmtUsd(vol)}\n`;
-      msg += `   [▶ Copy Trade](${deepLink})\n\n`;
+        msg += `${rank}. ${name}\n`;
+        msg += `   ├ P&L: ${pnlSign}${fmtUsd(w.pnlAbs)} · Vol: ${fmtUsd(w.volume)}\n`;
+        msg += `   └ <a href="${copyUrl}">Copy</a> · <a href="${viewUrl}">View</a>\n\n`;
+      }
     }
 
+    const prevCb = currentPage > 1        ? `sw_${currentPage - 1}_${category}_${time}_${sort}` : 'noop';
+    const nextCb = currentPage < totalPages ? `sw_${currentPage + 1}_${category}_${time}_${sort}` : 'noop';
+
     await sendPage(ctx, msg, {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
         [
-          Markup.button.url('📊 PredictFolio', PREDICTFOLIO_URL),
-          Markup.button.url('📈 PolyMarket Analytics', POLYMARKET_ANALYTICS_URL),
+          Markup.button.callback('◀️ Prev', prevCb),
+          Markup.button.callback(`${currentPage}/${totalPages}`, 'noop'),
+          Markup.button.callback('Next ▶️', nextCb),
         ],
-        [Markup.button.callback('🔄 Refresh', 'show_wallet')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [
+          Markup.button.callback('📁 Category', `sw_fc_${category}_${time}_${sort}`),
+          Markup.button.callback('⏱ Time',      `sw_ft_${category}_${time}_${sort}`),
+          Markup.button.callback('📊 Sort',      `sw_fs_${category}_${time}_${sort}`),
+        ],
+        [
+          Markup.button.callback('⬅️ Back', 'back_to_menu'),
+          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        ],
       ]),
     });
 
-    logger.info(`[smartWallets] Detailed page shown, ${wallets.length} wallets`);
+    logger.info(`[smartWallets] Page ${currentPage}/${totalPages} cat=${category} time=${time} sort=${sort}`);
   } catch (err) {
     logger.error('[smartWallets] handleSmartWallets error:', err);
     await ctx.reply('❌ An error occurred loading Smart Wallets. Please try again.');
   }
+}
+
+export async function handleSwCategoryFilter(
+  ctx: Context,
+  cat: string,
+  time: string,
+  sort: string,
+): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const catRows = [
+    ['all', 'politics'],
+    ['sports', 'crypto'],
+    ['culture', 'tech'],
+    ['finance', 'economy'],
+  ];
+
+  const buttons: any[] = catRows.map(row =>
+    row.map(c => {
+      const meta = SW_CAT_META[c] ?? { label: c, emoji: '' };
+      const label = c === cat ? `✓ ${meta.emoji} ${meta.label}` : `${meta.emoji} ${meta.label}`;
+      const cb    = c === cat ? 'noop' : `sw_1_${c}_${time}_${sort}`;
+      return Markup.button.callback(label, cb);
+    })
+  );
+  buttons.push([
+    Markup.button.callback('⬅️ Back', `sw_1_${cat}_${time}_${sort}`),
+    Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+  ]);
+
+  await sendPage(ctx,
+    `📁 <b>Category</b>\n\nFilter traders by market category:`,
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }
+  );
+}
+
+export async function handleSwTimeFilter(
+  ctx: Context,
+  cat: string,
+  time: string,
+  sort: string,
+): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const timeRow = (['1d', '7d', '30d', 'alltime'] as const).map(t => {
+    const meta  = SW_TIME_META[t];
+    const label = t === time ? `✓ ${meta.label}` : meta.label;
+    const cb    = t === time ? 'noop' : `sw_1_${cat}_${t}_${sort}`;
+    return Markup.button.callback(label, cb);
+  });
+
+  await sendPage(ctx,
+    `⏱ <b>Time Period</b>\n\nSelect the time period for ranking:`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        timeRow,
+        [
+          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${time}_${sort}`),
+          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        ],
+      ]),
+    }
+  );
+}
+
+export async function handleSwSortFilter(
+  ctx: Context,
+  cat: string,
+  time: string,
+  sort: string,
+): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const sortRow = (['pnl', 'vol'] as const).map(s => {
+    const meta  = SW_SORT_META[s];
+    const label = s === sort ? `✓ ${meta.label}` : meta.label;
+    const cb    = s === sort ? 'noop' : `sw_1_${cat}_${time}_${s}`;
+    return Markup.button.callback(label, cb);
+  });
+
+  await sendPage(ctx,
+    `📊 <b>Sort By</b>\n\nSelect how to rank traders:`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        sortRow,
+        [
+          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${time}_${sort}`),
+          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        ],
+      ]),
+    }
+  );
 }
 
 /**
@@ -707,13 +871,22 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
     }
 
     const axios = (await import('axios')).default;
-    const response = await axios.get('https://gamma-api.polymarket.com/markets', {
-      params: { condition_ids: marketId, limit: 1 },
-      timeout: 10000,
-    });
-
-    const data   = response.data;
-    const market = Array.isArray(data) ? data[0] : data;
+    let market: any = null;
+    try {
+      const r = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+      market = r.data;
+    } catch {
+      try {
+        const r = await axios.get('https://gamma-api.polymarket.com/markets', {
+          params: { conditionId: marketId, limit: 1 },
+          timeout: 10000,
+        });
+        const data = r.data;
+        market = Array.isArray(data) ? data[0] : data;
+      } catch {
+        // both attempts failed
+      }
+    }
 
     if (!market) {
       await ctx.reply('❌ Market not found.');
@@ -749,9 +922,13 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
       : null;
     const expiresStr = fmtDateLong(market.endDate);
 
-    // ── Image ────────────────────────────────────────────────────────────────
+    // ── Image (OG preview from Polymarket link share) ─────────────────────────
+    const eventSlug: string | undefined = market.events?.[0]?.slug || market.slug;
+    const ogImage = eventSlug
+      ? await fetchOgImage(`https://polymarket.com/event/${eventSlug}`)
+      : null;
     const eventImage: string | undefined =
-      (market.events?.[0]?.image) || market.image || undefined;
+      ogImage || market.events?.[0]?.image || market.image || undefined;
 
     // ── Message ──────────────────────────────────────────────────────────────
     const title = safeTitle(market.question, 80);

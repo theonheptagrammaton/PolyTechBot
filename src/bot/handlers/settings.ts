@@ -217,7 +217,14 @@ export async function handleCustomAmountInput(ctx: Context, text: string): Promi
 
   settingsAmountState.delete(telegramId);
 
-  const amount = parseFloat(text.replace(/[^0-9.]/g, ''));
+  // Locale-aware parse: handles "1,5" (EU) → 1.5 and "1,000" (US) → 1000
+  const raw = text.trim().replace(/[^\d.,]/g, '');
+  const lastComma = raw.lastIndexOf(',');
+  const lastDot   = raw.lastIndexOf('.');
+  const normalized = lastComma > lastDot
+    ? raw.replace(/\./g, '').replace(',', '.')
+    : raw.replace(/,/g, '');
+  const amount = parseFloat(normalized);
 
   if (isNaN(amount) || amount < 1) {
     await sendPage(ctx,
@@ -363,8 +370,12 @@ export async function handleCustomSlippageInput(ctx: Context, text: string): Pro
 
   settingsSlippageState.delete(telegramId);
 
-  const raw = text.trim().replace(/[^0-9.,]/g, '');
-  const normalized = raw.replace(',', '.');
+  const raw = text.trim().replace(/[^\d.,]/g, '');
+  const lastComma = raw.lastIndexOf(',');
+  const lastDot   = raw.lastIndexOf('.');
+  const normalized = lastComma > lastDot
+    ? raw.replace(/\./g, '').replace(',', '.')
+    : raw.replace(/,/g, '');
   const value = parseFloat(normalized);
 
   if (isNaN(value) || value < 0.1) {

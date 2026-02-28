@@ -2,7 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { logger } from '../../utils/logger';
 import { getUpDownMarkets, formatVolume, UpDownMarket } from '../../services/market';
-import { isBenignTelegramError } from '../../utils/telegram';
+import { isBenignTelegramError, sendPage } from '../../utils/telegram';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
     const botUsername = ctx.botInfo?.username ?? process.env.BOT_USERNAME ?? 'PolymarketBot';
 
     if (markets.length === 0) {
-      await ctx.editMessageText(
+      await sendPage(ctx,
         '📈 *Crypto Up/Down Markets*\n\n' +
         '😔 No active Up/Down markets found right now.\n\n' +
         '_These markets are created daily on Polymarket. Try again shortly._',
@@ -66,7 +66,7 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
             [Markup.button.callback('🏠 Main Menu',    'back_to_menu')],
           ]),
         }
-      ).catch((e: any) => { if (!e.message?.includes('not modified')) throw e; });
+      );
       return;
     }
 
@@ -91,9 +91,8 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
       msg += '\n';
     }
 
-    await ctx.editMessageText(msg, {
+    await sendPage(ctx, msg, {
       parse_mode: 'Markdown',
-      link_preview_options: { is_disabled: true },
       ...Markup.inlineKeyboard([
         [
           Markup.button.callback('🔄 Refresh',    'crypto_updown'),
@@ -101,7 +100,7 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
         ],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
-    }).catch((e: any) => { if (!e.message?.includes('not modified')) throw e; });
+    });
 
     logger.info(`[updown] Main list shown to user: ${ctx.from?.id} (${markets.length} markets)`);
   } catch (error: any) {
@@ -137,8 +136,7 @@ export async function handleUpDownMarketDetail(
         [Markup.button.callback('🏠 Main Menu',       'back_to_menu')],
       ]);
       if (edit) {
-        await ctx.editMessageText(errMsg, { parse_mode: 'Markdown', ...errKb })
-          .catch((e: any) => { if (!e.message?.includes('not modified')) throw e; });
+        await sendPage(ctx, errMsg, { parse_mode: 'Markdown', ...errKb });
       } else {
         await ctx.reply(errMsg, { parse_mode: 'Markdown', ...errKb });
       }
@@ -193,17 +191,10 @@ export async function handleUpDownMarketDetail(
       ],
     ]);
 
-    const msgOptions = {
-      parse_mode: 'Markdown' as const,
-      link_preview_options: { is_disabled: true },
-      ...keyboard,
-    };
-
     if (edit) {
-      await ctx.editMessageText(msg, msgOptions)
-        .catch((e: any) => { if (!e.message?.includes('not modified')) throw e; });
+      await sendPage(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
     } else {
-      await ctx.reply(msg, msgOptions);
+      await ctx.reply(msg, { parse_mode: 'Markdown', ...keyboard });
     }
 
     logger.info(`[updown] Detail shown to ${ctx.from?.id}: ${m.coinName} ${m.timeframe}`);
@@ -228,7 +219,7 @@ export async function handleCryptoCategory(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery();
 
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '₿ *Crypto — Select Category*\n\n' +
       'Which crypto markets would you like to see?',
       {
@@ -239,7 +230,7 @@ export async function handleCryptoCategory(ctx: Context): Promise<void> {
           [Markup.button.callback('« Back',              'show_categories')],
         ]),
       }
-    ).catch((e: any) => { if (!e.message?.includes('not modified')) throw e; });
+    );
 
     logger.info(`Crypto subcategories shown to user: ${ctx.from?.id}`);
   } catch (error: any) {
