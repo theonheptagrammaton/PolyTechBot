@@ -119,28 +119,24 @@ export async function sendPage(
   }
 
   // ── Default: static menu image ────────────────────────────────────────────
+  // Always swap to the menu photo explicitly so a previous page's photo
+  // (e.g. an event OG image) is never left behind on an unrelated page.
   if (isPhoto) {
+    const menuMedia: any = _cachedPhotoFileId
+      ? _cachedPhotoFileId
+      : { source: fs.createReadStream(MENU_IMAGE) };
     try {
-      // editMessageCaption only updates caption + keyboard — photo stays untouched
-      await (ctx as any).editMessageCaption(safeCaption, {
-        parse_mode: parseMode,
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      });
+      const result: any = await (ctx as any).editMessageMedia(
+        { type: 'photo', media: menuMedia, caption: safeCaption, parse_mode: parseMode },
+        replyMarkup ? { reply_markup: replyMarkup } : undefined,
+      );
+      if (!_cachedPhotoFileId && typeof result === 'object' && result?.photo?.length) {
+        _cachedPhotoFileId = result.photo[result.photo.length - 1].file_id;
+      }
       return;
     } catch (err: any) {
       if (isBenignTelegramError(err)) return;
-      // If Markdown is still broken after truncation, strip it and retry — photo stays
-      const errMsg = err?.message || err?.description || '';
-      if (errMsg.includes('parse entities') || errMsg.includes("can't parse")) {
-        try {
-          const stripped = safeCaption.replace(/[*_`[\]()]/g, '');
-          await (ctx as any).editMessageCaption(stripped, {
-            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-          });
-          return;
-        } catch { /* fall through only in extreme cases */ }
-      }
-      // fall through to delete+send only as last resort
+      // fall through to delete+send
     }
   }
 
