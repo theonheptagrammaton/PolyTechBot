@@ -96,7 +96,8 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     }
 
     // Polymarket Trading Wallet
-    message += `💙 <b>Polymarket Trading Wallet (Don't deposit here):</b>\n`;
+    const ePoly2 = ce(EMOJI.polymarket, '💙');
+    message += `${ePoly2} <b>Polymarket Trading Wallet (Don't deposit here):</b>\n`;
     if (user.polymarketProxyAddress) {
       message += `<code>${esc(user.polymarketProxyAddress)}</code>\n\n`;
     } else {
