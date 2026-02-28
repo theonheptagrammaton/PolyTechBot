@@ -61,6 +61,19 @@ function tagEmoji(tags: any[]): string {
   return '';
 }
 
+/** Format a number with full precision: "$10,667,418.33" */
+function fmtRaw(n?: number | string): string {
+  const num = typeof n === 'string' ? parseFloat(n) : (n ?? 0);
+  if (!num || isNaN(num)) return '0.00';
+  return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** Format a date as "Jul 24, 2025" (always includes year). */
+function fmtDateLong(iso?: string): string {
+  if (!iso) return 'N/A';
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 /** Format end date compactly (e.g. "Jun 12" or "Dec 31, 2026"). */
 function fmtEndDate(iso?: string): string {
   if (!iso) return '';
@@ -380,7 +393,7 @@ export async function handleEventDetails(
     message += `${eStats} ${vol}`;
     message += `  <a href="https://t.me/${botUsername}?start=trade_${marketId}_yes_default">YES $${defaultAmount}</a>`;
     message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>`;
-    message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_custom">Custom</a>\n\n`;
+    message += ` · <a href="https://t.me/${botUsername}?start=mkt_${marketId}">🔍 Trade</a>\n\n`;
     message += `🔗 <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
 
     // ── Keyboard ──────────────────────────────────────────────────────────────
@@ -671,6 +684,117 @@ export async function handleMarketDetails(ctx: Context, marketId: string): Promi
     });
   } catch (error) {
     logger.error(`Error showing market ${marketId}:`, error);
+    await ctx.reply('❌ An error occurred while loading market details.');
+  }
+}
+
+/**
+ * Full market detail + trade page.
+ * Opened via deep link: /start mkt_<conditionId>
+ * Shows prices, stats, timeline with custom emojis and event photo.
+ */
+export async function handleMarketTradePage(ctx: Context, marketId: string): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading…').catch(() => {});
+
+    const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
+    const telegramId  = ctx.from?.id.toString();
+    let defaultAmount = 25;
+
+    if (telegramId) {
+      const user = await getUserByTelegramId(telegramId);
+      if (user?.defaultTradeAmount) defaultAmount = user.defaultTradeAmount;
+    }
+
+    const axios = (await import('axios')).default;
+    const response = await axios.get('https://gamma-api.polymarket.com/markets', {
+      params: { condition_ids: marketId, limit: 1 },
+      timeout: 10000,
+    });
+
+    const data   = response.data;
+    const market = Array.isArray(data) ? data[0] : data;
+
+    if (!market) {
+      await ctx.reply('❌ Market not found.');
+      return;
+    }
+
+    // ── Custom emojis ────────────────────────────────────────────────────────
+    const eTitle = ce(EMOJI.eventTitle, '💰');
+    const eUp    = ce(EMOJI.priceUp,    '⬆️');
+    const eDown  = ce(EMOJI.priceDown,  '⬇️');
+    const eStats = ce(EMOJI.eventStats, '📈');
+
+    // ── Prices ───────────────────────────────────────────────────────────────
+    const prices   = parseOutcomePrices(market);
+    const outcomes = parseOutcomes(market);
+    const p0 = parseFloat(prices[0] || '0');
+    const p1 = parseFloat(prices[1] || '0');
+    const yPrice = !isNaN(p0) ? (p0 * 100).toFixed(1) : '—';
+    const nPrice = !isNaN(p1) ? (p1 * 100).toFixed(1) : '—';
+    const o0 = esc(outcomes[0] || 'YES');
+    const o1 = esc(outcomes[1] || 'NO');
+
+    // ── Stats ────────────────────────────────────────────────────────────────
+    const volAll = fmtRaw(market.volume ?? market.volumeNum);
+    const vol24h = fmtRaw(market.volume24hr);
+    const liq    = fmtRaw(market.liquidity);
+
+    // ── Timeline ─────────────────────────────────────────────────────────────
+    const createdIso = market.startDate || market.createdAt;
+    const createdStr = fmtDateLong(createdIso);
+    const ageDays    = createdIso
+      ? Math.floor((Date.now() - new Date(createdIso).getTime()) / 86_400_000)
+      : null;
+    const expiresStr = fmtDateLong(market.endDate);
+
+    // ── Image ────────────────────────────────────────────────────────────────
+    const eventImage: string | undefined =
+      (market.events?.[0]?.image) || market.image || undefined;
+
+    // ── Message ──────────────────────────────────────────────────────────────
+    const title = safeTitle(market.question, 80);
+
+    let message = `${eTitle} <b>${esc(title)}</b>\n\n`;
+
+    message += `📊 <b>Current Prices</b>\n`;
+    message += `├ ${eUp}${o0}: <b>${yPrice}¢</b>\n`;
+    message += `└ ${eDown}${o1}: <b>${nPrice}¢</b>\n\n`;
+
+    message += `${eStats} <b>Market Stats</b>\n`;
+    message += `├ Volume (All): <b>$${volAll}</b>\n`;
+    message += `├ Volume (24h): <b>$${vol24h}</b>\n`;
+    message += `└ Liquidity: <b>$${liq}</b>\n\n`;
+
+    message += `📅 <b>Timeline</b>\n`;
+    if (createdStr !== 'N/A') {
+      message += `├ Created: ${createdStr}${ageDays !== null ? ` (${ageDays} days)` : ''}\n`;
+    }
+    message += `└ Expires: ${expiresStr}`;
+
+    // ── Keyboard ─────────────────────────────────────────────────────────────
+    const eventId = market.events?.[0]?.id;
+    const backBtn = eventId && /^\d+$/.test(String(eventId))
+      ? Markup.button.callback('← Back to Event', `evd_mkt_${eventId}_1`)
+      : Markup.button.callback('🏠 Main Menu', 'back_to_menu');
+
+    await sendPage(ctx, message, {
+      parse_mode: 'HTML',
+      image_url: eventImage,
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.url(`✅ YES $${defaultAmount}`, `https://t.me/${botUsername}?start=trade_${marketId}_yes_default`),
+          Markup.button.url(`❌ NO $${defaultAmount}`,  `https://t.me/${botUsername}?start=trade_${marketId}_no_default`),
+        ],
+        [Markup.button.url('💬 Custom Trade', `https://t.me/${botUsername}?start=trade_${marketId}_custom`)],
+        [backBtn, Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]),
+    });
+
+    logger.info(`Market trade page for ${marketId} shown to user: ${ctx.from?.id}`);
+  } catch (error) {
+    logger.error(`Error showing market trade page ${marketId}:`, error);
     await ctx.reply('❌ An error occurred while loading market details.');
   }
 }

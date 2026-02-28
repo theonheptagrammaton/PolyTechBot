@@ -55,6 +55,15 @@ export async function handleStart(ctx: Context): Promise<void> {
       return;
     }
 
+    if (startParam?.startsWith('mkt_')) {
+      // Market trade page deep link: shows full market detail + trade buttons
+      const marketId = startParam.slice(4);
+      logger.info(`Deep link to market trade page ${marketId} from user: ${telegramId}`);
+      const { handleMarketTradePage } = await import('./markets');
+      await handleMarketTradePage(ctx, marketId);
+      return;
+    }
+
     if (startParam?.startsWith('copy_')) {
       // Smart Wallet deep link — pre-fill address and start copy add flow
       const address = startParam.slice(5); // strip 'copy_'
