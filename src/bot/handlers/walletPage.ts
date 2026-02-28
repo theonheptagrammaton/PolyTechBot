@@ -27,7 +27,7 @@ import {
  */
 export async function handleWalletPage(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery().catch(() => {});
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
@@ -265,7 +265,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       return;
     }
 
-    const ITEMS_PER_PAGE = 3;
+    const ITEMS_PER_PAGE = 2;
     const totalPages = Math.ceil(positions.length / ITEMS_PER_PAGE);
     const currentPage = Math.min(Math.max(1, page), totalPages);
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -311,7 +311,6 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       message += `   └ [👁 View](${viewLink}) · [📈 Buy](${buyLink}) · [📉 Sell](${sellLink})\n\n`;
     });
 
-    // Navigation buttons only
     const buttons: any[] = [];
 
     const navRow: any[] = [];
@@ -329,7 +328,6 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
-      disable_web_page_preview: true,
     });
 
     logger.info(`Active positions page ${currentPage} shown to user: ${telegramId}`);
@@ -504,7 +502,7 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
     const esc = (s: string) => s.replace(/[_*`[\]()]/g, '\\$&');
 
     // Pagination
-    const ITEMS_PER_PAGE = 4;
+    const ITEMS_PER_PAGE = 3;
     const totalPages = Math.ceil(closedPositions.length / ITEMS_PER_PAGE);
     const currentPage = Math.min(Math.max(1, page), totalPages);
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;

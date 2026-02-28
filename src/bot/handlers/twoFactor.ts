@@ -2,6 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { logger } from '../../utils/logger';
 import { getUserByTelegramId } from '../../services/user';
+import { sendPage } from '../../utils/telegram';
 import {
   generateTwoFactorSecret,
   enableTwoFactor,
@@ -36,7 +37,7 @@ export async function handleTwoFactorMenu(ctx: Context): Promise<void> {
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await ctx.editMessageText('❌ User not found. Use /start to create your wallet.', {
+      await sendPage(ctx, '❌ User not found. Use /start to create your wallet.', {
         parse_mode: 'Markdown',
       });
       return;
@@ -76,7 +77,7 @@ export async function handleTwoFactorMenu(ctx: Context): Promise<void> {
 
     buttons.push([Markup.button.callback('« Back to Wallet', 'wallet_page')]);
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -260,7 +261,7 @@ export async function handleDisableTwoFactor(ctx: Context): Promise<void> {
       return;
     }
 
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '⚠️ *Disable Two-Factor Authentication*\n\n' +
       'Are you sure you want to disable 2FA?\n\n' +
       'This will reduce the security of your account.\n\n' +
@@ -345,7 +346,7 @@ export async function handleShowBackupCodes(ctx: Context): Promise<void> {
       return;
     }
 
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '🔑 *View Backup Codes*\n\n' +
       '⚠️ For security reasons, backup codes cannot be displayed again.\n\n' +
       'If you lost your backup codes, you can:\n' +
