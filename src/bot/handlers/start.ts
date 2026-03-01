@@ -160,8 +160,14 @@ export async function handleStart(ctx: Context): Promise<void> {
       const { positionListCache, positionTradeState } = await import('./positionTrade');
       let positions = positionListCache.get(telegramId);
       if (!positions || positions.length === 0) {
+        if (!user.polymarketProxyAddress) {
+          await ctx.reply('⚠️ No trading wallet found. Go to 💼 My Wallet to set up your account first.', {
+            ...Markup.inlineKeyboard([[Markup.button.callback('💼 My Wallet', 'wallet_page')]]),
+          });
+          return;
+        }
         const { getActivePositions } = await import('../../services/portfolio');
-        positions = await getActivePositions(user.polymarketProxyAddress || '');
+        positions = await getActivePositions(user.polymarketProxyAddress);
         positionListCache.set(telegramId, positions);
       }
 

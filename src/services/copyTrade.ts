@@ -481,6 +481,7 @@ async function tickForTrader(
         if (copySize === 0) {
           await prisma.copiedTrade.create({
             data: {
+              subscriptionId: sub.id,
               userId: user.id,
               traderAddress,
               marketId: trade.marketId,
@@ -512,12 +513,12 @@ async function tickForTrader(
         if (trade.side === 'BUY') {
           const priceCents = trade.price * 100;
           if (sub.priceMin != null && priceCents < sub.priceMin) {
-            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below min filter` } });
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below min filter` } });
             if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nReason: Price ${priceCents.toFixed(1)}¢ < min ${sub.priceMin}¢`);
             continue;
           }
           if (sub.priceMax != null && priceCents > sub.priceMax) {
-            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above max filter` } });
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above max filter` } });
             if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nReason: Price ${priceCents.toFixed(1)}¢ > max ${sub.priceMax}¢`);
             continue;
           }
@@ -527,7 +528,7 @@ async function tickForTrader(
         if (trade.side === 'BUY' && sub.singleTradeMax != null && copySize > sub.singleTradeMax) {
           copySize = sub.singleTradeMax;
           if (copySize < 1.0) {
-            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: 'below min after singleTradeMax cap' } });
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: 'below min after singleTradeMax cap' } });
             continue;
           }
         }
@@ -538,7 +539,7 @@ async function tickForTrader(
           const spendKey = `copy:daily:${sub.id}:${today}`;
           const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
           if (spentToday + copySize > sub.dailySpendMax) {
-            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
             if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped — Daily Limit*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
             continue;
           }
@@ -550,6 +551,7 @@ async function tickForTrader(
         // Save to DB
         await prisma.copiedTrade.create({
           data: {
+            subscriptionId: sub.id,
             userId: user.id,
             traderAddress,
             marketId: trade.marketId,
@@ -625,7 +627,7 @@ async function tickForTrader(
     if (sub.takeProfitPct != null || sub.stopLossPct != null) {
       await checkTpSlPositions(
         sub.user,
-        { traderAddress: sub.traderAddress, takeProfitPct: sub.takeProfitPct, stopLossPct: sub.stopLossPct, slippage: sub.slippage },
+        { subscriptionId: sub.id, traderAddress: sub.traderAddress, takeProfitPct: sub.takeProfitPct, stopLossPct: sub.stopLossPct, slippage: sub.slippage },
         sendNotification
       ).catch((err) =>
         logger.error(`[copy] TP/SL check error for ${sub.userId}: ${err?.message}`)
@@ -652,6 +654,7 @@ async function checkTpSlPositions(
     slippageTolerance: number;
   },
   sub: {
+    subscriptionId: string;
     traderAddress: string;
     takeProfitPct: number | null;
     stopLossPct: number | null;
@@ -661,9 +664,14 @@ async function checkTpSlPositions(
 ): Promise<void> {
   if (sub.takeProfitPct == null && sub.stopLossPct == null) return;
 
-  // Find open BUY positions that have not yet been TP/SL exited
+  // Find open BUY positions that have not yet been TP/SL exited.
+  // Filter by subscriptionId so that re-creating a subscription to the same trader
+  // does not accidentally TP/SL exit positions from a previous subscription.
+  // Legacy records (subscriptionId = null, created before this field was added)
+  // are intentionally excluded — they cannot be attributed to a specific subscription.
   const openPositions = await prisma.copiedTrade.findMany({
     where: {
+      subscriptionId: sub.subscriptionId,
       userId: user.id,
       traderAddress: sub.traderAddress,
       side: 'BUY',

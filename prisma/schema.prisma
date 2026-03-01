@@ -104,6 +104,9 @@ model CopySubscription {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  // Back-relation: trades placed under this subscription
+  copiedTrades   CopiedTrade[]
+
   @@unique([userId, traderAddress])
   @@index([isActive])
   @@map("copy_subscriptions")
@@ -113,6 +116,13 @@ model CopiedTrade {
   id             String   @id @default(cuid())
   userId         String
   user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Link to the subscription that placed this trade.
+  // Nullable for backward-compat with records created before this field was added.
+  // SetNull on subscription delete: trade history is preserved but no longer TP/SL checked.
+  subscriptionId String?
+  subscription   CopySubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
   traderAddress  String
   marketId       String
   outcome        String   // YES | NO
@@ -129,5 +139,6 @@ model CopiedTrade {
 
   @@index([userId, createdAt])
   @@index([traderAddress])
+  @@index([subscriptionId])
   @@map("copied_trades")
 }
