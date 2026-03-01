@@ -182,6 +182,9 @@ interface ExecResult {
   status: 'filled' | 'failed' | 'skipped';
   orderID?: string;
   errorMsg?: string;
+  // F4: Our execution price (worst-case limit we submitted), used as TP/SL entry price.
+  // Distinct from trade.price (the trader's fill price) which could differ due to slippage.
+  filledPrice?: number;
 }
 
 async function executeCopyOrder(
@@ -322,7 +325,7 @@ async function executeCopyOrder(
         );
       }
 
-      return { status: 'filled', orderID: orderResp.orderID };
+      return { status: 'filled', orderID: orderResp.orderID, filledPrice: price };
     }
 
     // SELL path: FAK market order, amount = shares
@@ -555,7 +558,8 @@ async function tickForTrader(
             side: trade.side,
             sourceSize: trade.sizeUsd,
             copiedSize: copySize,
-            price: trade.price,
+            // F4: Use our execution price for TP/SL calculations; fall back to trader's price
+            price: result.filledPrice ?? trade.price,
             orderID: result.orderID ?? null,
             status: result.status,
             errorMsg: result.errorMsg ?? null,
@@ -774,6 +778,9 @@ async function checkTpSlPositions(
 // ─── Monitor ──────────────────────────────────────────────────────────────────
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+// F5: Flag set on shutdown — in-flight ticks check this before processing each trader
+// to avoid orphaned DB writes and Telegram sends after the bot process is stopping.
+let monitorStopped = false;
 
 /**
  * Starts the copy trade polling monitor.
@@ -790,9 +797,11 @@ export function startCopyTradeMonitor(
     return;
   }
 
+  monitorStopped = false;
   logger.info(`[copy] Starting copy trade monitor (interval: ${intervalSeconds}s)`);
 
   const tick = async () => {
+    if (monitorStopped) return;
     try {
       // Find all unique trader addresses with at least one active subscription
       const rows = await prisma.copySubscription.findMany({
@@ -804,7 +813,10 @@ export function startCopyTradeMonitor(
       if (rows.length === 0) return;
 
       await Promise.allSettled(
-        rows.map((r) => tickForTrader(r.traderAddress, sendNotification))
+        rows.map((r) => {
+          if (monitorStopped) return Promise.resolve();
+          return tickForTrader(r.traderAddress, sendNotification);
+        })
       );
     } catch (err: any) {
       logger.error(`[copy] Monitor tick error: ${err?.message}`);
@@ -818,6 +830,7 @@ export function startCopyTradeMonitor(
 }
 
 export function stopCopyTradeMonitor(): void {
+  monitorStopped = true;
   if (monitorInterval) {
     clearInterval(monitorInterval);
     monitorInterval = null;

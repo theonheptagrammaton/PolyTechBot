@@ -266,7 +266,6 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     }
 
     const shares = parseFloat(((pos.size * pct) / 100).toFixed(4));
-    const price = pos.curPrice;
 
     if (shares < MIN_ORDER_SIZE) {
       const minPct = Math.ceil((MIN_ORDER_SIZE / pos.size) * 100);
@@ -278,6 +277,12 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     }
 
     await ctx.answerCbQuery();
+
+    // F2: Apply slippage floor to SELL
+    const { getUserByTelegramId: getUser } = await import('../../services/user');
+    const sellUser = await getUser(telegramId);
+    const slippagePct = sellUser?.slippageTolerance ?? 1.0;
+    const price = Math.max(pos.curPrice * (1 - slippagePct / 100), 0.01);
 
     // Refresh timestamp so the 10-min cleanup interval doesn't delete state
     // between the % click and the confirm button press
@@ -330,8 +335,11 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
       );
       return;
     }
-    // Use current market price as the FAK floor (same as quick-% buttons)
-    const price = state.curPrice;
+    // F2: Apply slippage floor to SELL (mirrors BUY path above)
+    const { getUserByTelegramId: getUser } = await import('../../services/user');
+    const sellUser = await getUser(telegramId);
+    const slippagePct = sellUser?.slippageTolerance ?? 1.0;
+    const price = Math.max(state.curPrice * (1 - slippagePct / 100), 0.01);
     await showSellConfirmation(ctx, telegramId, state, price, Math.min(shares, state.currentSize));
   } else {
     // Buy: val is dollar amount; derive worst price from market price + user slippage

@@ -425,7 +425,8 @@ export class TelegramBot {
     this.bot.action('settings_slippage_5',  async (ctx) => await handleSetSlippage(ctx, 5.0));
 
     // Trade handlers
-    this.bot.action(/^trade_outcome_/, async (ctx) => {
+    // F1: Short callbacks trade_oc_yes/trade_oc_no (full conditionId in callback exceeded 64 bytes)
+    this.bot.action(/^trade_oc_/, async (ctx) => {
       if ('data' in ctx.callbackQuery) {
         await handleOutcomeSelection(ctx, ctx.callbackQuery.data);
       }

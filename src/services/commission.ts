@@ -10,7 +10,13 @@ const proxyQueue = new Map<string, Promise<unknown>>();
 function enqueueForProxy<T>(proxyAddress: string, fn: () => Promise<T>): Promise<T> {
   const prev = proxyQueue.get(proxyAddress) ?? Promise.resolve();
   const next = prev.then(fn, fn); // run fn regardless of previous result
-  proxyQueue.set(proxyAddress, next.catch(() => {})); // keep queue alive even on error
+  const queued = next.catch(() => {}); // keep queue alive even on error
+  proxyQueue.set(proxyAddress, queued);
+  // F3: Clean up after the queue drains — prevents unbounded Map growth as unique
+  // proxy addresses accumulate over the lifetime of the process.
+  queued.then(() => {
+    if (proxyQueue.get(proxyAddress) === queued) proxyQueue.delete(proxyAddress);
+  });
   return next;
 }
 

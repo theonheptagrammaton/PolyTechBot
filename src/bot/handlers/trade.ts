@@ -27,6 +27,16 @@ export const limitTradeState = new Map<string, {
   timestamp: number;
 }>();
 
+// F1: Pending outcome selection — holds market data before user picks YES/NO.
+// Needed because the full marketId (66 chars) makes trade_outcome_${marketId}_yes_0
+// exceed Telegram's 64-byte callback data limit. We store the market here and use
+// short callbacks trade_oc_yes / trade_oc_no instead.
+const pendingCustomTrade = new Map<string, {
+  marketId: string;
+  market: any;
+  timestamp: number;
+}>();
+
 // R6: Periodic cleanup of abandoned state entries (every 30 min, remove entries > 10 min old)
 setInterval(() => {
   const cutoff = Date.now() - 10 * 60 * 1000;
@@ -35,6 +45,9 @@ setInterval(() => {
   }
   for (const [key, state] of limitTradeState.entries()) {
     if (state.timestamp < cutoff) limitTradeState.delete(key);
+  }
+  for (const [key, state] of pendingCustomTrade.entries()) {
+    if (state.timestamp < cutoff) pendingCustomTrade.delete(key);
   }
 }, 30 * 60 * 1000);
 
@@ -164,6 +177,8 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
  */
 async function handleCustomTradeFlow(ctx: Context, marketId: string, market: any): Promise<void> {
   try {
+    const telegramId = ctx.from?.id.toString();
+
     // Parse outcomes - can be array or JSON string
     let outcomes = ['Yes', 'No'];
     if (market.outcomes) {
@@ -202,12 +217,18 @@ async function handleCustomTradeFlow(ctx: Context, marketId: string, market: any
       `Market: ${market.question}\n\n` +
       'Select outcome:';
 
+    // F1: Store market in pendingCustomTrade so handleOutcomeSelection can read it
+    // without embedding the 66-char conditionId in the callback data.
+    if (telegramId) {
+      pendingCustomTrade.set(telegramId, { marketId, market, timestamp: Date.now() });
+    }
+
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [
-          Markup.button.callback(`${outcomes[0]} (${yesPrice}¢)`, `trade_outcome_${marketId}_yes_0`),
-          Markup.button.callback(`${outcomes[1]} (${noPrice}¢)`, `trade_outcome_${marketId}_no_1`),
+          Markup.button.callback(`${outcomes[0]} (${yesPrice}¢)`, 'trade_oc_yes'),
+          Markup.button.callback(`${outcomes[1]} (${noPrice}¢)`, 'trade_oc_no'),
         ],
         [Markup.button.callback('❌ Cancel', 'trade_cancel')],
       ]),
@@ -219,7 +240,10 @@ async function handleCustomTradeFlow(ctx: Context, marketId: string, market: any
 }
 
 /**
- * Handles outcome selection for custom trade
+ * Handles outcome selection for custom trade.
+ * F1: marketId is read from pendingCustomTrade (not from callback data) because
+ * the full conditionId (66 chars) would push the callback over Telegram's 64-byte limit.
+ * Callbacks are now the short strings 'trade_oc_yes' / 'trade_oc_no'.
  */
 export async function handleOutcomeSelection(ctx: Context, data: string): Promise<void> {
   try {
@@ -228,39 +252,20 @@ export async function handleOutcomeSelection(ctx: Context, data: string): Promis
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    // Parse: trade_outcome_marketId_outcome_outcomeIndex
-    const parts = data.replace('trade_outcome_', '').split('_');
-    const marketId = parts[0];
-    const outcome = parts[1] as 'yes' | 'no';
-    const outcomeIndex = parseInt(parts[2], 10);
-
-    // Fetch market to get current price (try Gamma first, then CLOB)
-    const axios = (await import('axios')).default;
-    let market;
-
-    try {
-      // Try Gamma API first (most common case)
-      const gammaResponse = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, {
-        timeout: 10000,
+    // Read pending market from state (set by handleCustomTradeFlow)
+    const pending = pendingCustomTrade.get(telegramId);
+    if (!pending) {
+      await ctx.reply('❌ Trade session expired. Please start a new trade.', {
+        ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
       });
-      market = gammaResponse.data;
-    } catch (gammaError) {
-      // If Gamma fails, try CLOB API as fallback
-      try {
-        const clobResponse = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, {
-          timeout: 10000,
-        });
-        market = clobResponse.data;
-      } catch (clobError) {
-        logger.error(`Error fetching market ${marketId} from both APIs:`, { gammaError, clobError });
-        await ctx.editMessageText('❌ Market not found. This market may have been closed or removed.', {
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('« Back to Markets', 'show_categories')],
-          ]),
-        });
-        return;
-      }
+      return;
     }
+    pendingCustomTrade.delete(telegramId);
+
+    const { marketId, market } = pending;
+    // data is 'trade_oc_yes' or 'trade_oc_no'
+    const outcome: 'yes' | 'no' = data === 'trade_oc_yes' ? 'yes' : 'no';
+    const outcomeIndex = outcome === 'yes' ? 0 : 1;
 
     const outcomePrices = market.outcomePrices || ['0.5', '0.5'];
     const price = parseFloat(outcomePrices[outcomeIndex] || '0.5');
