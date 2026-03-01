@@ -67,7 +67,15 @@ export async function handleOpenPositionsFull(ctx: Context): Promise<void> {
     const user = await getUserByTelegramId(telegramId);
     if (!user) return;
 
-    const positions = await getActivePositions(user.polymarketProxyAddress || '');
+    if (!user.polymarketProxyAddress) {
+      await sendPage(ctx, '📊 *Active Positions*\n\n⚠️ No trading wallet found.\n\nGo to 💼 My Wallet to set up your account first.', {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([[Markup.button.callback('💼 My Wallet', 'wallet_page')]]),
+      });
+      return;
+    }
+
+    const positions = await getActivePositions(user.polymarketProxyAddress);
     positionListCache.set(telegramId, positions);
 
     if (positions.length === 0) {

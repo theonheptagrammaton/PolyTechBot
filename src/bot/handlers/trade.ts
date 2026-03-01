@@ -2,6 +2,21 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { logger } from '../../utils/logger';
 import { COMMISSION_RATE } from '../../services/commission';
+import { config } from '../../config';
+
+/**
+ * Returns a "Trade Again" URL button that re-opens the custom trade flow via deep link.
+ * URL buttons are used because the full conditionId (66 chars) makes callback data
+ * exceed Telegram's 64-byte limit.  Falls back to a "Back" callback if BOT_USERNAME
+ * is not configured.
+ */
+function tradeAgainBtn(label: string, marketId: string) {
+  const uname = config.telegram.botUsername;
+  if (uname) {
+    return Markup.button.url(label, `https://t.me/${uname}?start=trade_${marketId}_custom`);
+  }
+  return Markup.button.callback('« Back to Markets', 'show_categories');
+}
 
 // Trade state management
 export const tradeState = new Map<string, {
@@ -719,7 +734,7 @@ async function executeTrade(
         await ctx.telegram.editMessageText(
           ctx.chat!.id, progressMsg.message_id, undefined,
           `❌ *No Liquidity*\n\nNo sellers available within the current slippage range (${slippagePct}%).\n\n• Increase slippage in ⚙️ Settings\n• Or try again shortly`,
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [tradeAgainBtn('🔄 Try Again', marketId)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -734,7 +749,7 @@ async function executeTrade(
           `This market requires a minimum of *${minShares} shares* per order.\n\n` +
           `At the current price (${(worstPrice * 100).toFixed(1)}¢), you need at least *$${minUsd}*.\n\n` +
           `Please increase your trade amount and try again.`,
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[tradeAgainBtn('🔄 Try Again', marketId)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -788,7 +803,7 @@ async function executeTrade(
         reply_markup: Markup.inlineKeyboard([
           [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
           [Markup.button.callback('📋 Open Orders',  'portfolio_orders_1')],
-          [Markup.button.callback('🔄 Trade Again',  `trade_${marketId}_custom`)],
+          [tradeAgainBtn('🔄 Trade Again', marketId)],
           [Markup.button.callback('🏠 Main Menu',    'back_to_menu')],
         ]).reply_markup,
       }
@@ -813,7 +828,7 @@ async function executeTrade(
           {
             parse_mode: 'Markdown',
             reply_markup: Markup.inlineKeyboard([
-              [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)],
+              [tradeAgainBtn('🔄 Try Again', marketId)],
               [Markup.button.callback('« Back', 'show_categories')],
               [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
             ]).reply_markup,
@@ -823,7 +838,7 @@ async function executeTrade(
         await ctx.reply(errorMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)],
+            [tradeAgainBtn('🔄 Try Again', marketId)],
             [Markup.button.callback('« Back', 'show_categories')],
           ]),
         });
@@ -933,9 +948,9 @@ export async function handleTradeConfirm(ctx: Context): Promise<void> {
     }
 
     const { marketId, outcome, amount } = state;
-    tradeState.delete(telegramId);
 
-    // Fetch market (try Gamma first, then CLOB)
+    // Fetch market BEFORE clearing state — mirrors the fix in handleTradeAmountInput.
+    // If the fetch fails the user can retry the confirm button; state is preserved.
     const axios = (await import('axios')).default;
     let market;
 
@@ -958,6 +973,9 @@ export async function handleTradeConfirm(ctx: Context): Promise<void> {
         return;
       }
     }
+
+    // Clear state only after a successful fetch (prevents phantom "session expired" on retry)
+    tradeState.delete(telegramId);
 
     await executeTrade(ctx, marketId, market, outcome, amount);
   } catch (error) {
