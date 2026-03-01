@@ -5,6 +5,7 @@ import { getActivePositions, ActivePosition } from '../../services/portfolio';
 import { decrypt } from '../../utils/encryption';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
+import { sendPage } from '../../utils/telegram';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ export async function handleOpenPositionsFull(ctx: Context): Promise<void> {
     positionListCache.set(telegramId, positions);
 
     if (positions.length === 0) {
-      await ctx.editMessageText('📊 *Active Positions*\n\n📭 No active positions.', {
+      await sendPage(ctx, '📊 *Active Positions*\n\n📭 No active positions.', {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
       });
@@ -91,7 +92,7 @@ export async function handleOpenPositionsFull(ctx: Context): Promise<void> {
       }
     }
 
-    await ctx.editMessageText(message, {
+    await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]),
     });
@@ -135,7 +136,7 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
     msg += `⏰ Market ends: ${endDate}\n`;
     if (pos.redeemable) msg += `✅ _Redeemable_\n`;
 
-    await ctx.editMessageText(msg, {
+    await sendPage(ctx, msg, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [
@@ -187,7 +188,7 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
       `Example: \`${pos.size.toFixed(2)}\` (sell all)\n\n` +
       `Or choose a quick amount:`;
 
-    await ctx.editMessageText(msg, {
+    await ctx.reply(msg, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [
@@ -241,7 +242,7 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
       `*Enter USDC amount to spend:*\n` +
       `Example: \`10\` → buys ~${estimatedShares} shares at ${curCents}¢`;
 
-    await ctx.editMessageText(msg, {
+    await ctx.reply(msg, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'pos_cancel')]]),
     });
@@ -439,9 +440,12 @@ export async function handlePositionCancel(ctx: Context): Promise<void> {
     const telegramId = ctx.from?.id.toString();
     if (telegramId) positionTradeState.delete(telegramId);
 
-    await ctx.editMessageText('❌ Trade cancelled.', {
-      ...Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]),
-    });
+    const keyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]);
+    try {
+      await ctx.editMessageText('❌ Trade cancelled.', { ...keyboard });
+    } catch {
+      await ctx.reply('❌ Trade cancelled.', { ...keyboard });
+    }
   } catch (error) {
     logger.error('Error cancelling position trade:', error);
   }
@@ -457,17 +461,17 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
 
     const state = positionTradeState.get(telegramId);
     if (!state || state.price === undefined || state.size === undefined) {
-      await ctx.editMessageText('❌ Session expired. Please start again.', {
+      await ctx.reply('❌ Session expired. Please start again.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
       });
       return;
     }
     positionTradeState.delete(telegramId);
 
-    await ctx.editMessageText('⏳ Placing sell order...');
+    try { await ctx.editMessageText('⏳ Placing sell order...'); } catch { await ctx.reply('⏳ Placing sell order...'); }
 
     const user = await getUserByTelegramId(telegramId);
-    if (!user) { await ctx.editMessageText('❌ User not found.'); return; }
+    if (!user) { await ctx.reply('❌ User not found.'); return; }
 
     try {
       const result = await executePositionOrder(user, state.assetId, state.conditionId, state.negRisk, 'sell', state.price, state.size);
@@ -488,18 +492,22 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
         `🆔 Order: \`${result.orderID}\`\n\n` +
         `_Market sell executed — your position has been closed or reduced._`;
 
-      await ctx.editMessageText(msg, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-        ]),
-      });
+      const doneKeyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]);
+      try {
+        await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+      } catch {
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+      }
     } catch (err: any) {
-      await ctx.editMessageText(`❌ *Sell Failed*\n\n${err.message || 'Unknown error'}`, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
-      });
+      const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]);
+      try {
+        await ctx.editMessageText(`❌ *Sell Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+      } catch {
+        await ctx.reply(`❌ *Sell Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+      }
     }
   } catch (error) {
     logger.error('Error executing sell:', error);
@@ -516,17 +524,17 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
 
     const state = positionTradeState.get(telegramId);
     if (!state || state.price === undefined || state.size === undefined) {
-      await ctx.editMessageText('❌ Session expired. Please start again.', {
+      await ctx.reply('❌ Session expired. Please start again.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
       });
       return;
     }
     positionTradeState.delete(telegramId);
 
-    await ctx.editMessageText('⏳ Placing buy order...');
+    try { await ctx.editMessageText('⏳ Placing buy order...'); } catch { await ctx.reply('⏳ Placing buy order...'); }
 
     const user = await getUserByTelegramId(telegramId);
-    if (!user) { await ctx.editMessageText('❌ User not found.'); return; }
+    if (!user) { await ctx.reply('❌ User not found.'); return; }
 
     try {
       const result = await executePositionOrder(user, state.assetId, state.conditionId, state.negRisk, 'buy', state.price, state.size);
@@ -548,18 +556,22 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
         `🆔 Order: \`${result.orderID}\`\n\n` +
         `_Order will be filled when matched._`;
 
-      await ctx.editMessageText(msg, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-        ]),
-      });
+      const doneKeyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]);
+      try {
+        await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+      } catch {
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+      }
     } catch (err: any) {
-      await ctx.editMessageText(`❌ *Buy Failed*\n\n${err.message || 'Unknown error'}`, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
-      });
+      const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]);
+      try {
+        await ctx.editMessageText(`❌ *Buy Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+      } catch {
+        await ctx.reply(`❌ *Buy Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+      }
     }
   } catch (error) {
     logger.error('Error executing buy:', error);

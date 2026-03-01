@@ -2,6 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getEventBySlug, searchEventsByKeyword, formatVolume, Event } from '../../services/market';
 import { logger } from '../../utils/logger';
+import { sendPage } from '../../utils/telegram';
 
 // Matches polymarket.com/event/<slug> anywhere in a message
 const POLYMARKET_EVENT_RE = /polymarket\.com\/event\/([a-zA-Z0-9_-]+)/i;
@@ -14,7 +15,7 @@ export async function handleSearchPrompt(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery();
 
-    await ctx.editMessageText(
+    await sendPage(ctx,
       '🔗 *Paste Event Link*\n\n' +
       'Send a Polymarket event link anytime and I\'ll show the markets ready to trade.\n\n' +
       '*Example:*\n' +
@@ -205,4 +206,20 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
       ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
     });
   }
+}
+
+/**
+ * /price <keyword> — Show market prices for a keyword search.
+ * Delegates to handleKeywordSearch with a usage hint if no keyword given.
+ */
+export async function handlePriceCommand(ctx: Context, keyword: string): Promise<void> {
+  const trimmed = (keyword || '').trim();
+  if (trimmed.length < 2) {
+    await ctx.reply(
+      '📈 *Usage:* `/price <keyword>`\n\n*Example:* `/price bitcoin`',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await handleKeywordSearch(ctx, trimmed);
 }

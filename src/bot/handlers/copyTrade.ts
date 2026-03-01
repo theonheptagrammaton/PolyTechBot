@@ -5,6 +5,7 @@ import { parseTraderAddress } from '../../services/copyTrade';
 import { getUserByTelegramId } from '../../services/user';
 import { sendPage } from '../../utils/telegram';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
+import { config } from '../../config';
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,27 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
+// ─── Edit State (manage page edit flows) ──────────────────────────────────────
+
+interface CopyEditState {
+  step: 'awaiting_mode_choice' | 'awaiting_amount' | 'awaiting_rename'
+      | 'awaiting_slippage' | 'awaiting_price_min' | 'awaiting_price_max'
+      | 'awaiting_daily_limit' | 'awaiting_single_limit';
+  traderAddress: string;
+  newMode?: 'fixed' | 'multiplier'; // used during mode-change flow
+  priceMinTemp?: number;            // temporary storage during 2-step price range flow
+  timestamp: number;
+}
+
+export const copyEditState = new Map<string, CopyEditState>();
+
+setInterval(() => {
+  const cutoff = Date.now() - STATE_TTL_MS;
+  for (const [key, state] of copyEditState.entries()) {
+    if (state.timestamp < cutoff) copyEditState.delete(key);
+  }
+}, 30 * 60 * 1000);
+
 // ─── /copy command ────────────────────────────────────────────────────────────
 
 export async function handleCopyCommand(ctx: Context, arg?: string): Promise<void> {
@@ -50,6 +72,17 @@ export async function handleCopyCommand(ctx: Context, arg?: string): Promise<voi
   if (sub === 'stopall')      { await handleCopyStopAll(ctx); return; }
   if (sub === 'pause')        { await handleCopyPauseAll(ctx, false); return; }
   if (sub === 'resume')       { await handleCopyPauseAll(ctx, true);  return; }
+
+  // /copy add <address> — pre-fill address, jump directly to nickname step
+  if (sub.startsWith('add ')) {
+    const addr = parseTraderAddress(sub.slice(4).trim());
+    if (!addr) {
+      await ctx.reply('❌ Invalid address. Please send a <code>0x...</code> address or Polymarket profile link.', { parse_mode: 'HTML' });
+      return;
+    }
+    await handleSmartCopyStart(ctx, addr);
+    return;
+  }
 
   if (sub.startsWith('stop ')) {
     const addr = parseTraderAddress(sub.slice(5).trim());
@@ -75,6 +108,9 @@ export async function handleCopyList(ctx: Context): Promise<void> {
 
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
+
+  // Clear any pending edit state when returning to list
+  copyEditState.delete(telegramId);
 
   const user = await getUserByTelegramId(telegramId);
   if (!user) {
@@ -140,10 +176,14 @@ export async function handleCopyList(ctx: Context): Promise<void> {
     if (s.stopLossPct  != null) tpSlParts.push(`🛑 SL: −${s.stopLossPct}%`);
     const tpSlLine = tpSlParts.length > 0 ? `├ ${tpSlParts.join('   ')}\n` : '';
 
+    const manageLink = `https://t.me/${config.telegram.botUsername}?start=copymng_${s.traderAddress}`;
+    const shareLink  = `https://t.me/${config.telegram.botUsername}?start=copyshare_${s.traderAddress}`;
+
     lines.push(
       `• ${displayName}\n` +
       `├ Mode: ${esc(sizeLabel)}\n` +
       tpSlLine +
+      `├ <a href="${manageLink}">⚙️ Manage</a> | <a href="${shareLink}">📤 Share</a>\n` +
       `└ ✅ ${counts.filled} | ❌ ${counts.failed} | ⏭ ${counts.skipped}`
     );
   }
@@ -152,8 +192,10 @@ export async function handleCopyList(ctx: Context): Promise<void> {
     parse_mode: 'HTML',
     ...Markup.inlineKeyboard([
       [Markup.button.callback('➕ Add New Trader', 'copy_start_add')],
-      [Markup.button.callback('⏹ Stop All', 'copy_stop_all')],
-      [Markup.button.callback('📜 Recent Trades', 'copy_history_10')],
+      [
+        Markup.button.callback('⏹ Stop All',        'copy_stop_all'),
+        Markup.button.callback('📜 Recent Trades',   'copy_history_10'),
+      ],
       [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
     ]),
   });
@@ -716,7 +758,10 @@ export async function handleCopyHistory(ctx: Context, n = 10): Promise<void> {
 export async function handleCopyCancel(ctx: Context): Promise<void> {
   await ctx.answerCbQuery('Cancelled');
   const telegramId = ctx.from?.id.toString();
-  if (telegramId) copyAddState.delete(telegramId);
+  if (telegramId) {
+    copyAddState.delete(telegramId);
+    copyEditState.delete(telegramId);
+  }
 
   await sendPage(ctx, '❌ Cancelled.', {
     ...Markup.inlineKeyboard([
@@ -784,4 +829,590 @@ export async function handleSmartCopyStart(ctx: Context, address: string): Promi
       ]),
     }
   );
+}
+
+// ─── Manage Page ──────────────────────────────────────────────────────────────
+
+export async function handleCopyManage(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  // Clear any pending edit state when returning to manage page
+  copyEditState.delete(telegramId);
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  const sub = await prisma.copySubscription.findUnique({
+    where: { userId_traderAddress: { userId: user.id, traderAddress } },
+  });
+
+  if (!sub) {
+    await sendPage(ctx, '❌ Subscription not found.', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('📋 Copy List', 'copy_list')]]),
+    });
+    return;
+  }
+
+  // Total spent on this subscription (filled trades only)
+  const spentAgg = await prisma.copiedTrade.aggregate({
+    where: { userId: user.id, traderAddress, status: 'filled' },
+    _sum: { copiedSize: true },
+  });
+  const spentAmt = spentAgg._sum.copiedSize ?? 0;
+
+  const short = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+  const displayName = sub.label || short;
+
+  const statusStr = !sub.isActive
+    ? '🔴 Stopped'
+    : sub.isPaused
+      ? '🟡 Paused'
+      : '🟢 Active';
+  const notifStr  = sub.notificationsEnabled ? '🔔 Enabled' : '🔕 Disabled';
+  const dailyStr  = sub.dailySpendMax != null ? `$${sub.dailySpendMax.toFixed(2)}` : '∞';
+
+  const modeStr = sub.fixedAmount != null
+    ? `Fixed — $${sub.fixedAmount.toFixed(2)} per trade`
+    : `Percentage — ${(sub.multiplier ?? 1).toFixed(0)}% of leader's amount`;
+
+  const priceRangeStr = sub.priceMin != null && sub.priceMax != null
+    ? `${sub.priceMin.toFixed(0)}¢ – ${sub.priceMax.toFixed(0)}¢`
+    : sub.priceMin != null
+      ? `≥ ${sub.priceMin.toFixed(0)}¢`
+      : sub.priceMax != null
+        ? `≤ ${sub.priceMax.toFixed(0)}¢`
+        : 'No limit';
+
+  const singleStr = sub.singleTradeMax != null ? `$${sub.singleTradeMax.toFixed(2)}` : 'No limit';
+
+  const tpSlParts: string[] = [];
+  if (sub.takeProfitPct != null) tpSlParts.push(`📈 TP: +${sub.takeProfitPct}%`);
+  if (sub.stopLossPct  != null) tpSlParts.push(`🛑 SL: −${sub.stopLossPct}%`);
+
+  let message = `📋 <b>Copytrade Details</b>\n\n`;
+  message += `👤 Leader: <code>${esc(displayName)}</code>\n`;
+  message += `🔗 <a href="https://polymarket.com/profile/${traderAddress}">View on Polymarket</a>\n`;
+  message += `Status: ${statusStr}\n`;
+  message += `🔔 Notifications: ${notifStr}\n`;
+  message += `💰 Spent: $${spentAmt.toFixed(2)} / ${esc(dailyStr)}\n\n`;
+  message += `<b>Mode &amp; Trade Size</b>\n`;
+  message += `• ${esc(modeStr)}\n`;
+  if (tpSlParts.length > 0) message += `• ${esc(tpSlParts.join('   '))}\n`;
+  message += `\n<b>Limits</b>\n`;
+  message += `• Slippage: ${sub.slippage.toFixed(0)}%\n`;
+  message += `• Price Range: ${esc(priceRangeStr)}\n`;
+  message += `• Single Trade: ${esc(singleStr)}\n`;
+
+  const pauseBtn = (!sub.isActive || sub.isPaused)
+    ? Markup.button.callback('▶️ Resume', `copy_resume_${traderAddress}`)
+    : Markup.button.callback('⏸ Pause',  `copy_pause_${traderAddress}`);
+
+  const muteBtn = sub.notificationsEnabled
+    ? Markup.button.callback('🔕 Mute',   `copy_mute_${traderAddress}`)
+    : Markup.button.callback('🔔 Unmute', `copy_mute_${traderAddress}`);
+
+  await sendPage(ctx, message, {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback('⚙️ Change Mode', `copy_chmode_${traderAddress}`),
+        Markup.button.callback('✏️ Rename',       `copy_rename_${traderAddress}`),
+      ],
+      [
+        Markup.button.callback('📊 Price Range',       `copy_prng_${traderAddress}`),
+        Markup.button.callback('🎯 Slippage',          `copy_slippage_${traderAddress}`),
+      ],
+      [
+        Markup.button.callback('📅 Daily Limit',       `copy_dlimit_${traderAddress}`),
+        Markup.button.callback('📝 Single Trade Limit', `copy_slim_${traderAddress}`),
+      ],
+      [pauseBtn, muteBtn, Markup.button.callback('🗑 Delete', `copy_delconf_${traderAddress}`)],
+      [
+        Markup.button.callback('← Back',     'copy_list'),
+        Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+      ],
+    ]),
+  });
+}
+
+// ─── Share Page ───────────────────────────────────────────────────────────────
+
+export async function handleCopyShare(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  const sub = await prisma.copySubscription.findUnique({
+    where: { userId_traderAddress: { userId: user.id, traderAddress } },
+  });
+
+  if (!sub) {
+    await sendPage(ctx, '❌ Subscription not found.', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('📋 Copy List', 'copy_list')]]),
+    });
+    return;
+  }
+
+  const short = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+  const displayName = sub.label || short;
+  const deepLink = `https://t.me/${config.telegram.botUsername}?start=copy_${traderAddress}`;
+
+  const modeStr = sub.fixedAmount != null
+    ? `$${sub.fixedAmount.toFixed(2)} Fixed`
+    : `${(sub.multiplier ?? 1).toFixed(0)}% Percentage`;
+
+  await sendPage(ctx,
+    `📤 <b>Share Copy Trade</b>\n\n` +
+    `Share this link so others can start copying <b>${esc(displayName)}</b>:\n\n` +
+    `<code>${esc(deepLink)}</code>\n\n` +
+    `👤 Trader: <code>${esc(traderAddress)}</code>\n` +
+    `📊 Your mode: ${esc(modeStr)} <i>(each user sets their own)</i>\n\n` +
+    `🪞 Tap the button below to open the copy setup directly:`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.url('🪞 Mirror this Copy Trade', deepLink)],
+        [Markup.button.callback('⚙️ Manage', `copy_manage_${traderAddress}`)],
+        [
+          Markup.button.callback('← Back',      'copy_list'),
+          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        ],
+      ]),
+    }
+  );
+}
+
+// ─── Manage Action Triggers ───────────────────────────────────────────────────
+
+export async function handleCopyChangeMode(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_mode_choice', traderAddress, timestamp: Date.now() });
+
+  const short = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+  await sendPage(ctx,
+    `⚙️ <b>Change Mode</b>\n\nSelect new copy mode for <code>${esc(short)}</code>:`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💵 Fixed Amount ($)',    `copy_editmode_fixed_${traderAddress}`)],
+        [Markup.button.callback('✖️ Proportional (%)',   `copy_editmode_mult_${traderAddress}`)],
+        [Markup.button.callback('❌ Cancel',              `copy_manage_${traderAddress}`)],
+      ]),
+    }
+  );
+}
+
+export async function handleCopyEditModeChoice(
+  ctx: Context,
+  traderAddress: string,
+  mode: 'fixed' | 'multiplier'
+): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_amount', traderAddress, newMode: mode, timestamp: Date.now() });
+
+  const label = mode === 'fixed'
+    ? 'fixed USD amount per trade (e.g. <code>50</code>):'
+    : 'percentage of leader\'s trade size (e.g. <code>25</code> = 25%):';
+
+  await sendPage(ctx,
+    `⚙️ Enter new ${label}`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', `copy_manage_${traderAddress}`)]]),
+    }
+  );
+}
+
+export async function handleCopyRename(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_rename', traderAddress, timestamp: Date.now() });
+
+  const short = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+  await sendPage(ctx,
+    `✏️ <b>Rename Trader</b>\n\nEnter a new label for <code>${esc(short)}</code> (max 20 chars).\n\nSend <code>-</code> to remove the label.`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', `copy_manage_${traderAddress}`)]]),
+    }
+  );
+}
+
+export async function handleCopySetSlippage(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_slippage', traderAddress, timestamp: Date.now() });
+
+  await sendPage(ctx,
+    `🎯 <b>Slippage</b>\n\nEnter max slippage % for copied orders (0.1–50).\n\nExample: <code>10</code> = 10% slippage tolerance`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', `copy_manage_${traderAddress}`)]]),
+    }
+  );
+}
+
+export async function handleCopySetPriceRange(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_price_min', traderAddress, timestamp: Date.now() });
+
+  await sendPage(ctx,
+    `📊 <b>Price Range</b>\n\nOnly copy trades within a specific price range.\n\nEnter the <b>minimum</b> price in cents (e.g. <code>30</code> for 30¢):\n\n<i>Trades below this price will be skipped.</i>`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🚫 Remove Range Filter', `copy_prng_clear_${traderAddress}`)],
+        [Markup.button.callback('❌ Cancel',               `copy_manage_${traderAddress}`)],
+      ]),
+    }
+  );
+}
+
+export async function handleCopyPriceRangeClear(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  copyEditState.delete(telegramId);
+
+  await prisma.copySubscription.updateMany({
+    where: { userId: user.id, traderAddress },
+    data: { priceMin: null, priceMax: null },
+  });
+
+  await ctx.reply('✅ Price range filter removed.');
+  await handleCopyManage(ctx, traderAddress);
+}
+
+export async function handleCopySetDailyLimit(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_daily_limit', traderAddress, timestamp: Date.now() });
+
+  await sendPage(ctx,
+    `📅 <b>Daily Limit</b>\n\nMax USD to spend copying this trader per day.\n\nExample: <code>100</code> = $100/day max\nEnter <code>0</code> to remove the limit.`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', `copy_manage_${traderAddress}`)]]),
+    }
+  );
+}
+
+export async function handleCopySetSingleLimit(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  copyEditState.set(telegramId, { step: 'awaiting_single_limit', traderAddress, timestamp: Date.now() });
+
+  await sendPage(ctx,
+    `📝 <b>Single Trade Limit</b>\n\nMax USD to spend on a single copied trade.\n\nExample: <code>50</code> = max $50 per trade\nEnter <code>0</code> to remove the limit.`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', `copy_manage_${traderAddress}`)]]),
+    }
+  );
+}
+
+export async function handleCopyPause(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  await prisma.copySubscription.updateMany({
+    where: { userId: user.id, traderAddress, isActive: true },
+    data: { isPaused: true },
+  });
+
+  await handleCopyManage(ctx, traderAddress);
+}
+
+export async function handleCopyResume(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  await prisma.copySubscription.updateMany({
+    where: { userId: user.id, traderAddress },
+    data: { isPaused: false, isActive: true },
+  });
+
+  await handleCopyManage(ctx, traderAddress);
+}
+
+export async function handleCopyToggleMute(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  const sub = await prisma.copySubscription.findUnique({
+    where: { userId_traderAddress: { userId: user.id, traderAddress } },
+  });
+  if (!sub) return;
+
+  await prisma.copySubscription.update({
+    where: { userId_traderAddress: { userId: user.id, traderAddress } },
+    data: { notificationsEnabled: !sub.notificationsEnabled },
+  });
+
+  await handleCopyManage(ctx, traderAddress);
+}
+
+export async function handleCopyDeleteConfirm(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+  const short = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+  await sendPage(ctx,
+    `🗑 <b>Delete Copy Trade</b>\n\nAre you sure you want to permanently delete the subscription for <code>${esc(short)}</code>?\n\n⚠️ This cannot be undone.`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('✅ Yes, Delete', `copy_del_${traderAddress}`),
+          Markup.button.callback('❌ Cancel',       `copy_manage_${traderAddress}`),
+        ],
+      ]),
+    }
+  );
+}
+
+export async function handleCopyDeleteExecute(ctx: Context, traderAddress: string): Promise<void> {
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+
+  await prisma.copySubscription.deleteMany({
+    where: { userId: user.id, traderAddress },
+  });
+
+  const short = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+  logger.info(`[copy] User ${user.id} deleted subscription to ${traderAddress}`);
+
+  await sendPage(ctx,
+    `✅ <b>Deleted</b>\n\nSubscription for <code>${esc(short)}</code> has been removed.`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📋 Copy List',  'copy_list')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]),
+    }
+  );
+}
+
+// ─── Edit Input Handler ───────────────────────────────────────────────────────
+
+/**
+ * Handles text input for manage-page edit flows.
+ * Returns true if the message was consumed, false otherwise.
+ */
+export async function handleCopyEditInput(ctx: Context, text: string): Promise<boolean> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return false;
+
+  const state = copyEditState.get(telegramId);
+  if (!state) return false;
+
+  if (isExpired(state.timestamp)) {
+    copyEditState.delete(telegramId);
+    return false;
+  }
+
+  const addr = state.traderAddress;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) { copyEditState.delete(telegramId); return false; }
+
+  const sub = await prisma.copySubscription.findUnique({
+    where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+  });
+  if (!sub) { copyEditState.delete(telegramId); return false; }
+
+  // ── Mode choice (button-only step — absorb stray text) ─────────────────────
+  if (state.step === 'awaiting_mode_choice') {
+    await ctx.reply('⬆️ Please tap <b>Fixed Amount</b> or <b>Proportional</b> to continue.', { parse_mode: 'HTML' });
+    return true;
+  }
+
+  // ── Rename ──────────────────────────────────────────────────────────────────
+  if (state.step === 'awaiting_rename') {
+    const raw   = text.trim();
+    const label = raw === '-' ? null : raw.slice(0, 20) || null;
+    copyEditState.delete(telegramId);
+    await prisma.copySubscription.update({
+      where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+      data: { label },
+    });
+    const msg = label ? `✅ Label updated: <b>${esc(label)}</b>` : `✅ Label removed.`;
+    await ctx.reply(msg, { parse_mode: 'HTML' });
+    await handleCopyManage(ctx, addr);
+    return true;
+  }
+
+  // ── Amount (mode change) ────────────────────────────────────────────────────
+  if (state.step === 'awaiting_amount') {
+    const raw   = text.trim().replace(/[^0-9.]/g, '');
+    const value = parseFloat(raw);
+
+    if (isNaN(value) || value <= 0) {
+      await ctx.reply('❌ Invalid value. Please enter a positive number.');
+      return true;
+    }
+    if (state.newMode === 'fixed' && value < 1) {
+      await ctx.reply('❌ Minimum fixed amount is $1.');
+      return true;
+    }
+    if (state.newMode === 'multiplier' && (value < 0.01 || value > 500)) {
+      await ctx.reply('❌ Percentage must be between 0.01 and 500.');
+      return true;
+    }
+
+    copyEditState.delete(telegramId);
+    await prisma.copySubscription.update({
+      where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+      data: {
+        fixedAmount: state.newMode === 'fixed'       ? value : null,
+        multiplier:  state.newMode === 'multiplier'  ? value : null,
+      },
+    });
+    const modeLabel = state.newMode === 'fixed'
+      ? `$${value.toFixed(2)} fixed`
+      : `${value.toFixed(0)}% percentage`;
+    await ctx.reply(`✅ Mode updated: ${esc(modeLabel)}`, { parse_mode: 'HTML' });
+    await handleCopyManage(ctx, addr);
+    return true;
+  }
+
+  // ── Slippage ────────────────────────────────────────────────────────────────
+  if (state.step === 'awaiting_slippage') {
+    const pct = parseFloat(text.replace(',', '.'));
+    if (isNaN(pct) || pct < 0.1 || pct > 50) {
+      await ctx.reply('❌ Slippage must be between 0.1 and 50. Example: <code>10</code>', { parse_mode: 'HTML' });
+      return true;
+    }
+    copyEditState.delete(telegramId);
+    await prisma.copySubscription.update({
+      where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+      data: { slippage: pct },
+    });
+    await ctx.reply(`✅ Slippage updated to ${pct}%`);
+    await handleCopyManage(ctx, addr);
+    return true;
+  }
+
+  // ── Price range min (step 1) ────────────────────────────────────────────────
+  if (state.step === 'awaiting_price_min') {
+    const val = parseFloat(text.replace(',', '.'));
+    if (isNaN(val) || val < 0 || val >= 100) {
+      await ctx.reply('❌ Price must be between 0 and 99. Example: <code>30</code> for 30¢', { parse_mode: 'HTML' });
+      return true;
+    }
+    state.step       = 'awaiting_price_max';
+    state.priceMinTemp = val;
+    state.timestamp  = Date.now();
+    copyEditState.set(telegramId, state);
+    await sendPage(ctx,
+      `📊 Now enter the <b>maximum</b> price in cents (e.g. <code>70</code> for 70¢):\n\nMust be greater than ${val}¢`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', `copy_manage_${addr}`)]]),
+      }
+    );
+    return true;
+  }
+
+  // ── Price range max (step 2) ────────────────────────────────────────────────
+  if (state.step === 'awaiting_price_max') {
+    const minVal = state.priceMinTemp ?? 0;
+    const val    = parseFloat(text.replace(',', '.'));
+    if (isNaN(val) || val <= minVal || val > 100) {
+      await ctx.reply(`❌ Max price must be > ${minVal}¢ and ≤ 100¢. Example: <code>70</code>`, { parse_mode: 'HTML' });
+      return true;
+    }
+    copyEditState.delete(telegramId);
+    await prisma.copySubscription.update({
+      where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+      data: { priceMin: minVal, priceMax: val },
+    });
+    await ctx.reply(`✅ Price range updated: ${minVal}¢ – ${val}¢`);
+    await handleCopyManage(ctx, addr);
+    return true;
+  }
+
+  // ── Daily limit ─────────────────────────────────────────────────────────────
+  if (state.step === 'awaiting_daily_limit') {
+    const raw = text.trim().replace(/[^0-9.]/g, '');
+    const val = parseFloat(raw);
+    if (isNaN(val) || val < 0) {
+      await ctx.reply('❌ Enter a positive number or <code>0</code> to remove the limit.', { parse_mode: 'HTML' });
+      return true;
+    }
+    copyEditState.delete(telegramId);
+    const limitVal = val === 0 ? null : val;
+    await prisma.copySubscription.update({
+      where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+      data: { dailySpendMax: limitVal },
+    });
+    await ctx.reply(limitVal ? `✅ Daily limit: $${limitVal.toFixed(2)}` : `✅ Daily limit removed.`);
+    await handleCopyManage(ctx, addr);
+    return true;
+  }
+
+  // ── Single trade limit ──────────────────────────────────────────────────────
+  if (state.step === 'awaiting_single_limit') {
+    const raw = text.trim().replace(/[^0-9.]/g, '');
+    const val = parseFloat(raw);
+    if (isNaN(val) || val < 0) {
+      await ctx.reply('❌ Enter a positive number or <code>0</code> to remove the limit.', { parse_mode: 'HTML' });
+      return true;
+    }
+    copyEditState.delete(telegramId);
+    const limitVal = val === 0 ? null : val;
+    await prisma.copySubscription.update({
+      where: { userId_traderAddress: { userId: user.id, traderAddress: addr } },
+      data: { singleTradeMax: limitVal },
+    });
+    await ctx.reply(limitVal ? `✅ Single trade limit: $${limitVal.toFixed(2)}` : `✅ Single trade limit removed.`);
+    await handleCopyManage(ctx, addr);
+    return true;
+  }
+
+  return false;
 }

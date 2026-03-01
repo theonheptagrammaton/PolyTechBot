@@ -846,6 +846,7 @@ export async function getEventBySlug(slug: string): Promise<Event | null> {
  * Formats volume for display
  */
 export function formatVolume(volume: number): string {
+  if (volume == null || isNaN(volume)) return '$0';
   if (volume >= 1000000) {
     return `$${(volume / 1000000).toFixed(1)}M`;
   } else if (volume >= 1000) {

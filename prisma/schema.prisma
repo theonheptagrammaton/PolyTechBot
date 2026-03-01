@@ -91,6 +91,15 @@ model CopySubscription {
   takeProfitPct Float?   // e.g. 50.0 → sell when +50% from entry
   stopLossPct   Float?   // e.g. 25.0 → sell when −25% from entry
 
+  // Extended settings (manage page)
+  isPaused             Boolean @default(false)  // temporarily paused (isActive remains true)
+  notificationsEnabled Boolean @default(true)   // whether to send Telegram trade notifications
+  slippage             Float   @default(10.0)   // max slippage % for copied orders
+  priceMin             Float?                   // skip trades priced below this (cents)
+  priceMax             Float?                   // skip trades priced above this (cents)
+  singleTradeMax       Float?                   // max USD per single copied trade
+  dailySpendMax        Float?                   // max USD to spend per day on this subscription
+
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt

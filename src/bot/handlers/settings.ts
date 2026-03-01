@@ -23,7 +23,7 @@ setInterval(() => {
  */
 export async function handleSettingsMenu(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery();
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {

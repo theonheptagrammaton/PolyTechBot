@@ -62,10 +62,15 @@ export const EMOJI: Record<string, string> = {
   tier3:     '5453902265922376865', // 🥉 tier 3
   earnings:  '5967390100357648692', // 💵 earnings dashboard
   // Event detail page
-  eventTitle: '5843941440211655941', // 🌸 event title prefix
-  priceUp:    '6030861234432121355', // ⬆️ YES/Up price
-  priceDown:  '5888645706096319818', // ⬇️ NO/Down price
-  eventStats: '5348148965525197476', // 🤑 volume/stats
+  eventTitle:  '5843941440211655941', // 🌸 event title prefix
+  priceUp:     '6030861234432121355', // ⬆️ YES/Up price
+  priceDown:   '5888645706096319818', // ⬇️ NO/Down price
+  eventStats:  '5348148965525197476', // 🤑 volume/stats (marketsTitle alias)
+  vol:         '5875291072225087249', // 📊 total volume
+  liq:         '6005553599201940235', // 💧 total liquidity
+  clock:       '5985616167740379273', // ⏰ end date
+  marketArrow: '5884123981706956210', // ➡️ market N/total
+  lightning:   '5355160022894539220', // ⚡️ quick buy
   // Wallet page
   walletPurse:    '5424976816530014958', // 👛 wallet title
   ethDeposit:     '5834797454838468470', // 🔹 EVM/ETH deposit

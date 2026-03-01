@@ -170,8 +170,8 @@ export function fmtUsd(n: number | undefined | null): string {
  */
 export async function getTopSmartWallets(
   limit = 50,
-  timePeriod = 'ALL',
-  orderBy = 'PNL',
+  timePeriod: 'DAY' | 'WEEK' | 'MONTH' | 'ALL' = 'ALL',
+  orderBy: 'PNL' | 'VOL' = 'PNL',
 ): Promise<SmartWalletInfo[]> {
   const cacheKey = `sw:v7:${limit}:${timePeriod}:${orderBy}`;
   const cached = await redisCache.get<SmartWalletInfo[]>(cacheKey);

@@ -964,6 +964,55 @@ export async function handleTradeCancel(ctx: Context): Promise<void> {
 // ─── Limit Order Flow ──────────────────────────────────────────────────────────
 
 /**
+ * Shows YES/NO outcome choice for a limit order.
+ * Called from deep link: limit_{marketId}_choice
+ */
+export async function handleLimitChoiceFlow(ctx: Context, marketId: string): Promise<void> {
+  const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
+  const axios = (await import('axios')).default;
+  let market: any;
+  try {
+    const r = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+    market = r.data;
+  } catch {
+    try {
+      const r = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, { timeout: 10000 });
+      market = r.data;
+    } catch {
+      await ctx.reply('❌ Market not found. It may have been closed or removed.');
+      return;
+    }
+  }
+
+  let outcomePrices: string[] = ['0.5', '0.5'];
+  try {
+    outcomePrices = Array.isArray(market.outcomePrices)
+      ? market.outcomePrices
+      : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
+  } catch { /* keep defaults */ }
+
+  const yesPrice = (parseFloat(outcomePrices[0] || '0.5') * 100).toFixed(1);
+  const noPrice  = (parseFloat(outcomePrices[1] || '0.5') * 100).toFixed(1);
+  const q = (market.question || 'Unknown Market').slice(0, 80);
+
+  await ctx.reply(
+    `📋 *Limit Order — Select Outcome*\n\n` +
+    `Market: ${q}\n\n` +
+    `Current YES: *${yesPrice}¢*  •  NO: *${noPrice}¢*`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.url(`BUY YES (${yesPrice}¢)`, `https://t.me/${botUsername}?start=limit_${marketId}_yes`),
+          Markup.button.url(`BUY NO (${noPrice}¢)`,   `https://t.me/${botUsername}?start=limit_${marketId}_no`),
+        ],
+        [Markup.button.callback('❌ Cancel', 'limit_cancel')],
+      ]),
+    }
+  );
+}
+
+/**
  * Starts a limit order flow for a specific market and outcome.
  * Called from the /start deep link handler: limit_{marketId}_{yes|no}
  */

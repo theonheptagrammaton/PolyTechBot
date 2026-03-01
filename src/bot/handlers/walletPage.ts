@@ -31,7 +31,7 @@ import {
  */
 export async function handleWalletPage(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery().catch(() => {});
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
@@ -145,7 +145,7 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
  */
 export async function handlePortfolio(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery();
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
@@ -222,7 +222,7 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
  */
 export async function handleOpenPositions(ctx: Context, page: number = 1): Promise<void> {
   try {
-    await ctx.answerCbQuery('Loading positions...');
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading positions...').catch(() => {});
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
@@ -351,7 +351,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
  */
 export async function handleOpenOrders(ctx: Context, page: number = 1): Promise<void> {
   try {
-    await ctx.answerCbQuery('Loading open orders...');
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading open orders...').catch(() => {});
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
@@ -998,5 +998,57 @@ export async function handleCancelAllExecute(ctx: Context): Promise<void> {
     if (isBenignTelegramError(error)) return;
     logger.error('Error cancelling all orders:', error);
     await ctx.reply('❌ Error cancelling orders. Please try again.');
+  }
+}
+
+/**
+ * /pnl — Quick P&L summary (unrealized + realized)
+ */
+export async function handlePnl(ctx: Context): Promise<void> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user) {
+      await ctx.reply('❌ User not found. Use /start to create your wallet.');
+      return;
+    }
+
+    const loadingMsg = await ctx.reply('📊 Fetching P&L...');
+
+    const [activePositions, closedPositions] = await Promise.all([
+      getActivePositions(user.polymarketProxyAddress || '').catch(() => [] as ActivePosition[]),
+      getClosedPositions(user.polymarketProxyAddress || '').catch(() => [] as ClosedPosition[]),
+    ]);
+
+    try { await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch { /* non-critical */ }
+
+    const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
+    const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
+    const totalPnl        = totalUnrealized + totalRealized;
+
+    const sign  = (n: number) => n >= 0 ? '+' : '';
+    const emoji = (n: number) => n >= 0 ? '🟢' : '🔴';
+
+    let msg = '📊 *P&L Summary*\n\n';
+    msg += `${emoji(totalUnrealized)} Unrealized: *${sign(totalUnrealized)}$${totalUnrealized.toFixed(2)}*`;
+    if (activePositions.length > 0) msg += ` _(${activePositions.length} position${activePositions.length !== 1 ? 's' : ''})_`;
+    msg += '\n';
+    msg += `${emoji(totalRealized)} Realized:   *${sign(totalRealized)}$${totalRealized.toFixed(2)}*`;
+    if (closedPositions.length > 0) msg += ` _(${closedPositions.length} closed)_`;
+    msg += '\n\n';
+    msg += `${emoji(totalPnl)} *Total P&L: ${sign(totalPnl)}$${totalPnl.toFixed(2)}*`;
+
+    await ctx.reply(msg, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📊 Full Portfolio', 'portfolio')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]),
+    });
+  } catch (error) {
+    logger.error('Error in handlePnl:', error);
+    await ctx.reply('❌ Failed to fetch P&L. Please try again.');
   }
 }

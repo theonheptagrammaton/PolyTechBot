@@ -107,7 +107,7 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
     // Check if already enabled
     const isEnabled = await isTwoFactorEnabled(telegramId);
     if (isEnabled) {
-      await ctx.editMessageText('✅ 2FA is already enabled for your account.', {
+      await ctx.reply('✅ 2FA is already enabled for your account.', {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', '2fa_menu')]]),
       });

@@ -25,7 +25,6 @@ import {
   handleBackToMenu,
   handleSmartWallets,
   handleSwCategoryFilter,
-  handleSwTimeFilter,
   handleSwSortFilter,
   handleRefreshCategory,
 } from './handlers/markets';
@@ -41,6 +40,7 @@ import {
   handleCancelOrderExecute,
   handleCancelAllConfirm,
   handleCancelAllExecute,
+  handlePnl,
 } from './handlers/walletPage';
 import {
   handleCryptoCategory,
@@ -52,6 +52,7 @@ import {
   handleLinkInput,
   detectPolymarketLink,
   handleKeywordSearch,
+  handlePriceCommand,
 } from './handlers/search';
 import {
   handleTwoFactorMenu,
@@ -89,6 +90,10 @@ import {
   handleTradeCancel,
   handleTradeAmountInput,
   tradeState,
+  handleLimitTradeInput,
+  handleLimitConfirm,
+  handleLimitCancel,
+  limitTradeState,
 } from './handlers/trade';
 import {
   handleOpenPositionsFull,
@@ -128,6 +133,24 @@ import {
   handleCopyNicknameSkip,
   handleSmartCopyStart,
   copyAddState,
+  // Manage / Share / Edit
+  copyEditState,
+  handleCopyEditInput,
+  handleCopyManage,
+  handleCopyShare,
+  handleCopyChangeMode,
+  handleCopyEditModeChoice,
+  handleCopyRename,
+  handleCopySetSlippage,
+  handleCopySetPriceRange,
+  handleCopyPriceRangeClear,
+  handleCopySetDailyLimit,
+  handleCopySetSingleLimit,
+  handleCopyPause,
+  handleCopyResume,
+  handleCopyToggleMute,
+  handleCopyDeleteConfirm,
+  handleCopyDeleteExecute,
 } from './handlers/copyTrade';
 import { startCopyTradeMonitor } from '../services/copyTrade';
 
@@ -167,6 +190,32 @@ export class TelegramBot {
     this.bot.command('start', handleStart);
     this.bot.command('help', handleHelp);
     this.bot.command('wallet', handleWallet);
+
+    // Quick-access slash commands
+    this.bot.command('portfolio', handlePortfolio);
+    this.bot.command('positions', (ctx) => handleOpenPositions(ctx, 1));
+    this.bot.command('orders', (ctx) => handleOpenOrders(ctx, 1));
+    this.bot.command('deposit', handleDepositMenu);
+    this.bot.command('settings', handleSettingsMenu);
+    this.bot.command('markets', handleShowCategories);
+    this.bot.command('traders', (ctx) => handleSmartWallets(ctx));
+
+    // Instant info commands
+    this.bot.command('pnl', handlePnl);
+    this.bot.command('price', async (ctx) => {
+      const text = 'message' in ctx.update && 'text' in ctx.update.message
+        ? ctx.update.message.text as string : '';
+      const keyword = text.replace(/^\/price\s*/i, '').trim();
+      await handlePriceCommand(ctx, keyword);
+    });
+
+    // /follow <address> → alias for /copy add <address>
+    this.bot.command('follow', async (ctx) => {
+      const text = 'message' in ctx.update && 'text' in ctx.update.message
+        ? ctx.update.message.text as string : '';
+      const addr = text.replace(/^\/follow\s*/i, '').trim();
+      await handleCopyCommand(ctx, addr ? `add ${addr}` : 'add');
+    });
 
 
     // ── Dev tool: extract custom emoji IDs from any forwarded/typed message ──
@@ -229,21 +278,17 @@ export class TelegramBot {
     this.bot.action('back_to_menu', handleBackToMenu);
     this.bot.action('show_wallet', async (ctx) => await handleSmartWallets(ctx));
 
-    // Discover Traders paginated list: sw_{page}_{cat}_{time}_{sort}
-    this.bot.action(/^sw_(\d+)_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSmartWallets(ctx, ctx.match[2], ctx.match[3], ctx.match[4], parseInt(ctx.match[1], 10));
+    // Discover Traders paginated list: sw_{page}_{cat}_{sort}
+    this.bot.action(/^sw_(\d+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSmartWallets(ctx, ctx.match[2], ctx.match[3], parseInt(ctx.match[1], 10));
     });
-    // Category filter: sw_fc_{cat}_{time}_{sort}
-    this.bot.action(/^sw_fc_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSwCategoryFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
+    // Category filter: sw_fc_{cat}_{sort}
+    this.bot.action(/^sw_fc_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwCategoryFilter(ctx, ctx.match[1], ctx.match[2]);
     });
-    // Time filter: sw_ft_{cat}_{time}_{sort}
-    this.bot.action(/^sw_ft_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSwTimeFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
-    });
-    // Sort filter: sw_fs_{cat}_{time}_{sort}
-    this.bot.action(/^sw_fs_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSwSortFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
+    // Sort filter: sw_fs_{cat}_{sort}
+    this.bot.action(/^sw_fs_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwSortFilter(ctx, ctx.match[1], ctx.match[2]);
     });
     this.bot.action('wallet_page', handleWalletPage);
     this.bot.action('portfolio', handlePortfolio);
@@ -298,11 +343,13 @@ export class TelegramBot {
       await handleEventDetails(ctx, ctx.match[1]);
     });
 
-    // Event detail market pagination: evd_mkt_{eventId}_{page}
-    this.bot.action(/^evd_mkt_(\d+)_(\d+)$/, async (ctx) => {
+    // Event detail market pagination: evd_mkt_{eventId}_{page}[_{backCat}_{backPage}]
+    this.bot.action(/^evd_mkt_(\d+)_(\d+)(?:_([a-z0-9-]+)_(\d+))?$/, async (ctx) => {
       await ctx.answerCbQuery();
       const { handleEventDetails } = await import('./handlers/markets');
-      await handleEventDetails(ctx, ctx.match[1], parseInt(ctx.match[2], 10));
+      const backCategory = ctx.match[3] || undefined;
+      const backPage     = ctx.match[4] ? parseInt(ctx.match[4], 10) : 1;
+      await handleEventDetails(ctx, ctx.match[1], parseInt(ctx.match[2], 10), backCategory, backPage);
     });
 
     // Portfolio handlers
@@ -389,6 +436,10 @@ export class TelegramBot {
       }
     });
     this.bot.action('trade_cancel', handleTradeCancel);
+
+    // Limit order handlers
+    this.bot.action('limit_confirm', handleLimitConfirm);
+    this.bot.action('limit_cancel',  handleLimitCancel);
 
     // Admin handlers
     this.bot.action('admin_refresh_stats', handleRefreshStats);
@@ -483,6 +534,56 @@ export class TelegramBot {
       else await ctx.answerCbQuery('Invalid address');
     });
 
+    // ── Manage / Share / Edit actions ──────────────────────────────────────
+    this.bot.action(/^copy_manage_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyManage(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_share_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyShare(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_chmode_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyChangeMode(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_editmode_fixed_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyEditModeChoice(ctx, ctx.match[1].toLowerCase(), 'fixed');
+    });
+    this.bot.action(/^copy_editmode_mult_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyEditModeChoice(ctx, ctx.match[1].toLowerCase(), 'multiplier');
+    });
+    this.bot.action(/^copy_rename_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyRename(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_slippage_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopySetSlippage(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_prng_clear_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyPriceRangeClear(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_prng_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopySetPriceRange(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_dlimit_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopySetDailyLimit(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_slim_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopySetSingleLimit(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_pause_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyPause(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_resume_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyResume(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_mute_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyToggleMute(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_delconf_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyDeleteConfirm(ctx, ctx.match[1].toLowerCase());
+    });
+    this.bot.action(/^copy_del_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleCopyDeleteExecute(ctx, ctx.match[1].toLowerCase());
+    });
+
     // Withdraw handlers
     this.bot.action('withdraw_menu', handleWithdrawMenu);
     this.bot.action(/^wd_chain_(.+)$/, async (ctx) => {
@@ -518,6 +619,14 @@ export class TelegramBot {
         return;
       }
 
+      // Check if user is in a limit order flow (price or amount input)
+      const ltState = limitTradeState.get(telegramId);
+      if (ltState) {
+        settingsAmountState.delete(telegramId);
+        const consumed = await handleLimitTradeInput(ctx, text);
+        if (consumed) return;
+      }
+
       // Check if user is in a position trade flow (sell/buy from positions)
       const posStateData = positionTradeState.get(telegramId);
       if (posStateData) {
@@ -538,6 +647,13 @@ export class TelegramBot {
       const copyState = copyAddState.get(telegramId);
       if (copyState) {
         const consumed = await handleCopyAddInput(ctx, text);
+        if (consumed) return;
+      }
+
+      // Check if user is in a copy-edit flow (manage page edits)
+      const copyEdit = copyEditState.get(telegramId);
+      if (copyEdit) {
+        const consumed = await handleCopyEditInput(ctx, text);
         if (consumed) return;
       }
 

@@ -162,7 +162,7 @@ async function fetchCategoryEvents(category: string): Promise<Event[]> {
  */
 export async function handleShowCategories(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery();
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const t = ce(EMOJI.marketsTitle, '🤑');
 
@@ -404,61 +404,83 @@ export async function handleEventDetails(
     const prices  = parseOutcomePrices(market);
     const outcomes = parseOutcomes(market);
 
-    // ── Header ────────────────────────────────────────────────────────────────
-    const eTitle = ce(EMOJI.eventTitle, '💰');
-    const eUp    = ce(EMOJI.priceUp,    '⬆️');
-    const eDown  = ce(EMOJI.priceDown,  '⬇️');
-    const eStats = ce(EMOJI.eventStats, '📈');
+    // ── Custom emojis (only for high-visibility lines; stat-line uses plain to save caption chars)
+    const eTitle     = ce(EMOJI.eventTitle,  '🌸');
+    const eUp        = ce(EMOJI.priceUp,     '⬆️');
+    const eDown      = ce(EMOJI.priceDown,   '⬇️');
+    const eLightning = ce(EMOJI.lightning,   '⚡️');
+    const eLink      = ce(EMOJI.marketsTitle,'🤑');
 
-    const title = safeTitle(event.title, 60);
-    let message = `${eTitle} <b>${esc(title)}</b>\n`;
-    message += `Vol: <b>${formatVolume(event.volume24hr)}</b> · Liq: <b>${formatVolume(event.liquidity)}</b>\n\n`;
+    // ── Market label (short descriptor for this market within a multi-market event) ──
+    const mLabel = (() => {
+      if (market.groupItemTitle) return market.groupItemTitle as string;
+      const o0 = outcomes[0] || '';
+      if (o0 && !['yes', 'no', 'true', 'false'].includes(o0.toLowerCase())) return o0;
+      return null;
+    })();
 
-    // ── Current market ────────────────────────────────────────────────────────
-    if (totalMarkets > 1) message += `<b>Market ${currentPage}/${totalMarkets}:</b>\n`;
-    message += `<b>${esc(q)}</b>\n`;
+    // ── Event end date ────────────────────────────────────────────────────────
+    const endDateStr = fmtEndDate(event.endDate);
 
+    // ── Prices ────────────────────────────────────────────────────────────────
+    let yPrice = '—', nPrice = '—';
     if (prices.length >= 2 && outcomes.length >= 2) {
       const p0 = parseFloat(prices[0] || '0');
       const p1 = parseFloat(prices[1] || '0');
       if (!isNaN(p0) && !isNaN(p1)) {
-        const y = (p0 * 100).toFixed(1);
-        const n = (p1 * 100).toFixed(1);
-        message += `${eUp}${esc(outcomes[0])} <b>${y}¢</b> · ${eDown}${esc(outcomes[1])} ${n}¢\n`;
+        yPrice = (p0 * 100).toFixed(1);
+        nPrice = (p1 * 100).toFixed(1);
       }
     }
 
-    message += `${eStats} ${vol}`;
-    message += `  <a href="https://t.me/${botUsername}?start=trade_${marketId}_yes_default">YES $${defaultAmount}</a>`;
-    message += ` · <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>\n`;
-    message += ` · <a href="https://t.me/${botUsername}?start=mkt_${marketId}">Details Trade</a>\n\n`;
-    message += `🔗 <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
+    const title = safeTitle(event.title, 60);
+
+    // ── Build message ─────────────────────────────────────────────────────────
+    // Note: caption limit is 1024 chars. Plain emojis used for stat line to stay within budget.
+    let message = `${eTitle} <b>${esc(title)}</b>\n\n`;
+    message += `📊Total Vol: <b>${formatVolume(event.volume24hr)}</b>`;
+    message += ` • 💧Total Liq: <b>${formatVolume(event.liquidity)}</b>`;
+    if (endDateStr) message += ` | ⏰${esc(endDateStr)}`;
+    message += '\n\n';
+
+    if (totalMarkets > 1) {
+      const labelPart = mLabel ? ` | ${esc(mLabel)}` : '';
+      message += `➡️Market ${currentPage}/${totalMarkets}${labelPart}\n\n`;
+    }
+
+    message += `- <b>${esc(q)}</b>\n\n`;
+    message += `Vol: <b>${vol}</b> • Liq: <b>${formatVolume(market.liquidity)}</b>\n\n`;
+    message += `${eUp}${esc(outcomes[0] || 'Yes')} <b>${yPrice}¢</b>\n`;
+    message += `${eDown}${esc(outcomes[1] || 'No')} ${nPrice}¢\n\n`;
+
+    message += `${eLightning}<a href="https://t.me/${botUsername}?start=trade_${marketId}_yes_default">YES $${defaultAmount}</a>`;
+    message += ` • <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>\n\n`;
+
+    message += `${eLink} <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
 
     // ── Keyboard ──────────────────────────────────────────────────────────────
     const buttons: any[] = [];
 
-    // Row 1 — Buy buttons (custom amount)
+    // Row 1 — Navigation (only for multi-market events, arrows only)
+    if (totalMarkets > 1) {
+      const navRow: any[] = [];
+      if (currentPage > 1)
+        navRow.push(Markup.button.callback('⬅️', `evd_mkt_${event.id}_${currentPage - 1}${backSuffix}`));
+      if (currentPage < totalMarkets)
+        navRow.push(Markup.button.callback('➡️', `evd_mkt_${event.id}_${currentPage + 1}${backSuffix}`));
+      if (navRow.length > 0) buttons.push(navRow);
+    }
+
+    // Row 2 — Buy buttons (custom amount)
     buttons.push([
       Markup.button.url(`✅ Buy YES`, `https://t.me/${botUsername}?start=trade_${marketId}_yes_custom`),
       Markup.button.url(`❌ Buy NO`,  `https://t.me/${botUsername}?start=trade_${marketId}_no_custom`),
     ]);
 
-    // Row 2 — Limit order buttons
+    // Row 4 — Single limit order button (opens YES/NO choice screen)
     buttons.push([
-      Markup.button.url(`📋 Limit YES`, `https://t.me/${botUsername}?start=limit_${marketId}_yes`),
-      Markup.button.url(`📋 Limit NO`,  `https://t.me/${botUsername}?start=limit_${marketId}_no`),
+      Markup.button.url(`🏦 Place Limit Order`, `https://t.me/${botUsername}?start=limit_${marketId}_choice`),
     ]);
-
-    // Row 3 — Navigation (only for multi-market events)
-    if (totalMarkets > 1) {
-      const navRow: any[] = [];
-      if (currentPage > 1)
-        navRow.push(Markup.button.callback('◀️ Prev', `evd_mkt_${event.id}_${currentPage - 1}${backSuffix}`));
-      navRow.push(Markup.button.callback(`${currentPage}/${totalMarkets}`, 'noop'));
-      if (currentPage < totalMarkets)
-        navRow.push(Markup.button.callback('▶️ Next', `evd_mkt_${event.id}_${currentPage + 1}${backSuffix}`));
-      buttons.push(navRow);
-    }
 
     buttons.push([
       Markup.button.callback('« Back', backCb),

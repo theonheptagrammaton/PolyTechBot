@@ -64,6 +64,61 @@ export async function handleStart(ctx: Context): Promise<void> {
       return;
     }
 
+    if (startParam?.startsWith('limit_')) {
+      // Limit order deep link: limit_{marketId}_{yes|no}
+      // marketId is a 0x hex string (no underscores), so we split on the last underscore
+      const rest = startParam.slice(6); // strip 'limit_'
+      const lastUnderscore = rest.lastIndexOf('_');
+      if (lastUnderscore < 1) {
+        await ctx.reply('❌ Invalid limit order link.');
+        return;
+      }
+      const marketId = rest.slice(0, lastUnderscore);
+      const outcomeStr = rest.slice(lastUnderscore + 1);
+      if (outcomeStr === 'choice') {
+        logger.info(`Deep link to limit choice for ${marketId} from user: ${telegramId}`);
+        const { handleLimitChoiceFlow } = await import('./trade');
+        await handleLimitChoiceFlow(ctx, marketId);
+        return;
+      }
+      if (outcomeStr !== 'yes' && outcomeStr !== 'no') {
+        await ctx.reply('❌ Invalid limit order link.');
+        return;
+      }
+      logger.info(`Deep link to limit order for ${marketId}/${outcomeStr} from user: ${telegramId}`);
+      const { handleLimitOrderStart } = await import('./trade');
+      await handleLimitOrderStart(ctx, marketId, outcomeStr as 'yes' | 'no');
+      return;
+    }
+
+    if (startParam?.startsWith('copymng_')) {
+      // Deep link from copy list "Manage" text link
+      const address = startParam.slice(8).toLowerCase(); // strip 'copymng_'
+      if (/^0x[a-f0-9]{40}$/i.test(address)) {
+        const user = await getUserByTelegramId(telegramId);
+        if (user) {
+          const { handleCopyManage } = await import('./copyTrade');
+          await handleCopyManage(ctx, address);
+          return;
+        }
+      }
+      // Not registered — fall through to registration
+    }
+
+    if (startParam?.startsWith('copyshare_')) {
+      // Deep link from copy list "Share" text link
+      const address = startParam.slice(10).toLowerCase(); // strip 'copyshare_'
+      if (/^0x[a-f0-9]{40}$/i.test(address)) {
+        const user = await getUserByTelegramId(telegramId);
+        if (user) {
+          const { handleCopyShare } = await import('./copyTrade');
+          await handleCopyShare(ctx, address);
+          return;
+        }
+      }
+      // Not registered — fall through to registration
+    }
+
     if (startParam?.startsWith('copy_')) {
       // Smart Wallet deep link — pre-fill address and start copy add flow
       const address = startParam.slice(5); // strip 'copy_'

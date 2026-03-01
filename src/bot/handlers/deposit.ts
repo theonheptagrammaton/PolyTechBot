@@ -17,7 +17,7 @@ import { decrypt } from '../../utils/encryption';
  */
 export async function handleDepositMenu(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery();
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const message =
       '💰 *Deposit Funds*\n\n' +
