@@ -698,9 +698,8 @@ async function handleCopyPauseAll(ctx: Context, resume: boolean): Promise<void> 
   await ctx.reply(`${result.count} subscription${result.count !== 1 ? 's' : ''} ${label}.`);
 }
 
-// Callback action wrapper
+// Callback action wrapper — handleCopyStopAll already has the answerCbQuery guard
 export async function handleCopyStopAllAction(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery();
   await handleCopyStopAll(ctx);
 }
 
@@ -876,7 +875,7 @@ export async function handleCopyManage(ctx: Context, traderAddress: string): Pro
 
   const modeStr = sub.fixedAmount != null
     ? `Fixed — $${sub.fixedAmount.toFixed(2)} per trade`
-    : `Percentage — ${(sub.multiplier ?? 1).toFixed(0)}% of leader's amount`;
+    : `Multiplier — ×${(sub.multiplier ?? 1).toFixed(2)} of leader's amount`;
 
   const priceRangeStr = sub.priceMin != null && sub.priceMax != null
     ? `${sub.priceMin.toFixed(0)}¢ – ${sub.priceMax.toFixed(0)}¢`
@@ -1025,7 +1024,7 @@ export async function handleCopyEditModeChoice(
 
   const label = mode === 'fixed'
     ? 'fixed USD amount per trade (e.g. <code>50</code>):'
-    : 'percentage of leader\'s trade size (e.g. <code>25</code> = 25%):';
+    : 'multiplier for leader\'s trade size (e.g. <code>0.5</code> = 50% · <code>2</code> = 200%):';
 
   await sendPage(ctx,
     `⚙️ Enter new ${label}`,
@@ -1299,8 +1298,8 @@ export async function handleCopyEditInput(ctx: Context, text: string): Promise<b
       await ctx.reply('❌ Minimum fixed amount is $1.');
       return true;
     }
-    if (state.newMode === 'multiplier' && (value < 0.01 || value > 500)) {
-      await ctx.reply('❌ Percentage must be between 0.01 and 500.');
+    if (state.newMode === 'multiplier' && (value < 0.01 || value > 10)) {
+      await ctx.reply('❌ Multiplier must be between 0.01 and 10. Example: 0.5 = copy 50% of leader\'s size.');
       return true;
     }
 
@@ -1314,7 +1313,7 @@ export async function handleCopyEditInput(ctx: Context, text: string): Promise<b
     });
     const modeLabel = state.newMode === 'fixed'
       ? `$${value.toFixed(2)} fixed`
-      : `${value.toFixed(0)}% percentage`;
+      : `×${value.toFixed(2)} multiplier`;
     await ctx.reply(`✅ Mode updated: ${esc(modeLabel)}`, { parse_mode: 'HTML' });
     await handleCopyManage(ctx, addr);
     return true;

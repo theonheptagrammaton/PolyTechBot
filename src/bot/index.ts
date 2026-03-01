@@ -430,10 +430,8 @@ export class TelegramBot {
         await handleOutcomeSelection(ctx, ctx.callbackQuery.data);
       }
     });
-    this.bot.action(/^trade_confirm_/, async (ctx) => {
-      if ('data' in ctx.callbackQuery) {
-        await handleTradeConfirm(ctx, ctx.callbackQuery.data);
-      }
+    this.bot.action('trade_confirm_do', async (ctx) => {
+      await handleTradeConfirm(ctx);
     });
     this.bot.action('trade_cancel', handleTradeCancel);
 

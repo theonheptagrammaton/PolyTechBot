@@ -81,10 +81,10 @@ export async function handleDepositChain(
     // Get address based on chain
     let address: string;
     if (chain === 'solana') {
-      if (!user.solanaAddress) {
+      if (!user.depositAddressSvm) {
         await sendPage(ctx,
-          '❌ *Solana Wallet Not Set Up*\n\n' +
-          'Your Solana deposit address is not configured.\n\n' +
+          '❌ *Solana Deposit Not Available*\n\n' +
+          'Your Solana deposit address is not yet configured.\n\n' +
           'Please use Polygon or Ethereum for deposits.',
           {
             parse_mode: 'Markdown',
@@ -93,7 +93,7 @@ export async function handleDepositChain(
         );
         return;
       }
-      address = user.solanaAddress;
+      address = user.depositAddressSvm;
     } else {
       address = user.walletAddress;
     }
@@ -181,11 +181,11 @@ export async function handleCheckBalance(
 
     let address: string;
     if (chain === 'solana') {
-      if (!user.solanaAddress) {
-        await ctx.reply('❌ Solana wallet not configured. Please use Polygon or Ethereum for deposits.');
+      if (!user.depositAddressSvm) {
+        await ctx.reply('❌ Solana deposit address not configured. Please use Polygon or Ethereum for deposits.');
         return;
       }
-      address = user.solanaAddress;
+      address = user.depositAddressSvm;
     } else {
       address = user.walletAddress;
     }
@@ -264,7 +264,7 @@ export async function handleCheckAllBalances(ctx: Context): Promise<void> {
     }
 
     // Get all balances
-    const balances = await getAllBalances(user.walletAddress, user.solanaAddress || undefined);
+    const balances = await getAllBalances(user.walletAddress, user.depositAddressSvm || undefined);
 
     let message = '💰 *All Balances*\n\n';
     message += `🟣 *Polygon:* ${formatBalance(balances.polygon.balance)}\n`;
@@ -480,10 +480,10 @@ export async function handleConfirmDeposit(
     } catch (error: any) {
       logger.error('Error executing deposit:', error);
 
+      logger.error('[deposit] approveAndDepositWithRelayer failed:', error);
       await sendPage(ctx,
         '❌ *Deposit Failed*\n\n' +
         'An error occurred while processing your deposit.\n\n' +
-        `Error: ${error.message}\n\n` +
         'Your funds are still in your wallet. Please try again or contact support.',
         {
           parse_mode: 'Markdown',

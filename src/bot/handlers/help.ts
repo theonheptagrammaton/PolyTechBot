@@ -20,10 +20,11 @@ export async function handleHelp(ctx: Context): Promise<void> {
 
     '<b>/start</b>\n' +
     'Create your Polymarket wallet or open the main menu.\n' +
-    'Also works with deep links (market share, copy trade invite, referral links).\n\n' +
+    'Also works with deep links (market share, copy trade invite, referral links).\n' +
+    'You can also <b>paste any Polymarket URL</b> directly into the chat at any time — the bot will detect it and open the market instantly.\n\n' +
 
     '<b>/wallet</b>\n' +
-    'Open the wallet page. View your USDC balance, deposit addresses (EVM, Solana, Bitcoin, Tron) and withdraw funds.\n\n' +
+    'Open the wallet page. View your USDC balance, deposit addresses (Polygon, Ethereum, Solana) and withdraw funds.\n\n' +
 
     '<b>/portfolio</b>\n' +
     'Full portfolio overview — active positions, closed positions, unrealized and realized P&L totals.\n\n' +
@@ -45,7 +46,8 @@ export async function handleHelp(ctx: Context): Promise<void> {
 
     '<b>/price &lt;keyword&gt;</b>\n' +
     'Search active markets by keyword and show live prices.\n' +
-    '<i>Example: /price bitcoin</i>\n\n' +
+    '<i>Example: /price bitcoin</i>\n' +
+    'You can also just <b>type any keyword without a command</b> — the bot searches markets automatically.\n\n' +
 
     '<b>/traders</b>\n' +
     'Discover top Polymarket traders sorted by P&L, Win Rate, or Volume. Tap Copy to instantly follow one.\n\n' +
@@ -83,6 +85,8 @@ export async function handleHelp(ctx: Context): Promise<void> {
     '  → Resume all paused subscriptions.\n\n' +
     '  <b>/copy history</b> <i>or</i> <b>/copy history &lt;N&gt;</b>\n' +
     '  → View your last N copied trades (default: 10, max recommended: 50).\n\n' +
+    '  <b>Advanced management</b> (accessible from the copy list via buttons):\n' +
+    '  Rename trader, set price range filter, daily/single trade limits, per-trader slippage, mute notifications, change mode (Fixed ↔ Multiplier), share invite link.\n\n' +
 
     '<b>/help</b>\n' +
     'Show this help message.\n\n' +

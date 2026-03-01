@@ -23,6 +23,7 @@ const IMG_SMARTWALLET  = path.join(__dirname, '../img/smartwallet.PNG');
 // ─── OG Image helper ──────────────────────────────────────────────────────────
 
 const _ogImageCache = new Map<string, string | null>();
+const OG_IMAGE_CACHE_MAX = 200;
 
 async function fetchOgImage(pageUrl: string): Promise<string | null> {
   if (_ogImageCache.has(pageUrl)) return _ogImageCache.get(pageUrl) ?? null;
@@ -37,9 +38,15 @@ async function fetchOgImage(pageUrl: string): Promise<string | null> {
       html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     const url = match ? match[1] : null;
+    if (_ogImageCache.size >= OG_IMAGE_CACHE_MAX) {
+      _ogImageCache.delete(_ogImageCache.keys().next().value!);
+    }
     _ogImageCache.set(pageUrl, url);
     return url;
   } catch {
+    if (_ogImageCache.size >= OG_IMAGE_CACHE_MAX) {
+      _ogImageCache.delete(_ogImageCache.keys().next().value!);
+    }
     _ogImageCache.set(pageUrl, null);
     return null;
   }

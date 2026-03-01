@@ -10,6 +10,7 @@ export const tradeState = new Map<string, {
   outcome: 'yes' | 'no';
   outcomeIndex: number;
   price: number;
+  amount?: number;  // set during large-trade confirmation flow
   timestamp: number;
 }>();
 
@@ -309,6 +310,9 @@ async function handleLargeTradeConfirmation(
   amount: number
 ): Promise<void> {
   try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
     const outcomeIndex = outcome === 'yes' ? 0 : 1;
     const outcomePrices = market.outcomePrices || ['0.5', '0.5'];
     const priceRaw = parseFloat(outcomePrices[outcomeIndex] || '0.5');
@@ -317,6 +321,17 @@ async function handleLargeTradeConfirmation(
     const commissionAmt = amount * COMMISSION_RATE;
     const tradeAmount = amount - commissionAmt;
     const estimatedShares = Math.floor(tradeAmount / price);
+
+    // Store pending confirmation in state — avoids encoding 66-char conditionId in callback data
+    tradeState.set(telegramId, {
+      marketId,
+      marketQuestion: market.question || 'Unknown Market',
+      outcome,
+      outcomeIndex,
+      price,
+      amount,
+      timestamp: Date.now(),
+    });
 
     const message =
       '⚠️ *Confirm Large Trade*\n\n' +
@@ -331,7 +346,7 @@ async function handleLargeTradeConfirmation(
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Confirm Trade', `trade_confirm_${marketId}_${outcome}_${amount}`)],
+        [Markup.button.callback('✅ Confirm Trade', 'trade_confirm_do')],
         [Markup.button.callback('❌ Cancel', 'trade_cancel')],
       ]),
     });
@@ -803,8 +818,8 @@ async function executeTrade(
         await ctx.reply(errorMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Tekrar Dene', `trade_${marketId}_custom`)],
-            [Markup.button.callback('« Geri', 'show_categories')],
+            [Markup.button.callback('🔄 Try Again', `trade_${marketId}_custom`)],
+            [Markup.button.callback('« Back', 'show_categories')],
           ]),
         });
       }
@@ -895,17 +910,25 @@ export async function handleTradeAmountInput(ctx: Context, amountText: string): 
 }
 
 /**
- * Handles trade confirmation
+ * Handles trade confirmation (reads pending trade from tradeState — no data in callback)
  */
-export async function handleTradeConfirm(ctx: Context, data: string): Promise<void> {
+export async function handleTradeConfirm(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery();
 
-    // Parse: trade_confirm_marketId_outcome_amount
-    const parts = data.replace('trade_confirm_', '').split('_');
-    const marketId = parts[0];
-    const outcome = parts[1] as 'yes' | 'no';
-    const amount = parseInt(parts[2], 10);
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const state = tradeState.get(telegramId);
+    if (!state || state.amount == null) {
+      await ctx.reply('❌ Trade session expired. Please start a new trade.', {
+        ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
+      });
+      return;
+    }
+
+    const { marketId, outcome, amount } = state;
+    tradeState.delete(telegramId);
 
     // Fetch market (try Gamma first, then CLOB)
     const axios = (await import('axios')).default;

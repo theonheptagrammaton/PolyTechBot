@@ -109,9 +109,11 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     message += `💡 <b>Min deposit: $10 USDC</b>`;
 
     // Buttons
-    const buttons = [
+    const buttons: any[] = [
       [
-        Markup.button.url('👤 Profile', `https://polymarket.com/profile/${user.polymarketProxyAddress || user.walletAddress}`),
+        ...(user.polymarketProxyAddress
+          ? [Markup.button.url('👤 Profile', `https://polymarket.com/profile/${user.polymarketProxyAddress}`)]
+          : []),
         Markup.button.callback('📊 Portfolio', 'portfolio'),
       ],
       [

@@ -196,7 +196,8 @@ async function executeCopyOrder(
     slippageTolerance: number;
   },
   trade: DetectedTrade,
-  copySize: number
+  copySize: number,
+  subSlippage?: number   // per-subscription slippage (falls back to user.slippageTolerance)
 ): Promise<ExecResult> {
   if (!user.polymarketProxyAddress) {
     return { status: 'skipped', errorMsg: 'no proxy address' };
@@ -246,7 +247,7 @@ async function executeCopyOrder(
     const isSell = trade.side === 'SELL';
     const tick = parseFloat(tickSize);
     const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
-    const slippagePct  = user.slippageTolerance ?? 1.0;
+    const slippagePct  = (subSlippage ?? user.slippageTolerance) ?? 1.0;
     const slippageMult = slippagePct / 100;
 
     let price: number;
@@ -354,7 +355,7 @@ async function tickForTrader(
 ): Promise<void> {
   // Load active subscriptions first — needed for both new-trade processing and TP/SL checks
   const subs = await prisma.copySubscription.findMany({
-    where: { traderAddress, isActive: true },
+    where: { traderAddress, isActive: true, isPaused: false },
     include: { user: true },
   });
 
@@ -490,20 +491,58 @@ async function tickForTrader(
               errorMsg: 'copy size below minimum',
             },
           });
-          const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
-          await sendNotification(
-            user.telegramId,
-            `⏭ *Trade Skipped*\n\n` +
-            `Trader: \`${shortAddr}\`\n` +
-            `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-            `Side: ${trade.side} ${trade.outcome}\n` +
-            `Reason: Copy size below minimum`
-          );
+          if (sub.notificationsEnabled) {
+            const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+            await sendNotification(
+              user.telegramId,
+              `⏭ *Trade Skipped*\n\n` +
+              `Trader: \`${shortAddr}\`\n` +
+              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
+              `Side: ${trade.side} ${trade.outcome}\n` +
+              `Reason: Copy size below minimum`
+            );
+          }
           continue;
         }
 
+        // ── Filter: price range (BUY only — priceMin/priceMax in cents 0–100) ─────
+        if (trade.side === 'BUY') {
+          const priceCents = trade.price * 100;
+          if (sub.priceMin != null && priceCents < sub.priceMin) {
+            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below min filter` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nReason: Price ${priceCents.toFixed(1)}¢ < min ${sub.priceMin}¢`);
+            continue;
+          }
+          if (sub.priceMax != null && priceCents > sub.priceMax) {
+            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above max filter` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nReason: Price ${priceCents.toFixed(1)}¢ > max ${sub.priceMax}¢`);
+            continue;
+          }
+        }
+
+        // ── Filter: single trade max cap (BUY only) ───────────────────────────────
+        if (trade.side === 'BUY' && sub.singleTradeMax != null && copySize > sub.singleTradeMax) {
+          copySize = sub.singleTradeMax;
+          if (copySize < 1.0) {
+            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: 'below min after singleTradeMax cap' } });
+            continue;
+          }
+        }
+
+        // ── Filter: daily spend limit (BUY only) ──────────────────────────────────
+        if (trade.side === 'BUY' && sub.dailySpendMax != null) {
+          const today = new Date().toISOString().slice(0, 10);
+          const spendKey = `copy:daily:${sub.id}:${today}`;
+          const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
+          if (spentToday + copySize > sub.dailySpendMax) {
+            await prisma.copiedTrade.create({ data: { userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped — Daily Limit*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
+            continue;
+          }
+        }
+
         // Execute the copy
-        const result = await executeCopyOrder(user, trade, copySize);
+        const result = await executeCopyOrder(user, trade, copySize, sub.slippage);
 
         // Save to DB
         await prisma.copiedTrade.create({
@@ -523,42 +562,52 @@ async function tickForTrader(
           },
         });
 
-        // Send Telegram notification
-        const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
-        const modeLabel = sub.fixedAmount
-          ? `$${sub.fixedAmount} fixed`
-          : `×${(sub.multiplier ?? 1).toFixed(2)}`;
-        const safeMd = (s: string) => s.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+        // Track daily spend for successful BUY fills
+        if (result.status === 'filled' && trade.side === 'BUY' && sub.dailySpendMax != null) {
+          const today = new Date().toISOString().slice(0, 10);
+          const spendKey = `copy:daily:${sub.id}:${today}`;
+          const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
+          await redisCache.set(spendKey, spentToday + copySize, 25 * 3600);
+        }
 
-        if (result.status === 'filled') {
-          await sendNotification(
-            user.telegramId,
-            `✅ *Trade Copied*\n\n` +
-            `Trader: \`${shortAddr}\`\n` +
-            `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-            `Side: ${trade.side} ${trade.outcome}\n` +
-            `Original: $${trade.sizeUsd.toFixed(2)}\n` +
-            `Copied: $${copySize.toFixed(2)} (${modeLabel})\n` +
-            `Order: \`${result.orderID}\``
-          );
-        } else if (result.status === 'failed') {
-          await sendNotification(
-            user.telegramId,
-            `❌ *Copy Failed*\n\n` +
-            `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-            `Error: ${safeMd(result.errorMsg ?? 'unknown error')}\n` +
-            `Copy size: $${copySize.toFixed(2)}`
-          );
-        } else if (result.status === 'skipped') {
-          // D2: Notify user when a trade was skipped (BUY or SELL)
-          await sendNotification(
-            user.telegramId,
-            `⏭ *Trade Skipped*\n\n` +
-            `Trader: \`${shortAddr}\`\n` +
-            `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-            `Side: ${trade.side} ${trade.outcome}\n` +
-            `Reason: ${safeMd(result.errorMsg ?? 'no position found')}`
-          );
+        // Send Telegram notification (respects notificationsEnabled per subscription)
+        if (sub.notificationsEnabled) {
+          const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+          const modeLabel = sub.fixedAmount
+            ? `$${sub.fixedAmount} fixed`
+            : `×${(sub.multiplier ?? 1).toFixed(2)}`;
+          const safeMd = (s: string) => s.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+
+          if (result.status === 'filled') {
+            await sendNotification(
+              user.telegramId,
+              `✅ *Trade Copied*\n\n` +
+              `Trader: \`${shortAddr}\`\n` +
+              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
+              `Side: ${trade.side} ${trade.outcome}\n` +
+              `Original: $${trade.sizeUsd.toFixed(2)}\n` +
+              `Copied: $${copySize.toFixed(2)} (${modeLabel})\n` +
+              `Order: \`${result.orderID}\``
+            );
+          } else if (result.status === 'failed') {
+            await sendNotification(
+              user.telegramId,
+              `❌ *Copy Failed*\n\n` +
+              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
+              `Error: ${safeMd(result.errorMsg ?? 'unknown error')}\n` +
+              `Copy size: $${copySize.toFixed(2)}`
+            );
+          } else if (result.status === 'skipped') {
+            // D2: Notify user when a trade was skipped (BUY or SELL)
+            await sendNotification(
+              user.telegramId,
+              `⏭ *Trade Skipped*\n\n` +
+              `Trader: \`${shortAddr}\`\n` +
+              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
+              `Side: ${trade.side} ${trade.outcome}\n` +
+              `Reason: ${safeMd(result.errorMsg ?? 'no position found')}`
+            );
+          }
         }
       } catch (err: any) {
         logger.error(`[copy] Error processing sub ${sub.id}: ${err?.message}`);
@@ -572,7 +621,7 @@ async function tickForTrader(
     if (sub.takeProfitPct != null || sub.stopLossPct != null) {
       await checkTpSlPositions(
         sub.user,
-        { traderAddress: sub.traderAddress, takeProfitPct: sub.takeProfitPct, stopLossPct: sub.stopLossPct },
+        { traderAddress: sub.traderAddress, takeProfitPct: sub.takeProfitPct, stopLossPct: sub.stopLossPct, slippage: sub.slippage },
         sendNotification
       ).catch((err) =>
         logger.error(`[copy] TP/SL check error for ${sub.userId}: ${err?.message}`)
@@ -602,6 +651,7 @@ async function checkTpSlPositions(
     traderAddress: string;
     takeProfitPct: number | null;
     stopLossPct: number | null;
+    slippage?: number;
   },
   sendNotification: (telegramId: string, msg: string) => Promise<void>
 ): Promise<void> {
@@ -683,7 +733,7 @@ async function checkTpSlPositions(
       timestamp: Date.now(),
     };
 
-    const result = await executeCopyOrder(user, syntheticTrade, pos.copiedSize);
+    const result = await executeCopyOrder(user, syntheticTrade, pos.copiedSize, sub.slippage);
 
     // Mark as TP/SL exited only when order was placed or skipped (not on hard failure,
     // so the next tick can retry). 'skipped' means user has no position to sell —

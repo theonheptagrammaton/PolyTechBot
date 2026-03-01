@@ -111,7 +111,7 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
 
     const pos = getPos(telegramId, idx);
     if (!pos) {
-      await ctx.answerCbQuery('Position not found. Please refresh.', { show_alert: true });
+      await ctx.reply('⚠️ Position not found. Please refresh your positions.');
       return;
     }
 
@@ -161,7 +161,7 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
 
     const pos = getPos(telegramId, idx);
     if (!pos) {
-      await ctx.answerCbQuery('Position not found. Please refresh.', { show_alert: true });
+      await ctx.reply('⚠️ Position not found. Please refresh your positions.');
       return;
     }
 
@@ -215,7 +215,7 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
 
     const pos = getPos(telegramId, idx);
     if (!pos) {
-      await ctx.answerCbQuery('Position not found. Please refresh.', { show_alert: true });
+      await ctx.reply('⚠️ Position not found. Please refresh your positions.');
       return;
     }
 
@@ -255,7 +255,6 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
 
 export async function handlePositionSellPct(ctx: Context, idx: number, pct: number): Promise<void> {
   try {
-    await ctx.answerCbQuery();
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
     const state = positionTradeState.get(telegramId);
@@ -278,6 +277,8 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
       return;
     }
 
+    await ctx.answerCbQuery();
+
     // Refresh timestamp so the 10-min cleanup interval doesn't delete state
     // between the % click and the confirm button press
     positionTradeState.set(telegramId, { ...state, timestamp: Date.now() });
@@ -297,7 +298,7 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
   const state = positionTradeState.get(telegramId);
   if (!state) return;
 
-  if (Date.now() - state.timestamp > 5 * 60 * 1000) {
+  if (Date.now() - state.timestamp > 10 * 60 * 1000) {
     positionTradeState.delete(telegramId);
     await ctx.reply('❌ Session expired. Please start again.');
     return;
@@ -502,11 +503,13 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
         await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
       }
     } catch (err: any) {
+      logger.error('[positionTrade] Sell failed:', err);
       const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]);
+      const errMsg = '❌ *Sell Failed*\n\nOrder could not be placed. Check your balance and try again.';
       try {
-        await ctx.editMessageText(`❌ *Sell Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+        await ctx.editMessageText(errMsg, { parse_mode: 'Markdown', ...errKeyboard });
       } catch {
-        await ctx.reply(`❌ *Sell Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+        await ctx.reply(errMsg, { parse_mode: 'Markdown', ...errKeyboard });
       }
     }
   } catch (error) {
@@ -566,11 +569,13 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
         await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
       }
     } catch (err: any) {
+      logger.error('[positionTrade] Buy failed:', err);
       const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]);
+      const errMsg = '❌ *Buy Failed*\n\nOrder could not be placed. Check your balance and try again.';
       try {
-        await ctx.editMessageText(`❌ *Buy Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+        await ctx.editMessageText(errMsg, { parse_mode: 'Markdown', ...errKeyboard });
       } catch {
-        await ctx.reply(`❌ *Buy Failed*\n\n${err.message || 'Unknown error'}`, { parse_mode: 'Markdown', ...errKeyboard });
+        await ctx.reply(errMsg, { parse_mode: 'Markdown', ...errKeyboard });
       }
     }
   } catch (error) {
