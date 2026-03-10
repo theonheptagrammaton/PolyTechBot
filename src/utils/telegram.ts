@@ -3,7 +3,7 @@ import path from 'path';
 import { Context } from 'telegraf';
 import { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
 
-const MENU_IMAGE = path.join(__dirname, '../bot/img/beattheodds.JPG');
+const MENU_IMAGE = path.join(__dirname, '../bot/img/opening.jpg');
 let _cachedPhotoFileId: string | null = null;
 
 /** Per-URL file_id cache — avoids re-uploading the same event image */
@@ -44,14 +44,22 @@ export async function sendPage(
   let safeCaption = caption;
   if (caption.length > 1024) {
     const cut = caption.slice(0, 1024);
-    const lastGt = cut.lastIndexOf('>');
-    if (lastGt >= 0) {
-      // HTML: cut at last closed tag
-      safeCaption = cut.slice(0, lastGt + 1);
+    // Always prefer paragraph boundary — safe for both HTML and Markdown,
+    // and never splits inside an HTML tag or bold/italic span.
+    const lastPara = cut.lastIndexOf('\n\n');
+    if (lastPara > 200) {
+      safeCaption = cut.slice(0, lastPara);
     } else {
-      // Markdown: cut at last paragraph break to avoid splitting *bold* / `code` syntax
-      const lastPara = cut.lastIndexOf('\n\n');
-      safeCaption = lastPara > 200 ? cut.slice(0, lastPara) : cut;
+      // No paragraph break: for HTML find last complete closing tag; for Markdown use raw cut
+      const lastCloseA = cut.lastIndexOf('</a>');
+      const lastCloseB = cut.lastIndexOf('</b>');
+      const lastClose  = Math.max(lastCloseA, lastCloseB);
+      if (lastClose > 200) {
+        // Include the full closing tag (</a> = 4 chars, </b> = 4 chars)
+        safeCaption = cut.slice(0, lastClose + 4);
+      } else {
+        safeCaption = cut;
+      }
     }
   }
   const parseMode   = extra?.parse_mode ?? 'Markdown';
@@ -227,6 +235,64 @@ export async function editOrReply(
 }
 
 /**
+ * Sends a dynamically generated image (Buffer) with caption and keyboard.
+ * If the current message is a photo, swaps it in-place via editMessageMedia.
+ * Falls back to text-only reply if image send fails.
+ */
+export async function sendImageBufferPage(
+  ctx: Context,
+  imageBuffer: Buffer,
+  caption: string,
+  extra?: Record<string, any>
+): Promise<void> {
+  let safeCaption = caption;
+  if (caption.length > 1024) {
+    const cut = caption.slice(0, 1024);
+    const lastPara = cut.lastIndexOf('\n\n');
+    safeCaption = lastPara > 200 ? cut.slice(0, lastPara) : cut;
+  }
+  const parseMode   = extra?.parse_mode ?? 'Markdown';
+  const replyMarkup = extra?.reply_markup;
+
+  const cbMsg = ctx.callbackQuery && 'message' in ctx.callbackQuery
+    ? ctx.callbackQuery.message : null;
+  const isPhoto = !!(cbMsg && 'photo' in cbMsg);
+
+  if (isPhoto) {
+    try {
+      await (ctx as any).editMessageMedia(
+        { type: 'photo', media: { source: imageBuffer }, caption: safeCaption, parse_mode: parseMode },
+        replyMarkup ? { reply_markup: replyMarkup } : undefined,
+      );
+      return;
+    } catch (err: any) {
+      if (isBenignTelegramError(err)) return;
+      // editMessageMedia failed — delete old message and send fresh photo
+      try {
+        await ctx.deleteMessage();
+      } catch { /* old message already gone or not deletable */ }
+    }
+  }
+
+  try {
+    await ctx.replyWithPhoto(
+      { source: imageBuffer },
+      {
+        caption: safeCaption,
+        parse_mode: parseMode,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      },
+    );
+  } catch {
+    // Image send failed — fall back to text-only
+    await ctx.reply(safeCaption, {
+      parse_mode: parseMode,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    } as any);
+  }
+}
+
+/**
  * Safely answers a callback query, ignoring "query is too old" errors.
  */
 export async function safeAnswerCbQuery(ctx: Context, text?: string): Promise<void> {
@@ -235,5 +301,32 @@ export async function safeAnswerCbQuery(ctx: Context, text?: string): Promise<vo
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     throw error;
+  }
+}
+
+/**
+ * Fetches the user's Telegram profile photo as a Buffer.
+ * Returns undefined if no photo is set or fetching fails.
+ */
+export async function fetchProfilePhoto(ctx: Context): Promise<Buffer | undefined> {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return undefined;
+
+    const photos = await ctx.telegram.getUserProfilePhotos(userId, 0, 1);
+    if (!photos || photos.total_count === 0 || photos.photos.length === 0) return undefined;
+
+    // Pick the largest size from the first photo
+    const sizes = photos.photos[0];
+    const fileId = sizes[sizes.length - 1].file_id;
+    const fileLink = await ctx.telegram.getFileLink(fileId);
+
+    const response = await fetch(fileLink.href);
+    if (!response.ok) return undefined;
+
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } catch {
+    return undefined;
   }
 }

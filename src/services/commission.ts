@@ -22,9 +22,10 @@ function enqueueForProxy<T>(proxyAddress: string, fn: () => Promise<T>): Promise
 
 // Multiple RPCs — tried in order until one works
 const RPC_URLS = [
-  'https://polygon-rpc.com',
-  'https://rpc-mainnet.matic.network',
   'https://polygon-bor-rpc.publicnode.com',
+  'https://rpc.ankr.com/polygon',
+  'https://polygon.llamarpc.com',
+  'https://1rpc.io/matic',
 ];
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 
@@ -95,25 +96,25 @@ async function _transferCommission(
   }
 
   try {
-    // Try each RPC until one is responsive
-    let provider!: ethers.providers.JsonRpcProvider;
-    for (const url of RPC_URLS) {
-      try {
+    // Build list of responsive providers (try all in parallel, keep working ones)
+    const providerResults = await Promise.allSettled(
+      RPC_URLS.map(async (url) => {
         const p = new ethers.providers.JsonRpcProvider(url);
         await Promise.race([
           p.getBlockNumber(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('rpc timeout')), 5000)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
         ]);
-        provider = p;
-        break;
-      } catch {
-        logger.warn(`[commission] RPC ${url} unresponsive, trying next...`);
-      }
-    }
-    if (!provider) throw new Error('All RPCs unresponsive');
+        return p;
+      })
+    );
+    const providers = providerResults
+      .filter((r): r is PromiseFulfilledResult<ethers.providers.JsonRpcProvider> => r.status === 'fulfilled')
+      .map(r => r.value);
 
-    // Platform executor — pays gas for the execTransaction call
-    const executor = new ethers.Wallet(executorKey, provider);
+    if (providers.length === 0) throw new Error('All RPCs unresponsive');
+
+    // Use first responsive provider for read calls (nonce, tx hash)
+    const provider = providers[0];
 
     // User's EOA — signs the Safe transaction (no gas needed)
     const privateKey = decrypt(encryptedPrivateKey);
@@ -160,43 +161,50 @@ async function _transferCommission(
       ethers.utils.concat([r, s, [v]])
     );
 
+    const txParams = {
+      gasLimit: 200_000,
+      maxPriorityFeePerGas: ethers.utils.parseUnits('50', 'gwei'),
+      maxFeePerGas: ethers.utils.parseUnits('200', 'gwei'),
+    };
+
     logger.info(
-      `[commission] Submitting Safe execTransaction: $${commissionUsdc.toFixed(4)} USDC.e ` +
+      `[commission] Submitting Safe execTransaction via ${providers.length} RPC(s): $${commissionUsdc.toFixed(4)} USDC.e ` +
       `from ${proxyAddress.substring(0, 10)}... → ${adminWallet.substring(0, 10)}...`
     );
 
-    // Platform executor submits the signed transaction on-chain (pays MATIC gas)
-    // Polygon requires maxPriorityFeePerGas >= 30 Gwei (EIP-1559)
-    const safeWithExecutor = safeContract.connect(executor);
-
-    // 15s timeout on the send itself — if RPC hangs, abort
-    const tx = await Promise.race([
-      safeWithExecutor.execTransaction(
+    // Submit to ALL responsive RPCs simultaneously — ensures at least one broadcasts to the network.
+    // Single-RPC submission often results in the node accepting but not forwarding the TX.
+    const txSends = providers.map(async (p) => {
+      const exec = new ethers.Wallet(executorKey, p);
+      const safe = new ethers.Contract(proxyAddress, GNOSIS_SAFE_ABI, p).connect(exec);
+      return (safe as any).execTransaction(
         to, value, data, operation,
         safeTxGas, baseGas, gasPrice,
         gasToken, refundReceiver,
         signature,
-        {
-          gasLimit: 200_000,
-          maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
-          maxFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
-        }
-      ),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('send timeout after 15s')), 15_000)
-      ),
-    ]);
+        txParams
+      ) as Promise<ethers.ContractTransaction>;
+    });
+
+    // Take first successful send (others may fail with "already known" — that's fine)
+    let tx: ethers.ContractTransaction | null = null;
+    const sendResults = await Promise.allSettled(txSends);
+    for (const res of sendResults) {
+      if (res.status === 'fulfilled') { tx = res.value; break; }
+    }
+    if (!tx) {
+      const errs = sendResults.map(r => r.status === 'rejected' ? r.reason?.message : 'ok').join('; ');
+      throw new Error(`All RPC sends failed: ${errs}`);
+    }
 
     logger.info(`[commission] Fee tx submitted: ${tx.hash} — waiting for confirmation`);
 
-    // Wait for 1 confirmation before releasing the queue lock.
-    // This ensures the Safe nonce increments on-chain before the next queued commission reads it.
-    // Commission is already fire-and-forget at the call site, so waiting here doesn't block the user.
+    // Wait for 1 confirmation. Use the provider that successfully submitted.
     let receipt: ethers.providers.TransactionReceipt;
     try {
       receipt = await Promise.race([
         tx.wait(1),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('confirmation timeout after 30s')), 30_000)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('confirmation timeout after 60s')), 60_000)),
       ]);
       if (receipt.status === 1) {
         logger.info(`[commission] Fee confirmed on-chain: ${receipt.transactionHash}`);
@@ -211,16 +219,22 @@ async function _transferCommission(
       }
     }
 
-    // Credit referral earnings (fire-and-forget — doesn't block trade)
+    // Credit referral earnings + cashback (fire-and-forget — don't block trade)
     if (traderId) {
       creditReferralCommission(traderId, commissionUsdc).catch((err) => {
         logger.warn('[commission] creditReferralCommission failed:', err?.message || err);
+      });
+
+      import('./cashback').then(({ creditCashback }) => {
+        creditCashback(traderId, commissionUsdc).catch((err) => {
+          logger.warn('[commission] creditCashback failed:', err?.message || err);
+        });
       });
     }
 
     return { success: true, txHash: tx.hash };
   } catch (error: any) {
-    logger.error('[commission] Fee transfer failed:', error?.message || error);
+    logger.error(`[commission] Fee transfer failed: ${error?.message ?? String(error)}`);
     return { success: false };
   }
 }

@@ -13,9 +13,10 @@ export const REFERRAL_MIN_CLAIM = 4.0;
 
 // RPC URLs for payout transactions
 const RPC_URLS = [
-  'https://polygon-rpc.com',
-  'https://rpc-mainnet.matic.network',
   'https://polygon-bor-rpc.publicnode.com',
+  'https://rpc.ankr.com/polygon',
+  'https://polygon.llamarpc.com',
+  'https://1rpc.io/matic',
 ];
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const ERC20_ABI = ['function transfer(address to, uint256 amount) returns (bool)'];

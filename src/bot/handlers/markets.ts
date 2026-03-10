@@ -5,6 +5,7 @@ import {
   getTrendingEvents,
   getTopEvents,
   getEventsByCategory,
+  getLiveSportsEvents,
   formatVolume,
   parseOutcomePrices,
   parseOutcomes,
@@ -17,8 +18,24 @@ import { isBenignTelegramError, sendPage, getMenuPhotoMedia, cacheMenuPhotoFileI
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
 
-const IMG_BUSINESS     = path.join(__dirname, '../img/business.PNG');
-const IMG_SMARTWALLET  = path.join(__dirname, '../img/smartwallet.PNG');
+const IMG_BUSINESS     = path.join(__dirname, '../img/business.jpg');
+const IMG_SMARTWALLET  = path.join(__dirname, '../img/smartwallet.jpg');
+const IMG_ALLMARKETS   = path.join(__dirname, '../img/allmarkets.jpeg');
+const IMG_TRENDS       = path.join(__dirname, '../img/trends.jpeg');
+const IMG_POLITICS     = path.join(__dirname, '../img/politics.jpeg');
+const IMG_CRYPTO       = path.join(__dirname, '../img/crypto.jpeg');
+const IMG_SPORTS       = path.join(__dirname, '../img/sports.jpeg');
+const IMG_GEOPOLITICS  = path.join(__dirname, '../img/geopolitics.jpeg');
+
+const CATEGORY_IMAGE: Record<string, string> = {
+  'trending':    IMG_TRENDS,
+  'politics':    IMG_POLITICS,
+  'crypto':      IMG_CRYPTO,
+  'sports':      IMG_SPORTS,
+  'business':    IMG_BUSINESS,
+  'all':         IMG_ALLMARKETS,
+  'geopolitics': IMG_GEOPOLITICS,
+};
 
 // ─── OG Image helper ──────────────────────────────────────────────────────────
 
@@ -61,8 +78,14 @@ const CATEGORY_META: Record<string, { name: string; emoji: string }> = {
   'politics':    { name: 'Politics',    emoji: '🇺🇸' },
   'crypto':      { name: 'Crypto',      emoji: '🔥' },
   'sports':      { name: 'Sports',      emoji: '🏈' },
-  'business':    { name: 'Business',    emoji: '📈' },
+  'business':    { name: 'Finance',     emoji: '📈' },
   'pop-culture': { name: 'Pop Culture', emoji: '📹' },
+  'geopolitics': { name: 'Geopolitics', emoji: '🌍' },
+  'tech':        { name: 'Tech',        emoji: '💻' },
+  'ai':          { name: 'AI',          emoji: '🤖' },
+  'science':     { name: 'Science',     emoji: '🔬' },
+  'elections':   { name: 'Elections',   emoji: '🗳️' },
+  'middle-east': { name: 'Middle East', emoji: '🕌' },
   'all':         { name: 'All Markets', emoji: '📊' },
 };
 
@@ -144,7 +167,7 @@ function buildEventCard(event: Event, pageIdx: number, category: string): string
 
   const vol = formatVolume(event.volume24hr || 0);
   const liq = formatVolume(event.liquidity || 0);
-  const mktCount = event.markets.length > 1 ? ` · ${event.markets.length} mkts` : '';
+  const mktCount = event.markets.length > 1 ? ` · ${event.markets.length} markets` : '';
   const endDateStr = fmtEndDate((event as any).endDate);
   const dateStr = endDateStr ? ` · 📅 ${endDateStr}` : '';
 
@@ -179,6 +202,7 @@ export async function handleShowCategories(ctx: Context): Promise<void> {
       `Pick a category to explore prediction markets:\n\n`,
       {
         parse_mode: 'HTML',
+        image_path: IMG_ALLMARKETS,
         ...Markup.inlineKeyboard([
           [Markup.button.callback('🌎 Trending',    'category_trending')],
           [
@@ -186,15 +210,23 @@ export async function handleShowCategories(ctx: Context): Promise<void> {
             Markup.button.callback('🔥 Crypto',    'category_crypto_sub'),
           ],
           [
-            Markup.button.callback('🏈 Sports',      'category_sports'),
-            Markup.button.callback('📈 Business',    'category_business'),
+            Markup.button.callback('🏈 Sports',      'category_sports_sub'),
+            Markup.button.callback('📈 Finance',     'category_business'),
           ],
-          [Markup.button.callback('📹 Pop Culture', 'category_pop-culture')],
-          [Markup.button.callback('📊 All Markets',  'category_all')],
           [
-            Markup.button.callback('« Back', 'back_to_menu'),
-            Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+            Markup.button.callback('🌍 Geopolitics', 'category_geopolitics'),
+            Markup.button.callback('📹 Pop Culture', 'category_pop-culture'),
           ],
+          [
+            Markup.button.callback('💻 Tech',        'category_tech'),
+            Markup.button.callback('🤖 AI',          'category_ai'),
+          ],
+          [
+            Markup.button.callback('🔬 Science',     'category_science'),
+            Markup.button.callback('🗳️ Elections',   'category_elections'),
+          ],
+          [Markup.button.callback('📊 All Markets',  'category_all')],
+          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
         ]),
       }
     );
@@ -250,13 +282,7 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
       message += `[Trade](https://t.me/${botUsername}?start=event_${event.id})\n\n`;
     });
 
-    // ── Numbered quick-trade buttons ──────────────────────────────────────────
-    const tradeRow: any[] = pageEvents.map((_, idx) =>
-      Markup.button.callback(
-        `${startIndex + idx + 1}️⃣`,
-        `evp_${category}_${currentPage}_${idx}`
-      )
-    );
+
 
     // ── Nav buttons ───────────────────────────────────────────────────────────
     const navRow: any[] = [];
@@ -265,7 +291,6 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
     if (currentPage < totalPages) navRow.push(Markup.button.callback('▶️', `page_${category}_${currentPage + 1}`));
 
     const buttons: any[] = [
-      tradeRow,
       navRow,
       [
         Markup.button.callback('🔄 Refresh', `refresh_category_${category}`),
@@ -278,7 +303,7 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
       await sendPage(ctx, message, {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        ...(category === 'business' ? { image_path: IMG_BUSINESS } : {}),
+        ...(CATEGORY_IMAGE[category] ? { image_path: CATEGORY_IMAGE[category] } : {}),
         ...Markup.inlineKeyboard(buttons),
       });
     } catch (editError: any) {
@@ -375,6 +400,7 @@ export async function handleEventDetails(
     // ── Filter & sort markets ──────────────────────────────────────────────────
     const allMarkets = (event.markets || []) as any[];
     const activeMarkets = allMarkets.filter((m: any) => {
+      if (m.closed === true || m.resolved === true) return false;
       const prices = parseOutcomePrices(m);
       return prices.length > 0 && prices.every(p => {
         const v = parseFloat(p || '0');
@@ -393,7 +419,7 @@ export async function handleEventDetails(
     const backSuffix = backCategory ? `_${backCategory}_${backPage}` : '';
 
     if (totalMarkets === 0) {
-      await sendPage(ctx, `${ce(EMOJI.eventTitle, '💰')} <b>${esc(safeTitle(event.title, 60))}</b>\n\n<i>No active markets found.</i>`, {
+      await sendPage(ctx, `${ce(EMOJI.eventTitle, '💰')} <b>${esc(safeTitle(event.title || '', 60))}</b>\n\n<i>No active markets found.</i>`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([[
           Markup.button.callback('« Back', backCb),
@@ -406,7 +432,11 @@ export async function handleEventDetails(
     const currentPage = Math.min(Math.max(1, marketPage), totalMarkets);
     const market  = sortedMarkets[currentPage - 1];
     const marketId = market.condition_id || market.id;
-    const q       = safeTitle(market.question, 65);
+    if (!marketId) {
+      await ctx.reply('❌ Could not load this market.');
+      return;
+    }
+    const q       = safeTitle(market.question || '', 65);
     const vol     = formatVolume(market.volume24hr);
     const prices  = parseOutcomePrices(market);
     const outcomes = parseOutcomes(market);
@@ -440,7 +470,7 @@ export async function handleEventDetails(
       }
     }
 
-    const title = safeTitle(event.title, 60);
+    const title = safeTitle(event.title || '', 60);
 
     // ── Build message ─────────────────────────────────────────────────────────
     // Note: caption limit is 1024 chars. Plain emojis used for stat line to stay within budget.
@@ -463,7 +493,7 @@ export async function handleEventDetails(
     message += `${eLightning}<a href="https://t.me/${botUsername}?start=trade_${marketId}_yes_default">YES $${defaultAmount}</a>`;
     message += ` • <a href="https://t.me/${botUsername}?start=trade_${marketId}_no_default">NO $${defaultAmount}</a>\n\n`;
 
-    message += `${eLink} <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
+    if (event.slug) message += `${eLink} <a href="https://polymarket.com/event/${event.slug}">View on Polymarket</a>`;
 
     // ── Keyboard ──────────────────────────────────────────────────────────────
     const buttons: any[] = [];
@@ -559,7 +589,7 @@ export function buildMainMenuText(stats: MainMenuStats = ZERO_STATS): string {
     `${balance}<b>Tradable Balance:</b> $${esc(stats.balance)}\n` +
     `${orders}<b>Open Limit Orders:</b> $${esc(stats.ordersValue)}\n` +
     `${briefcase}<b>Net Worth:</b> $${esc(stats.netWorth)}\n\n` +
-    `❓<b>Start To Use:</b>\n` +
+    `${ce(EMOJI.loading, '❓')}<b>Start To Use:</b>\n` +
     `Paste any Polymarket URL or type name to start trading instantly!`
   );
 }
@@ -587,7 +617,8 @@ export function mainMenuKeyboard() {
       Markup.button.callback('⚙️ Settings', 'settings_menu'),
     ],
     [
-      Markup.button.callback('💰 Deposit', 'deposit_menu'),
+      Markup.button.callback('📊 P&L', 'pnl_alltime'),
+      Markup.button.callback('💰 Deposit', 'wallet_page'),
     ],
   ]);
 }
@@ -666,30 +697,141 @@ export async function handleShowWallet(ctx: Context): Promise<void> {
   }
 }
 
+// ─── Sports Subcategory ──────────────────────────────────────────────────────
+
+/**
+ * Shows sports subcategory selection: Live / All Sports.
+ */
+export async function handleSportsCategory(ctx: Context): Promise<void> {
+  try {
+    await ctx.answerCbQuery();
+
+    await sendPage(ctx,
+      '🏈 <b>Sports — Select Category</b>\n\n' +
+      'Which sports markets would you like to see?',
+      {
+        parse_mode: 'HTML',
+        ...(CATEGORY_IMAGE['sports'] ? { image_path: CATEGORY_IMAGE['sports'] } : {}),
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔴 Live Sports', 'sports_live')],
+          [Markup.button.callback('🏈 All Sports Markets', 'category_sports')],
+          [Markup.button.callback('« Back', 'show_categories')],
+        ]),
+      }
+    );
+
+    logger.info(`Sports subcategories shown to user: ${ctx.from?.id}`);
+  } catch (error: any) {
+    if (isBenignTelegramError(error)) return;
+    logger.error('Error showing sports subcategories:', error);
+    await ctx.reply('❌ An error occurred. Please try again.');
+  }
+}
+
+/**
+ * Shows live sports events (matches happening now or within 24h).
+ * Same layout as handleCategorySelection — event cards with inline deep-link text.
+ */
+export async function handleLiveSports(ctx: Context, page: number = 1): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading…').catch(() => {});
+
+    const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
+    const events = await getLiveSportsEvents(30);
+    const totalPages = Math.max(1, Math.ceil(events.length / EVENTS_PER_PAGE));
+    const currentPage = Math.min(Math.max(1, page), totalPages);
+    const startIndex = (currentPage - 1) * EVENTS_PER_PAGE;
+    const pageEvents = events.slice(startIndex, startIndex + EVENTS_PER_PAGE);
+
+    if (events.length === 0) {
+      await sendPage(ctx,
+        '🔴 *Live Sports*\n\n😔 No live sports events right now\\. Check back later\\!',
+        {
+          parse_mode: 'MarkdownV2',
+          ...(CATEGORY_IMAGE['sports'] ? { image_path: CATEGORY_IMAGE['sports'] } : {}),
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh', 'sports_live'), Markup.button.callback('« Sports', 'category_sports_sub')],
+            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          ]),
+        }
+      );
+      return;
+    }
+
+    const timeStr = new Date().toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC',
+    });
+    let message = `🔴 *Live Sports* · ${timeStr} UTC\n\n`;
+
+    pageEvents.forEach((event, idx) => {
+      message += buildEventCard(event, startIndex + idx, 'sports');
+      message += `└ [Details](https://polymarket.com/event/${event.slug}) · `;
+      message += `[Trade](https://t.me/${botUsername}?start=event_${event.id})\n\n`;
+    });
+
+    const navRow: any[] = [];
+    if (currentPage > 1) navRow.push(Markup.button.callback('◀️', `sports_live_${currentPage - 1}`));
+    navRow.push(Markup.button.callback(`· ${currentPage} / ${totalPages} ·`, 'noop'));
+    if (currentPage < totalPages) navRow.push(Markup.button.callback('▶️', `sports_live_${currentPage + 1}`));
+
+    const buttons: any[] = [
+      navRow,
+      [
+        Markup.button.callback('🔄 Refresh', 'sports_live'),
+        Markup.button.callback('« Sports', 'category_sports_sub'),
+      ],
+      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+    ];
+
+    try {
+      await sendPage(ctx, message, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true },
+        ...(CATEGORY_IMAGE['sports'] ? { image_path: CATEGORY_IMAGE['sports'] } : {}),
+        ...Markup.inlineKeyboard(buttons),
+      });
+    } catch (editError: any) {
+      if (!editError.description?.includes('message is not modified')) throw editError;
+    }
+
+    logger.info(`[liveSports] Page ${currentPage}/${totalPages} shown to user: ${ctx.from?.id} (${events.length} events)`);
+  } catch (error: any) {
+    if (isBenignTelegramError(error)) return;
+    logger.error('Error showing live sports:', error);
+    await ctx.reply('❌ Could not load live sports. Please try again.').catch(() => {});
+  }
+}
+
+
 // ─── Discover Traders / Smart Wallets ─────────────────────────────────────────
 
 const WALLETS_PER_PAGE = 5;
 
 const SW_CAT_META: Record<string, { label: string; emoji: string }> = {
-  'all':      { label: 'All Markets', emoji: '🌍' },
-  'politics': { label: 'Politics',    emoji: '🏛' },
-  'sports':   { label: 'Sports',      emoji: '🥇' },
-  'crypto':   { label: 'Crypto',      emoji: '🌙' },
-  'culture':  { label: 'Culture',     emoji: '🎉' },
-  'tech':     { label: 'Tech',        emoji: '💻' },
-  'finance':  { label: 'Finance',     emoji: '💵' },
-  'economy':  { label: 'Economy',     emoji: '📊' },
+  'all':           { label: 'All Markets',   emoji: '🌍' },
+  'politics':      { label: 'Politics',      emoji: '🏛' },
+  'sports':        { label: 'Sports',        emoji: '🥇' },
+  'crypto':        { label: 'Crypto',        emoji: '🌙' },
+  'culture':       { label: 'Entertainment', emoji: '🎬' },
+  'tech':          { label: 'Tech',          emoji: '💻' },
+  'ai':            { label: 'AI',            emoji: '🤖' },
+  'finance':       { label: 'Finance',       emoji: '💵' },
+  'geopolitics':   { label: 'Geopolitics',   emoji: '🌍' },
 };
 
-/** Maps category key → specialty strings from deriveSpecialty() in smartWallets service. */
+/**
+ * Maps category key → specialty labels produced by deriveSpecialties() in smartWallets service.
+ * A trader is included if ANY of their specialties is in this list.
+ */
 const SW_CAT_SPECIALTIES: Record<string, string[]> = {
-  'politics': ['🏛️ Politics'],
-  'sports':   ['⚽ Sports', '🎮 E-Sports'],
-  'crypto':   ['₿ Crypto'],
-  'culture':  ['🎬 Entertainment'],
-  'tech':     ['💻 Tech'],
-  'finance':  ['📊 General'],
-  'economy':  ['🌍 Geopolitics'],
+  'politics':    ['🏛️ Politics'],
+  'sports':      ['⚽ Sports', '🎮 E-Sports'],
+  'crypto':      ['₿ Crypto'],
+  'culture':     ['🎬 Entertainment'],
+  'tech':        ['💻 Tech', '🤖 AI'],
+  'ai':          ['🤖 AI', '💻 Tech'],
+  'finance':     ['💵 Finance'],
+  'geopolitics': ['🌍 Geopolitics'],
 };
 
 const SW_SORT_META: Record<string, { label: string; api: 'PNL' | 'VOL' }> = {
@@ -712,10 +854,14 @@ export async function handleSmartWallets(
 
     const allWallets = await getTopSmartWallets(50, 'ALL', sortMeta.api);
 
-    // Post-filter by specialty for specific categories
+    // Post-filter by specialties for specific categories
     let filtered = allWallets;
     if (category !== 'all' && SW_CAT_SPECIALTIES[category]) {
-      const bySpec = allWallets.filter(w => SW_CAT_SPECIALTIES[category].includes(w.specialty));
+      const targetSpecs = SW_CAT_SPECIALTIES[category];
+      const bySpec = allWallets.filter(w =>
+        (w.specialties ?? [w.specialty]).some(s => targetSpecs.includes(s))
+      );
+      // Only fall back to all wallets if we got zero matches
       filtered = bySpec.length > 0 ? bySpec : allWallets;
     }
 
@@ -762,9 +908,10 @@ export async function handleSmartWallets(
           Markup.button.callback('📊 Sort',      `sw_fs_${category}_${sort}`),
         ],
         [
-          Markup.button.callback('⬅️ Back', 'back_to_menu'),
-          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+          Markup.button.url('📈 Polymarket Analytics', 'https://polymarketanalytics.com/traders'),
+          Markup.button.url('📂 Predictfolio',         'https://predictfolio.com/leaderboard'),
         ],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
 
@@ -786,7 +933,8 @@ export async function handleSwCategoryFilter(
     ['all', 'politics'],
     ['sports', 'crypto'],
     ['culture', 'tech'],
-    ['finance', 'economy'],
+    ['ai', 'finance'],
+    ['geopolitics'],
   ];
 
   const buttons: any[] = catRows.map(row =>
@@ -982,19 +1130,28 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
       ? Markup.button.callback('← Back to Event', `evd_mkt_${eventId}_1`)
       : Markup.button.callback('« Markets', 'show_categories');
 
+    const isClosed = market.closed === true || market.resolved === true;
+    if (isClosed) {
+      message += `\n\n⚠️ <i>This market is closed/resolved. Trading is no longer available.</i>`;
+    }
+
+    const tradeRows = isClosed ? [] : [
+      [
+        Markup.button.url(`✅ YES $${defaultAmount}`, `https://t.me/${botUsername}?start=trade_${marketId}_yes_default`),
+        Markup.button.url(`❌ NO $${defaultAmount}`,  `https://t.me/${botUsername}?start=trade_${marketId}_no_default`),
+      ],
+      [
+        Markup.button.url(`📋 Limit YES`, `https://t.me/${botUsername}?start=limit_${marketId}_yes`),
+        Markup.button.url(`📋 Limit NO`,  `https://t.me/${botUsername}?start=limit_${marketId}_no`),
+      ],
+      [Markup.button.url('💬 Custom Trade', `https://t.me/${botUsername}?start=trade_${marketId}_custom`)],
+    ];
+
     await sendPage(ctx, message, {
       parse_mode: 'HTML',
       image_url: eventImage,
       ...Markup.inlineKeyboard([
-        [
-          Markup.button.url(`✅ YES $${defaultAmount}`, `https://t.me/${botUsername}?start=trade_${marketId}_yes_default`),
-          Markup.button.url(`❌ NO $${defaultAmount}`,  `https://t.me/${botUsername}?start=trade_${marketId}_no_default`),
-        ],
-        [
-          Markup.button.url(`📋 Limit YES`, `https://t.me/${botUsername}?start=limit_${marketId}_yes`),
-          Markup.button.url(`📋 Limit NO`,  `https://t.me/${botUsername}?start=limit_${marketId}_no`),
-        ],
-        [Markup.button.url('💬 Custom Trade', `https://t.me/${botUsername}?start=trade_${marketId}_custom`)],
+        ...tradeRows,
         [backBtn, Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });

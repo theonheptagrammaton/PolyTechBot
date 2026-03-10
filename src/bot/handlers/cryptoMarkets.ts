@@ -182,8 +182,12 @@ export async function handleUpDownMarketDetail(
         Markup.button.url(`❌ Buy Down ${downPct}¢`, `https://t.me/${botUsername}?start=trade_${m.marketId}_no_default`),
       ],
       [
-        Markup.button.url('📝 Limit Up',   `https://t.me/${botUsername}?start=trade_${m.marketId}_yes_custom`),
-        Markup.button.url('📝 Limit Down', `https://t.me/${botUsername}?start=trade_${m.marketId}_no_custom`),
+        Markup.button.url('💵 Custom Up',   `https://t.me/${botUsername}?start=trade_${m.marketId}_yes_custom`),
+        Markup.button.url('💵 Custom Down', `https://t.me/${botUsername}?start=trade_${m.marketId}_no_custom`),
+      ],
+      [
+        Markup.button.url('📝 Limit Up',   `https://t.me/${botUsername}?start=limit_${m.marketId}_yes`),
+        Markup.button.url('📝 Limit Down', `https://t.me/${botUsername}?start=limit_${m.marketId}_no`),
       ],
       [
         Markup.button.callback('🔄 Refresh', `updown_refresh_${m.marketId}`),

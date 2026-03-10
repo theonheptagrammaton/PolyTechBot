@@ -4,6 +4,7 @@ import { getUserByTelegramId, isUserAdmin, getAllUsers } from '../../services/us
 import { getAdminStats, formatStatsMessage } from '../../services/adminStats';
 import { logger } from '../../utils/logger';
 import { sendPage } from '../../utils/telegram';
+import { ce, EMOJI } from '../../utils/customEmoji';
 
 export async function handleStats(ctx: Context): Promise<void> {
   try {
@@ -22,8 +23,8 @@ export async function handleStats(ctx: Context): Promise<void> {
     }
 
     // Send loading message
-    const loadingMsg = await ctx.reply('⏳ Loading statistics...\n\n_This may take a moment..._', {
-      parse_mode: 'Markdown',
+    const loadingMsg = await ctx.reply(ce(EMOJI.loading, '⏳') + ' Loading statistics...\n\n<i>This may take a moment...</i>', {
+      parse_mode: 'HTML',
     });
 
     // Get comprehensive stats (always fresh)

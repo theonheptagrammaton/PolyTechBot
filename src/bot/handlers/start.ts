@@ -2,13 +2,43 @@ import fs from 'fs';
 import path from 'path';
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
-import { createUserWithWallet, getUserByTelegramId } from '../../services/user';
+import { createUserWithWallet, getUserByTelegramId, UserWithCredentials } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { maskSensitiveData } from '../../utils/encryption';
 import { mainMenuKeyboard, buildMainMenuText } from './markets';
+import { ce, EMOJI } from '../../utils/customEmoji';
 import { getMainMenuStats } from '../../services/portfolio';
+import { config } from '../../config';
 
-const MENU_IMAGE = path.join(__dirname, '../img/beattheodds.JPG');
+const MENU_IMAGE = path.join(__dirname, '../img/opening.jpg');
+const BEAT_THE_ODDS_IMAGE = path.join(__dirname, '../img/beattheodds.JPG');
+
+// Prevent duplicate wallet creation when user spams /start
+const _creatingWallet = new Set<string>();
+
+// Pending wallet creations for users going through group-gate flow
+export type PendingWallet = {
+  promise: Promise<UserWithCredentials>;
+  referralCode?: string;
+};
+export const _pendingWalletCreations = new Map<string, PendingWallet>();
+
+async function checkGroupMembership(userId: number): Promise<boolean> {
+  const { groupBotToken, requiredGroupId } = config.telegram;
+  if (!groupBotToken || !requiredGroupId) return true; // gate disabled
+
+  const url =
+    `https://api.telegram.org/bot${groupBotToken}/getChatMember` +
+    `?chat_id=${requiredGroupId}&user_id=${userId}`;
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    const data = await resp.json() as any;
+    const status: string = data?.result?.status ?? 'left';
+    return ['creator', 'administrator', 'member', 'restricted'].includes(status);
+  } catch {
+    return true; // fail-open
+  }
+}
 
 export async function handleStart(ctx: Context): Promise<void> {
   try {
@@ -142,7 +172,7 @@ export async function handleStart(ctx: Context): Promise<void> {
       // The referral application happens after user creation
     }
 
-    if (startParam?.startsWith('pb_') || startParam?.startsWith('ps_') || startParam?.startsWith('pv_')) {
+    if (startParam?.startsWith('pb_') || startParam?.startsWith('ps_') || startParam?.startsWith('pv_') || startParam?.startsWith('pp_')) {
       // Deep link from active positions page: buy/sell/view a position by index
       const parts = startParam.split('_');
       const action = parts[0]; // 'pb', 'ps', or 'pv'
@@ -179,6 +209,13 @@ export async function handleStart(ctx: Context): Promise<void> {
         return;
       }
 
+      if (action === 'pp') {
+        // ── Position PNL image via deep link ──
+        const { handlePositionPnl } = await import('./positionTrade');
+        await handlePositionPnl(ctx, idx);
+        return;
+      }
+
       if (action === 'pv') {
         // ── View position detail ──
         const pnlSign = pos.cashPnl >= 0 ? '+' : '';
@@ -209,6 +246,7 @@ export async function handleStart(ctx: Context): Promise<void> {
               Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
               Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
             ],
+            [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
             [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
           ]),
         });
@@ -315,96 +353,97 @@ export async function handleStart(ctx: Context): Promise<void> {
           existingUser.polymarketProxyAddress
         ).catch(() => undefined);
 
-        await ctx.replyWithPhoto(
-          { source: fs.createReadStream(MENU_IMAGE) },
-          {
-            caption: buildMainMenuText(stats),
+        try {
+          await ctx.replyWithPhoto(
+            { source: fs.createReadStream(MENU_IMAGE) },
+            {
+              caption: buildMainMenuText(stats),
+              parse_mode: 'HTML',
+              ...mainMenuKeyboard(),
+            }
+          );
+        } catch (photoErr: any) {
+          // Fallback to text if image fails (too large, not found, etc.)
+          logger.warn(`[start] Photo send failed, falling back to text: ${photoErr?.message}`);
+          await ctx.reply(buildMainMenuText(stats), {
             parse_mode: 'HTML',
             ...mainMenuKeyboard(),
-          }
-        );
+          });
+        }
         return;
       }
 
-      // New user — show loading message only now
+      // Prevent duplicate creation if user spams /start
+      if (_creatingWallet.has(telegramId)) {
+        await ctx.reply('⏳ Your wallet is already being created. Please wait...');
+        return;
+      }
+      _creatingWallet.add(telegramId);
+
+      const referralCode = startParam?.startsWith('ref_')
+        ? startParam.replace('ref_', '') || undefined
+        : undefined;
+
+      // Check group membership — if not a member, show gate + start wallet in background
+      const inGroup = await checkGroupMembership(ctx.from!.id);
+
+      if (!inGroup) {
+        const walletPromise = createUserWithWallet(telegramId, username, firstName, lastName);
+        _pendingWalletCreations.set(telegramId, { promise: walletPromise, referralCode });
+
+        const joinCaption =
+          `${ce(EMOJI.cherry, '🏆')} <b>Welcome to PolyTech!</b>\n\n` +
+          `${ce(EMOJI.loading, '⏳')} <b>Your Polymarket wallet is being created...</b>\n\n` +
+          `${ce(EMOJI.star, '🔒')} <b>One Last Step</b>\n` +
+          `Join our official community to activate your account.\n` +
+          `Get trading signals, market updates & live support.\n\n` +
+          `${ce(EMOJI.lightning, '⚡')} Your wallet will be ready by the time you join!`;
+
+        const keyboard: any = { inline_keyboard: [] };
+        if (config.telegram.requiredGroupLink) {
+          keyboard.inline_keyboard.push([{ text: '📢 Join Community', url: config.telegram.requiredGroupLink }]);
+        }
+        keyboard.inline_keyboard.push([
+          { text: "✅ I've Joined, Check", callback_data: 'check_membership' },
+        ]);
+
+        try {
+          await ctx.replyWithPhoto(
+            { source: fs.createReadStream(BEAT_THE_ODDS_IMAGE) },
+            { caption: joinCaption, parse_mode: 'HTML', reply_markup: keyboard }
+          );
+        } catch {
+          await ctx.reply(joinCaption, { parse_mode: 'HTML', reply_markup: keyboard });
+        }
+        return;
+      }
+
+      // Already in group — normal flow
       await ctx.reply('🔄 Creating your Polymarket wallet...\n\nPlease wait a moment.');
 
-      // Create new user with wallet
-      const result = await createUserWithWallet(
-        telegramId,
-        username,
-        firstName,
-        lastName
-      );
+      const result = await createUserWithWallet(telegramId, username, firstName, lastName);
 
       logger.info(`User created successfully: ${result.user.id}`);
 
       // Apply referral code if user arrived via referral link
-      if (startParam?.startsWith('ref_')) {
-        const referralCode = startParam.replace('ref_', '');
-        // R14: Guard against empty code (e.g. user clicked a bare "ref_" link)
-        if (referralCode) {
-          const { applyReferralCode } = await import('../../services/referral');
-          const linked = await applyReferralCode(result.user.id, referralCode);
-          if (linked) {
-            logger.info(`[referral] New user ${result.user.id} linked to referrer via code "${referralCode}"`);
-          }
+      if (referralCode) {
+        const { applyReferralCode } = await import('../../services/referral');
+        const linked = await applyReferralCode(result.user.id, referralCode);
+        if (linked) {
+          logger.info(`[referral] New user ${result.user.id} linked to referrer via code "${referralCode}"`);
         }
       }
 
-      // Prepare success message
-      let successMessage =
-        '🎉 *Your Polymarket Account is Ready!*\n\n' +
-        '✅ Complete setup successful!\n\n' +
-        '*💰 Deposit Addresses (Bridge API):*\n' +
-        `• EVM (Ethereum/Arbitrum/Base): \`${result.user.depositAddressEvm}\`\n` +
-        `• Solana: \`${result.user.depositAddressSvm}\`\n` +
-        `• Bitcoin: \`${result.user.depositAddressBtc}\`\n` +
-        `• Tron: \`${result.user.depositAddressTvm}\`\n\n` +
-        '💸 _Send USDC or other assets → Auto-converts to USDC.e on Polygon_\n\n' +
-        '*🏦 Polymarket Trading Wallet:*\n' +
-        `📍 \`${result.walletInfo.polymarketProxyAddress}\`\n` +
-        `🔗 [View on Polymarket](https://polymarket.com/profile/${result.walletInfo.polymarketProxyAddress})\n\n` +
-        '*📍 Owner Wallet (EOA):*\n' +
-        `\`${result.walletInfo.walletAddress}\`\n` +
-        `🔑 Private Key: \`${result.walletInfo.privateKey}\`\n\n`;
-
-      successMessage +=
-        '*✅ What was created:*\n' +
-        '• Deposit addresses for multiple chains (EVM, Solana, Bitcoin, Tron)\n' +
-        '• Polymarket Trading Wallet (Safe/Proxy for trading)\n' +
-        '• EOA wallet (for transaction signing)\n' +
-        '• Polymarket account with API credentials\n' +
-        '• Trading automatically enabled (approved USDC & CTF)\n\n' +
-        '⚠️ *CRITICAL SECURITY:*\n' +
-        '• Save your private key NOW\n' +
-        '• Never share it with anyone\n' +
-        '• This is the ONLY time we show it\n' +
-        '• Lost key = Lost funds\n\n' +
-        '🚀 *Start Trading:*\n' +
-        '1. Send USDC (or other assets) to any deposit address above\n' +
-        '2. Assets auto-convert to USDC.e on Polygon\n' +
-        '3. Start trading immediately!\n\n' +
-        '💡 Use buttons below to continue.';
-
-      await ctx.reply(successMessage, { parse_mode: 'Markdown' });
-
-      await ctx.replyWithPhoto(
-        { source: fs.createReadStream(MENU_IMAGE) },
-        {
-          caption: buildMainMenuText(),
-          parse_mode: 'HTML',
-          ...mainMenuKeyboard(),
-        }
-      );
-
-      // Log success with masked private key
+      await sendWalletSuccess(ctx, result);
       logger.info(
         `Wallet created for user ${telegramId}: ${result.walletInfo.walletAddress} ` +
         `(PK: ${maskSensitiveData(result.walletInfo.privateKey)})`
       );
 
+      _creatingWallet.delete(telegramId);
+
     } catch (error) {
+      _creatingWallet.delete(telegramId);
       logger.error('Error in start command:', error);
 
       await ctx.reply(
@@ -426,5 +465,89 @@ export async function handleStart(ctx: Context): Promise<void> {
     } catch (replyError) {
       logger.error('Error sending error message:', replyError);
     }
+  }
+}
+
+/** Send the private key + main menu after successful wallet creation. */
+async function sendWalletSuccess(ctx: Context, result: UserWithCredentials): Promise<void> {
+  const successMessage =
+    `${ce(EMOJI.cherry, '🎉')} <b>Your Account is Ready!</b>\n\n` +
+    `${ce(EMOJI.refCode, '🔑')} <b>Private Key — Save it now:</b>\n` +
+    `<code>${result.walletInfo.privateKey}</code>\n\n` +
+    `${ce(EMOJI.loading, '⚠️')} <b>This key is shown only once.</b>\n` +
+    `Never share it with anyone — losing it means losing access to your funds.\n\n` +
+    `Use the menu below to deposit and start trading.`;
+
+  await ctx.reply(successMessage, { parse_mode: 'HTML' });
+
+  try {
+    await ctx.replyWithPhoto(
+      { source: fs.createReadStream(MENU_IMAGE) },
+      { caption: buildMainMenuText(), parse_mode: 'HTML', ...mainMenuKeyboard() }
+    );
+  } catch {
+    await ctx.reply(buildMainMenuText(), { parse_mode: 'HTML', ...mainMenuKeyboard() });
+  }
+}
+
+/** Handles the "✅ I've Joined, Check" button during new user onboarding. */
+export async function handleCheckMembership(ctx: Context): Promise<void> {
+  const userId = ctx.from?.id;
+  const telegramId = String(userId);
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (!userId) return;
+
+  const inGroup = await checkGroupMembership(userId);
+
+  if (!inGroup) {
+    await ctx.answerCbQuery("❌ You haven't joined yet. Join the group and try again.", { show_alert: true });
+    return;
+  }
+
+  // Check for pending wallet creation from onboarding
+  const pending = _pendingWalletCreations.get(telegramId);
+  if (!pending) {
+    // No pending wallet — generic acknowledgment
+    await ctx.editMessageCaption(
+      '✅ <b>Membership Verified!</b>\n\nType /start to begin.',
+      { parse_mode: 'HTML' }
+    ).catch(() => ctx.reply('✅ Membership verified! Type /start to begin.').catch(() => {}));
+    return;
+  }
+
+  // Update message to show finalizing state
+  await ctx.editMessageCaption(
+    `${ce(EMOJI.loading, '⏳')} <b>Almost there!</b>\n\nFinalizing your wallet...`,
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+  ).catch(() => {});
+
+  try {
+    const result = await pending.promise;
+    _pendingWalletCreations.delete(telegramId);
+
+    // Apply referral if any
+    if (pending.referralCode) {
+      const { applyReferralCode } = await import('../../services/referral');
+      const linked = await applyReferralCode(result.user.id, pending.referralCode);
+      if (linked) {
+        logger.info(`[referral] New user ${result.user.id} linked via code "${pending.referralCode}"`);
+      }
+    }
+
+    logger.info(`User created successfully: ${result.user.id}`);
+    logger.info(
+      `Wallet created for user ${telegramId}: ${result.walletInfo.walletAddress} ` +
+      `(PK: ${maskSensitiveData(result.walletInfo.privateKey)})`
+    );
+
+    await sendWalletSuccess(ctx, result);
+  } catch (error: any) {
+    _pendingWalletCreations.delete(telegramId);
+    logger.error(`[checkMembership] Wallet creation failed for ${telegramId}:`, error);
+    await ctx.reply('❌ Wallet creation failed. Please try /start again.');
+  } finally {
+    _creatingWallet.delete(telegramId);
   }
 }

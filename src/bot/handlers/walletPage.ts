@@ -3,10 +3,12 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
-import { isBenignTelegramError, sendPage } from '../../utils/telegram';
+import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
+import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
 
-const IMG_WALLET    = path.join(__dirname, '../img/wallet.PNG');
-const IMG_PORTFOLIO = path.join(__dirname, '../img/portfolio.PNG');
+const IMG_WALLET    = path.join(__dirname, '../img/wallet.jpg');
+const IMG_PORTFOLIO = path.join(__dirname, '../img/portfolio.jpg');
+const IMG_POSITIONS = path.join(__dirname, '../img/positions.jpeg');
 import { config } from '../../config';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import {
@@ -25,6 +27,7 @@ import {
   ActivePosition,
   ClosedPosition,
 } from '../../services/portfolio';
+import { autoRedeemPositions } from '../../services/redeem';
 
 /**
  * Shows detailed wallet page with deposit addresses
@@ -71,58 +74,58 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     }
 
     // Build wallet message
-    const eWallet  = ce('5424976816530014958', '👛');
-    const ePoly    = ce('5837001288457392898', '🟣');
-    const eEth     = ce(EMOJI.ethDeposit,      '🔹');
-    const eSol     = ce(EMOJI.solanaDeposit,   '🟣');
-    const eUsdc    = ce(EMOJI.usdc, '💲');
+    const eWallet = ce(EMOJI.walletPurse,    '👜');
+    const eFire   = ce('4969918262650340505', '🔥');
+    const ePoly   = ce('5837001288457392898', '🟣');
+    const eEth    = ce(EMOJI.ethDeposit,      '🔹');
+    const eBase   = ce(EMOJI.baseDeposit,     '🟦');
+    const eSol    = ce(EMOJI.solanaDeposit,   '🟣');
+    const ePm     = ce(EMOJI.polymarket,      '💙');
+    const eUsdc   = ce(EMOJI.usdc,            '💲');
 
     let message = `${eWallet} <b>WALLET</b>\n\n`;
     message += `💰 <b>Deposit Addresses</b>\n\n`;
+    message += `${eFire} <b>Supported Tokens: (POL, ETH, BNB, ARB, HYPE, USDT, USDC, USDC.e)</b>\n\n`;
 
-    // Show deposit addresses from Bridge API
     if (user.depositAddressEvm) {
-      message += `${ePoly} <b>Polygon:</b>\n`;
+      message += `${ePoly}<b>Polygon:</b>\n`;
       message += `<code>${esc(user.depositAddressEvm)}</code>\n\n`;
 
-      message += `${eEth} <b>ETH/Arbitrum/Base/Optimism:</b>\n`;
+      message += `${eEth}🔸${eBase}<b>ETH/BSC/Base/Arbitrum/Hyper Liquid:</b>\n`;
       message += `<code>${esc(user.depositAddressEvm)}</code>\n\n`;
-
-      message += `${eSol} <b>Solana:</b>\n`;
-      message += `<code>${esc(user.depositAddressSvm || '')}</code>\n\n`;
-
     } else {
-      message += `⚠️ <b>Legacy Wallet - Please contact support</b>\n\n`;
+      message += `⚠️ <b>Deposit address not available — please contact support</b>\n\n`;
     }
 
-    // Polymarket Trading Wallet
-    const ePoly2 = ce(EMOJI.polymarket, '💙');
-    message += `${ePoly2} <b>Polymarket Trading Wallet (Don't deposit here):</b>\n`;
+    if (user.depositAddressSvm) {
+      message += `${eSol} <b>Solana:</b>\n`;
+      message += `<code>${esc(user.depositAddressSvm)}</code>\n\n`;
+    }
+
+    message += `${ePm}<b>Polymarket Profile (Don't Deposit here):</b>\n`;
     if (user.polymarketProxyAddress) {
       message += `<code>${esc(user.polymarketProxyAddress)}</code>\n\n`;
     } else {
-      message += `⚠️ <i>Setup incomplete - contact support</i>\n\n`;
+      message += `⚠️ <i>Setup incomplete — contact support</i>\n\n`;
     }
 
-    // Trading Balance (Real data from API)
     message += `${eUsdc} <b>Balance:</b> $${esc(balance)}\n`;
     message += `💡 <b>Min deposit: $10 USDC</b>`;
 
-    // Buttons
+    // Buttons: Profile · Portfolio · Refresh / Back · Withdraw / Main Menu
+    const profileBtn = user.polymarketProxyAddress
+      ? Markup.button.url('👤 Profile', `https://polymarket.com/profile/${user.polymarketProxyAddress}`)
+      : null;
+
     const buttons: any[] = [
       [
-        ...(user.polymarketProxyAddress
-          ? [Markup.button.url('👤 Profile', `https://polymarket.com/profile/${user.polymarketProxyAddress}`)]
-          : []),
+        ...(profileBtn ? [profileBtn] : []),
         Markup.button.callback('📊 Portfolio', 'portfolio'),
+        Markup.button.callback('🔄 Refresh',   'wallet_page'),
       ],
       [
-        Markup.button.callback('💰 Deposit',  'deposit_menu'),
-        Markup.button.callback('💸 Withdraw', 'withdraw_menu'),
-      ],
-      [
-        Markup.button.callback('👥 Referrals', 'referral_hub'),
-        Markup.button.callback('⚙️ Settings',  'settings_menu'),
+        Markup.button.callback('💸 Withdraw',  'withdraw_menu'),
+        Markup.button.callback('💰 Cashback',  'cashback_page'),
       ],
       [
         Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
@@ -167,7 +170,23 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
       ).catch(() => '0.00'),
     ]);
 
-    const totalInvested     = activePositions.reduce((s, p) => s + p.totalBought, 0);
+    // Auto-claim any resolved/redeemable positions (fire-and-forget)
+    const redeemable = activePositions.filter(p => p.redeemable);
+    if (redeemable.length > 0 && user.polymarketProxyAddress) {
+      autoRedeemPositions(
+        user.encryptedPrivateKey,
+        user.polymarketProxyAddress,
+        redeemable,
+        async (msg) => {
+          const sent = await ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => null);
+          if (sent) setTimeout(() => ctx.telegram.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 5000);
+        },
+      ).then(claimed => {
+        if (claimed > 0) invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
+      }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
+    }
+
+    const totalInvested     = activePositions.reduce((s, p) => s + (p.initialValue), 0);
     const totalCurrentValue = activePositions.reduce((s, p) => s + p.currentValue, 0);
     const totalUnrealizedPnl = activePositions.reduce((s, p) => s + p.cashPnl, 0);
     const totalRealizedPnl  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
@@ -206,8 +225,9 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
         [Markup.button.callback('📋 Open Orders',      'portfolio_orders_1')],
         [Markup.button.callback('📜 Closed Positions', 'portfolio_closed_1')],
         [Markup.button.callback('📝 Trade History',    'portfolio_all_1')],
-        [Markup.button.callback('« Back to Wallet', 'wallet_page')],
-        [Markup.button.callback('🏠 Main Menu',     'back_to_menu')],
+        [Markup.button.callback('📊 P&L', 'portfolio_pnl')],
+        [Markup.button.callback('🔄 Refresh', 'portfolio'), Markup.button.callback('« Back to Wallet', 'wallet_page')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
 
@@ -236,9 +256,29 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     }
 
     // Fetch positions and update cache for Buy/Sell/View actions
+    // Always force-refresh when triggered by callback (Refresh button or navigation)
     const { positionListCache } = await import('./positionTrade');
-    const positions = await getActivePositions(user.polymarketProxyAddress || '');
+    const positions = await getActivePositions(user.polymarketProxyAddress || '', !!ctx.callbackQuery);
     positionListCache.set(telegramId, positions);
+
+    // Auto-claim any resolved/redeemable positions (fire-and-forget, notifies user)
+    const redeemable = positions.filter(p => p.redeemable);
+    if (redeemable.length > 0 && user.polymarketProxyAddress) {
+      autoRedeemPositions(
+        user.encryptedPrivateKey,
+        user.polymarketProxyAddress,
+        redeemable,
+        async (msg) => {
+          const sent = await ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => null);
+          if (sent) setTimeout(() => ctx.telegram.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 5000);
+        },
+      ).then(claimed => {
+        if (claimed > 0) {
+          // Invalidate cache so refreshed positions page shows updated balances
+          invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
+        }
+      }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
+    }
 
     if (positions.length === 0) {
       // Check for pending open orders so user knows their trades are on the book
@@ -259,6 +299,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
         `📊 *Active Positions*\n\n📭 No filled positions yet.${openOrdersHint}`,
         {
           parse_mode: 'Markdown',
+          image_path: IMG_POSITIONS,
           ...Markup.inlineKeyboard([
             [Markup.button.callback('📋 Open Orders', 'portfolio_orders_1')],
             [Markup.button.callback('« Portfolio', 'portfolio')],
@@ -275,7 +316,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
     const pagePositions = positions.slice(startIndex, startIndex + ITEMS_PER_PAGE);
 
-    const esc = (s: string) => s.replace(/[_*`[\]()]/g, '\\$&');
+    const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const botUsername = config.telegram.botUsername;
 
     // Summary header
@@ -284,14 +325,17 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     const summarySign  = totalPnl >= 0 ? '+' : '';
     const summaryEmoji = totalPnl >= 0 ? '🟢' : '🔴';
 
-    let message = `📊 *Active Positions* (${positions.length} total · page ${currentPage}/${totalPages})\n`;
-    message += `${summaryEmoji} Total Value: $${totalValue.toFixed(2)} · P&L: ${summarySign}$${totalPnl.toFixed(2)}\n\n`;
+    let message = `📊 <b>Active Positions</b> (${positions.length} total · page ${currentPage}/${totalPages})\n`;
+    message += `${summaryEmoji} Total Value: $${totalValue.toFixed(2)} · P&amp;L: ${summarySign}$${totalPnl.toFixed(2)}\n\n`;
 
-    pagePositions.forEach((pos: ActivePosition, i) => {
+    // 900-char budget for position blocks (leaves 124-char header already in message)
+    const MSG_LIMIT = 980;
+    for (let i = 0; i < pagePositions.length; i++) {
+      const pos = pagePositions[i];
       const idx = startIndex + i;
       const num = idx + 1;
       const rawTitle = pos.title || 'Unknown Market';
-      const truncTitle = esc(rawTitle.length > 46 ? rawTitle.substring(0, 46) + '…' : rawTitle);
+      const truncTitle = escHtml(rawTitle.length > 46 ? rawTitle.substring(0, 46) + '…' : rawTitle);
       const pnlSign  = pos.cashPnl >= 0 ? '+' : '';
       const pnlEmoji = pos.cashPnl >= 0 ? '🟢' : '🔴';
       const endDate = pos.endDate
@@ -301,19 +345,25 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       const viewLink = `https://t.me/${botUsername}?start=pv_${idx}`;
       const buyLink  = `https://t.me/${botUsername}?start=pb_${idx}`;
       const sellLink = `https://t.me/${botUsername}?start=ps_${idx}`;
+      const pnlLink  = `https://t.me/${botUsername}?start=pp_${idx}`;
 
-      message += `*${num}) ${esc(pos.outcome || 'Unknown')}* — ${truncTitle}\n`;
-      message += `   ├ ${pos.size.toFixed(2)} sh · Avg: ${(pos.avgPrice * 100).toFixed(1)}¢ · Now: ${(pos.curPrice * 100).toFixed(1)}¢\n`;
-      message += `   ├ 💰 Invested: $${pos.totalBought.toFixed(2)} → Value: $${pos.currentValue.toFixed(2)}\n`;
-      message += `   ├ ${pnlEmoji} Unrealized: ${pnlSign}$${pos.cashPnl.toFixed(2)} (${pnlSign}${pos.percentPnl.toFixed(1)}%)\n`;
+      let entry = '';
+      entry += `<b>${num}) ${escHtml(pos.outcome || 'Unknown')}</b> — ${truncTitle}\n`;
+      entry += `   ├ ${pos.size.toFixed(2)} sh · Avg: ${(pos.avgPrice * 100).toFixed(1)}¢ · Now: ${(pos.curPrice * 100).toFixed(1)}¢\n`;
+      entry += `   ├ 💰 Invested: $${(pos.initialValue).toFixed(2)} → Value: $${pos.currentValue.toFixed(2)}\n`;
+      entry += `   ├ ${pnlEmoji} Unrealized: ${pnlSign}$${pos.cashPnl.toFixed(2)} (${pnlSign}${pos.percentPnl.toFixed(1)}%)\n`;
       if (pos.realizedPnl !== 0) {
         const rSign = pos.realizedPnl >= 0 ? '+' : '';
-        message += `   ├ 💵 Realized: ${rSign}$${pos.realizedPnl.toFixed(2)}\n`;
+        entry += `   ├ 💵 Realized: ${rSign}$${pos.realizedPnl.toFixed(2)}\n`;
       }
       const redeemLine = pos.redeemable ? ' · ✅ Redeemable' : '';
-      message += `   ├ 📅 Ends: ${endDate}${redeemLine}\n`;
-      message += `   └ [👁 View](${viewLink}) · [📈 Buy](${buyLink}) · [📉 Sell](${sellLink})\n\n`;
-    });
+      entry += `   ├ 📅 Ends: ${endDate}${redeemLine}\n`;
+      entry += `   └ <a href="${viewLink}">👁 View</a> · <a href="${buyLink}">📈 Buy</a> · <a href="${sellLink}">📉 Sell</a> · <a href="${pnlLink}">📊 P&amp;L</a>\n\n`;
+
+      // Stop adding positions if we'd exceed the safe caption limit
+      if (message.length + entry.length > MSG_LIMIT) break;
+      message += entry;
+    }
 
     const buttons: any[] = [];
 
@@ -324,13 +374,21 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     if (navRow.length > 1) buttons.push(navRow);
 
     buttons.push([
+      Markup.button.callback('📊 Portfolio P&L', 'portfolio_pnl'),
+    ]);
+    buttons.push([
       Markup.button.callback('🔄 Refresh', 'portfolio_open_1'),
       Markup.button.callback('« Portfolio', 'portfolio'),
+    ]);
+    buttons.push([
+      Markup.button.callback('❌ Close All Positions', 'close_all_pos_confirm'),
+      Markup.button.callback('🛑 Stop All Orders',    'cancel_all_confirm'),
     ]);
     buttons.push([Markup.button.callback('🏠 Main Menu', 'back_to_menu')]);
 
     await sendPage(ctx, message, {
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
+      image_path: IMG_POSITIONS,
       ...Markup.inlineKeyboard(buttons),
     });
 
@@ -742,19 +800,6 @@ export async function handleAllTransactions(ctx: Context, page: number = 1): Pro
   }
 }
 
-/**
- * Shows withdraw/deposit page
- */
-export async function handleWithdraw(ctx: Context): Promise<void> {
-  try {
-    const { handleDepositMenu } = await import('./deposit');
-    await handleDepositMenu(ctx);
-  } catch (error) {
-    logger.error('Error showing deposit page:', error);
-    await ctx.reply('❌ An error occurred while loading deposit page.');
-  }
-}
-
 // ─── Order Cancellation ────────────────────────────────────────────────────
 
 /**
@@ -860,7 +905,7 @@ export async function handleCancelOrderExecute(ctx: Context, page: number, idx: 
       order.id
     );
 
-    await invalidatePortfolioCache(user.encryptedPrivateKey);
+    await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
 
     if (result.success) {
       await sendPage(ctx,
@@ -965,7 +1010,7 @@ export async function handleCancelAllExecute(ctx: Context): Promise<void> {
       user.encryptedApiSecret, user.encryptedPassphrase
     );
 
-    await invalidatePortfolioCache(user.encryptedPrivateKey);
+    await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
 
     if (result.failed === -1) {
       await sendPage(ctx,
@@ -1004,10 +1049,116 @@ export async function handleCancelAllExecute(ctx: Context): Promise<void> {
 }
 
 /**
- * /pnl — Quick P&L summary (unrealized + realized)
+ * Confirmation dialog before closing all positions.
+ * callback: close_all_pos_confirm
+ */
+export async function handleCloseAllConfirm(ctx: Context): Promise<void> {
+  try {
+    await ctx.answerCbQuery();
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user) { await ctx.reply('❌ User not found.'); return; }
+
+    const positions = await getActivePositions(user.polymarketProxyAddress || '');
+
+    if (positions.length === 0) {
+      await sendPage(ctx,
+        '✅ No active positions to close.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('« Active Positions', 'portfolio_open_1')]]),
+        }
+      );
+      return;
+    }
+
+    const totalValue = positions.reduce((sum, p) => sum + p.currentValue, 0);
+
+    await sendPage(ctx,
+      `⚠️ *Close All Positions*\n\n` +
+      `You have *${positions.length} active position${positions.length > 1 ? 's' : ''}* worth ~*$${totalValue.toFixed(2)}*.\n\n` +
+      `This will sell ALL positions immediately at market price.\n` +
+      `Illiquid positions may fail individually.\n\n` +
+      `⚠️ This action cannot be undone.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback(`✅ Close All (${positions.length})`, 'close_all_pos_do'),
+            Markup.button.callback('« Keep Positions', 'portfolio_open_1'),
+          ],
+        ]),
+      }
+    );
+  } catch (error: any) {
+    if (isBenignTelegramError(error)) return;
+    logger.error('Error showing close all confirmation:', error);
+    await ctx.reply('❌ Error loading positions. Please try again.');
+  }
+}
+
+/**
+ * Executes bulk close of all active positions.
+ * callback: close_all_pos_do
+ */
+export async function handleCloseAllExecute(ctx: Context): Promise<void> {
+  try {
+    await ctx.answerCbQuery('Closing all positions...');
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user) { await ctx.reply('❌ User not found.'); return; }
+
+    await sendPage(ctx,
+      `${ce(EMOJI.loading, '⏳')} <b>Closing all positions...</b>\n\n<i>This may take a moment.</i>`,
+      { parse_mode: 'HTML' }
+    );
+
+    const { executeCloseAllPositions } = await import('./positionTrade');
+    const result = await executeCloseAllPositions(user, user.slippageTolerance ?? 1.0);
+
+    await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
+
+    const summary = result.closed > 0
+      ? `✅ <b>${result.closed} position${result.closed > 1 ? 's' : ''} closed successfully.</b>`
+      : `ℹ️ No positions were closed.`;
+    const failLine = result.failed > 0
+      ? `\n⚠️ ${result.failed} could not be closed (illiquid or too small):\n` +
+        result.errors.slice(0, 3).map(e => `• ${esc(e)}`).join('\n')
+      : '';
+
+    await sendPage(ctx,
+      `${summary}${failLine}\n\n<i>Check your positions for the updated state.</i>`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+          [Markup.button.callback('« Portfolio', 'portfolio')],
+          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        ]),
+      }
+    );
+
+    logger.info(`[walletPage] closeAll user=${telegramId}: closed=${result.closed} failed=${result.failed}`);
+  } catch (error: any) {
+    if (isBenignTelegramError(error)) return;
+    logger.error('Error closing all positions:', error);
+    await ctx.reply('❌ Error closing positions. Please try again.');
+  }
+}
+
+/**
+ * /pnl + pnl_alltime action — All-time P&L summary (unrealized + realized) with image
  */
 export async function handlePnl(ctx: Context): Promise<void> {
   try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
@@ -1017,40 +1168,263 @@ export async function handlePnl(ctx: Context): Promise<void> {
       return;
     }
 
-    const loadingMsg = await ctx.reply('📊 Fetching P&L...');
+    // Only show loading message for /pnl command, not for callback actions (Refresh)
+    let loadingMsg: any = null;
+    if (!ctx.callbackQuery) {
+      loadingMsg = await ctx.reply('📊 Fetching P&L...');
+    }
 
-    const [activePositions, closedPositions] = await Promise.all([
-      getActivePositions(user.polymarketProxyAddress || '').catch(() => [] as ActivePosition[]),
-      getClosedPositions(user.polymarketProxyAddress || '').catch(() => [] as ClosedPosition[]),
+    const forceRefresh = !!ctx.callbackQuery;
+    const [activePositions, closedPositions, balance, profilePhotoBuffer] = await Promise.all([
+      getActivePositions(user.polymarketProxyAddress || '', forceRefresh).catch(() => [] as ActivePosition[]),
+      getClosedPositions(user.polymarketProxyAddress || '', forceRefresh).catch(() => [] as ClosedPosition[]),
+      getBalance(
+        user.encryptedPrivateKey, user.encryptedApiKey,
+        user.encryptedApiSecret, user.encryptedPassphrase
+      ).catch(() => '0.00'),
+      fetchProfilePhoto(ctx),
     ]);
 
-    try { await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch { /* non-critical */ }
+    if (loadingMsg) {
+      try { await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch { /* non-critical */ }
+    }
+
+    // Update position cache so subsequent position actions work
+    if (activePositions.length > 0) {
+      const { positionListCache } = await import('./positionTrade');
+      positionListCache.set(telegramId, activePositions);
+    }
 
     const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
     const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
     const totalPnl        = totalUnrealized + totalRealized;
+    // Use initialValue from API — the authoritative cost basis for active positions
+    const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
+    const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
+    const totalInvested   = activeInvested + closedInvested;
+    const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
 
-    const sign  = (n: number) => n >= 0 ? '+' : '';
-    const emoji = (n: number) => n >= 0 ? '🟢' : '🔴';
+    const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
 
-    let msg = '📊 *P&L Summary*\n\n';
-    msg += `${emoji(totalUnrealized)} Unrealized: *${sign(totalUnrealized)}$${totalUnrealized.toFixed(2)}*`;
-    if (activePositions.length > 0) msg += ` _(${activePositions.length} position${activePositions.length !== 1 ? 's' : ''})_`;
-    msg += '\n';
-    msg += `${emoji(totalRealized)} Realized:   *${sign(totalRealized)}$${totalRealized.toFixed(2)}*`;
-    if (closedPositions.length > 0) msg += ` _(${closedPositions.length} closed)_`;
-    msg += '\n\n';
-    msg += `${emoji(totalPnl)} *Total P&L: ${sign(totalPnl)}$${totalPnl.toFixed(2)}*`;
+    const pnlKeyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Refresh', 'pnl_alltime'),
+        Markup.button.callback('📤 Share', 'pnl_share_alltime'),
+      ],
+      [Markup.button.callback('📊 Full Portfolio', 'portfolio')],
+      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+    ]);
 
-    await ctx.reply(msg, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('📊 Full Portfolio', 'portfolio')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-      ]),
+    // Build rich HTML caption
+    const pnlDir = totalPnl >= 0 ? ce(EMOJI.pnlUp, '📈') : ce(EMOJI.pnlDown, '📉');
+    const pnlSign = totalPnl >= 0 ? '+' : '';
+    const pctSign = percentPnl >= 0 ? '+' : '';
+
+    let caption = `${ce(EMOJI.pnlChart, '📊')} <b>All-Time P&amp;L</b>\n\n`;
+    caption += `${ce(EMOJI.diamond, '💎')} <b>Total P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${totalPnl.toFixed(2)}</b>\n`;
+    caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${percentPnl.toFixed(1)}%\n\n`;
+    caption += `${ce(EMOJI.bag, '💰')} <b>Invested:</b>  $${totalInvested.toFixed(2)}\n`;
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>Portfolio Value:</b>  $${(totalInvested + totalPnl).toFixed(2)}\n`;
+    caption += `${ce(EMOJI.usdc, '💲')} <b>Balance:</b>  $${balance}\n`;
+    caption += `${ce(EMOJI.briefcase, '💼')} <b>Positions:</b>  ${activePositions.length} active`;
+
+    // Try image generation
+    try {
+      const imageBuffer = await generateAllTimePnlImage({
+        totalPnl,
+        percentPnl,
+        totalInvested,
+        balance,
+        positionCount: activePositions.length,
+        username: ctx.from?.username,
+        displayName,
+        profilePhotoBuffer,
+      });
+
+      if (imageBuffer) {
+        await sendImageBufferPage(ctx, imageBuffer, caption, {
+          parse_mode: 'HTML',
+          ...pnlKeyboard,
+        });
+        return;
+      }
+    } catch (imgErr) {
+      logger.warn('[pnlImage] All-time PNL image generation failed, using text fallback:', imgErr);
+    }
+
+    // Text fallback (same rich caption, no image)
+    await sendPage(ctx, caption, {
+      parse_mode: 'HTML',
+      ...pnlKeyboard,
     });
   } catch (error) {
     logger.error('Error in handlePnl:', error);
-    await ctx.reply('❌ Failed to fetch P&L. Please try again.');
+    await ctx.reply('❌ Failed to fetch P&L. Please try again.').catch(() => {});
+  }
+}
+
+/**
+ * portfolio_pnl action — Portfolio PNL (unrealized only) with image
+ */
+export async function handlePortfolioPnl(ctx: Context): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user) {
+      await ctx.reply('❌ User not found. Use /start to create your wallet.');
+      return;
+    }
+
+    const [activePositions, balance, profilePhotoBuffer] = await Promise.all([
+      getActivePositions(user.polymarketProxyAddress || '', true).catch(() => [] as ActivePosition[]),
+      getBalance(
+        user.encryptedPrivateKey, user.encryptedApiKey,
+        user.encryptedApiSecret, user.encryptedPassphrase
+      ).catch(() => '0.00'),
+      fetchProfilePhoto(ctx),
+    ]);
+
+    // Update position cache so subsequent position actions work
+    if (activePositions.length > 0) {
+      const { positionListCache } = await import('./positionTrade');
+      positionListCache.set(telegramId, activePositions);
+    }
+
+    const unrealizedPnl = activePositions.reduce((s, p) => s + p.cashPnl, 0);
+    // Use initialValue from API — the authoritative cost basis for active positions
+    const totalInvested = activePositions.reduce((s, p) => s + (p.initialValue), 0);
+    const percentPnl    = totalInvested > 0 ? (unrealizedPnl / totalInvested) * 100 : 0;
+
+    const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+
+    const pnlKeyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Refresh', 'portfolio_pnl'),
+        Markup.button.callback('📤 Share', 'pnl_share_portfolio'),
+      ],
+      [Markup.button.callback('« Portfolio', 'portfolio')],
+      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+    ]);
+
+    // Build rich HTML caption
+    const pnlDir = unrealizedPnl >= 0 ? ce(EMOJI.pnlUp, '📈') : ce(EMOJI.pnlDown, '📉');
+    const pnlSign = unrealizedPnl >= 0 ? '+' : '';
+    const pctSign = percentPnl >= 0 ? '+' : '';
+
+    let caption = `${ce(EMOJI.pnlChart, '📊')} <b>Portfolio P&amp;L</b>\n\n`;
+    caption += `${ce(EMOJI.diamond, '💎')} <b>Unrealized P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${unrealizedPnl.toFixed(2)}</b>\n`;
+    caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${percentPnl.toFixed(1)}%\n\n`;
+    caption += `${ce(EMOJI.bag, '💰')} <b>Invested:</b>  $${totalInvested.toFixed(2)}\n`;
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>Portfolio Value:</b>  $${(totalInvested + unrealizedPnl).toFixed(2)}\n`;
+    caption += `${ce(EMOJI.usdc, '💲')} <b>Balance:</b>  $${balance}\n`;
+    caption += `${ce(EMOJI.briefcase, '💼')} <b>Positions:</b>  ${activePositions.length} active`;
+
+    // Try image generation
+    try {
+      const imageBuffer = await generatePortfolioPnlImage({
+        unrealizedPnl,
+        percentPnl,
+        totalInvested,
+        balance,
+        positionCount: activePositions.length,
+        username: ctx.from?.username,
+        displayName,
+        profilePhotoBuffer,
+      });
+
+      if (imageBuffer) {
+        await sendImageBufferPage(ctx, imageBuffer, caption, {
+          parse_mode: 'HTML',
+          ...pnlKeyboard,
+        });
+        return;
+      }
+    } catch (imgErr) {
+      logger.warn('[pnlImage] Portfolio PNL image generation failed, using text fallback:', imgErr);
+    }
+
+    // Text fallback (same rich caption, no image)
+    await sendPage(ctx, caption, {
+      parse_mode: 'HTML',
+      ...pnlKeyboard,
+    });
+  } catch (error) {
+    logger.error('Error in handlePortfolioPnl:', error);
+    await ctx.reply('❌ Failed to fetch P&L. Please try again.').catch(() => {});
+  }
+}
+
+/**
+ * pnl_share_* actions — Re-send PNL image without keyboard (forwardable)
+ */
+export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'): Promise<void> {
+  try {
+    await ctx.answerCbQuery('Generating share image...').catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user) return;
+
+    const [activePositions, closedPositions, balance, profilePhotoBuffer] = await Promise.all([
+      getActivePositions(user.polymarketProxyAddress || '').catch(() => [] as ActivePosition[]),
+      getClosedPositions(user.polymarketProxyAddress || '').catch(() => [] as ClosedPosition[]),
+      getBalance(
+        user.encryptedPrivateKey, user.encryptedApiKey,
+        user.encryptedApiSecret, user.encryptedPassphrase
+      ).catch(() => '0.00'),
+      fetchProfilePhoto(ctx),
+    ]);
+
+    const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+    let imageBuffer: Buffer | null = null;
+
+    if (type === 'alltime') {
+      const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
+      const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
+      const totalPnl        = totalUnrealized + totalRealized;
+      const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
+      const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
+      const totalInvested   = activeInvested + closedInvested;
+      const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
+
+      imageBuffer = await generateAllTimePnlImage({
+        totalPnl, percentPnl, totalInvested, balance,
+        positionCount: activePositions.length,
+        username: ctx.from?.username,
+        displayName,
+        profilePhotoBuffer,
+      });
+    } else {
+      const unrealizedPnl = activePositions.reduce((s, p) => s + p.cashPnl, 0);
+      const totalInvested = activePositions.reduce((s, p) => s + (p.initialValue), 0);
+      const percentPnl    = totalInvested > 0 ? (unrealizedPnl / totalInvested) * 100 : 0;
+
+      imageBuffer = await generatePortfolioPnlImage({
+        unrealizedPnl, percentPnl, totalInvested, balance,
+        positionCount: activePositions.length,
+        username: ctx.from?.username,
+        displayName,
+        profilePhotoBuffer,
+      });
+    }
+
+    if (imageBuffer) {
+      const shareCaption = `${ce(EMOJI.pnlChart, '📊')} My P&amp;L — <b>Polytech Sniper Bot</b>`;
+      await ctx.replyWithPhoto(
+        { source: imageBuffer },
+        { caption: shareCaption, parse_mode: 'HTML' },
+      );
+    } else {
+      await ctx.answerCbQuery('No PNL templates available yet.', { show_alert: true });
+    }
+  } catch (error) {
+    logger.error('Error in handlePnlShare:', error);
+    await ctx.reply('❌ Failed to generate share image.');
   }
 }

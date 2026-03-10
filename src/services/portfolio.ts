@@ -2,8 +2,12 @@ import { ClobClient } from '@polymarket/clob-client';
 import { Wallet } from 'ethers';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
+import { redisCache } from '../database/redis';
 
 const DATA_API = 'https://data-api.polymarket.com';
+
+const ACTIVE_POSITIONS_TTL  = 45;   // seconds — price moves slowly enough
+const CLOSED_POSITIONS_TTL  = 120;  // seconds — closed positions are immutable once settled
 
 export interface OpenOrder {
   id: string;
@@ -129,7 +133,15 @@ export async function createClobClientForUser(
  * Gets user's active positions from Data API (public, no auth needed)
  * Uses proxy wallet address, returns markets where user currently holds tokens
  */
-export async function getActivePositions(proxyAddress: string): Promise<ActivePosition[]> {
+export async function getActivePositions(proxyAddress: string, forceRefresh = false): Promise<ActivePosition[]> {
+  const cacheKey = `portfolio:active:${proxyAddress}`;
+  if (forceRefresh) {
+    await redisCache.del(cacheKey).catch(() => {});
+  } else {
+    const cached = await redisCache.get<ActivePosition[]>(cacheKey).catch(() => null);
+    if (cached) return cached;
+  }
+
   try {
     logger.info(`Fetching active positions from Data API for ${proxyAddress}`);
     const response = await fetch(`${DATA_API}/positions?user=${proxyAddress}`);
@@ -143,6 +155,7 @@ export async function getActivePositions(proxyAddress: string): Promise<ActivePo
     const positions: ActivePosition[] = Array.isArray(data) ? data : [];
     const active = positions.filter((p) => p.size > 0);
 
+    await redisCache.set(cacheKey, active, ACTIVE_POSITIONS_TTL).catch(() => {});
     logger.info(`Fetched ${active.length} active positions`);
     return active;
   } catch (error) {
@@ -155,7 +168,15 @@ export async function getActivePositions(proxyAddress: string): Promise<ActivePo
  * Gets user's closed positions from Data API (public, no auth needed)
  * Uses proxy wallet address, returns markets where user exited their position
  */
-export async function getClosedPositions(proxyAddress: string): Promise<ClosedPosition[]> {
+export async function getClosedPositions(proxyAddress: string, forceRefresh = false): Promise<ClosedPosition[]> {
+  const cacheKey = `portfolio:closed:${proxyAddress}`;
+  if (forceRefresh) {
+    await redisCache.del(cacheKey).catch(() => {});
+  } else {
+    const cached = await redisCache.get<ClosedPosition[]>(cacheKey).catch(() => null);
+    if (cached) return cached;
+  }
+
   try {
     logger.info(`Fetching closed positions from Data API for ${proxyAddress}`);
     const response = await fetch(`${DATA_API}/closed-positions?user=${proxyAddress}`);
@@ -169,6 +190,7 @@ export async function getClosedPositions(proxyAddress: string): Promise<ClosedPo
     const positions: ClosedPosition[] = Array.isArray(data) ? data : [];
     positions.sort((a, b) => b.timestamp - a.timestamp);
 
+    await redisCache.set(cacheKey, positions, CLOSED_POSITIONS_TTL).catch(() => {});
     logger.info(`Fetched ${positions.length} closed positions`);
     return positions;
   } catch (error) {
@@ -202,9 +224,12 @@ export async function getOpenOrders(
 }
 
 /**
- * No-op kept for call-site compatibility. Cache was removed; all portfolio data is now always fresh.
+ * Invalidates cached active positions for a proxy address so the next fetch is fresh.
  */
-export async function invalidatePortfolioCache(_encryptedPrivateKey: string): Promise<void> {}
+export async function invalidatePortfolioCache(proxyAddress: string): Promise<void> {
+  if (!proxyAddress) return;
+  await redisCache.del(`portfolio:active:${proxyAddress}`).catch(() => {});
+}
 
 /**
  * Cancels a single open order by its order ID.
@@ -326,6 +351,8 @@ export async function getPortfolioData(
 /**
  * Gets user's USDC balance from CLOB API
  */
+const BALANCE_CACHE_TTL = 30; // seconds — short enough to stay accurate, long enough to help rapid trades
+
 export async function getBalance(
   privateKey: string,
   apiKey: string,
@@ -333,6 +360,12 @@ export async function getBalance(
   passphrase: string
 ): Promise<string> {
   try {
+    // Use a hash of the API key as cache key (unique per user, no sensitive data)
+    const keyHash = privateKey.slice(-8); // last 8 chars of encrypted key as identifier
+    const cacheKey = `balance:${keyHash}`;
+    const cached = await redisCache.get<string>(cacheKey);
+    if (cached !== null && cached !== undefined) return cached;
+
     const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
     const balanceData = await client.getBalanceAllowance({ asset_type: 'COLLATERAL' as any });
 
@@ -341,6 +374,7 @@ export async function getBalance(
       balance = (parseFloat(balanceData.balance) / 1_000_000).toFixed(2);
     }
 
+    await redisCache.set(cacheKey, balance, BALANCE_CACHE_TTL);
     logger.info(`Balance: $${balance}`);
     return balance;
   } catch (error) {

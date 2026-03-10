@@ -6,13 +6,19 @@ const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const CACHE_TTL = 120; // 2 minutes — short enough to feel real-time
 const SEARCH_CACHE_TTL = 120; // 2 minutes for search results
 
-/** Gamma API tag IDs for main categories */
-export const CATEGORY_TAG_IDS: Record<string, number> = {
-  'politics':    2,
-  'crypto':      21,
-  'sports':      1,
-  'business':    107,
-  'pop-culture': 596,
+/** Gamma API tag slugs for main categories (matches Polymarket website) */
+export const CATEGORY_TAG_SLUGS: Record<string, string> = {
+  'politics':    'politics',
+  'crypto':      'crypto',
+  'sports':      'sports',
+  'business':    'finance',
+  'pop-culture': 'pop-culture',
+  'geopolitics': 'geopolitics',
+  'tech':        'tech',
+  'ai':          'ai',
+  'science':     'science',
+  'elections':   'elections',
+  'middle-east': 'middle-east',
 };
 
 export interface Market {
@@ -331,8 +337,8 @@ export async function getTopCategories(): Promise<Category[]> {
 }
 
 /**
- * Gets trending events sorted by 24h volume from the Gamma API directly.
- * Uses API-level ordering (order=volume24hr&ascending=false) for true trending.
+ * Gets trending events from Polymarket's curated featured list (homepage trending section).
+ * Uses featured=true to match what Polymarket shows on their homepage.
  */
 export async function getTrendingEvents(limit: number = 30): Promise<Event[]> {
   try {
@@ -349,9 +355,11 @@ export async function getTrendingEvents(limit: number = 30): Promise<Event[]> {
       params: {
         active: true,
         closed: false,
+        featured: true,
+        end_date_min: new Date().toISOString(), // exclude expired-but-unresolved events
         order: 'volume24hr',
         ascending: false,
-        limit: Math.min(limit + 10, 50), // slight over-fetch to account for filter
+        limit: 50,
       },
       timeout: 15000,
     });
@@ -389,6 +397,7 @@ export async function getTopEvents(limit: number = 50): Promise<Event[]> {
       params: {
         active: true,
         closed: false,
+        end_date_min: new Date().toISOString(), // exclude expired-but-unresolved events
         order: 'volume24hr',
         ascending: false,
         limit: Math.min(limit + 10, 100),
@@ -412,8 +421,16 @@ export async function getTopEvents(limit: number = 50): Promise<Event[]> {
  * Shared helper: filters out non-tradeable markets and sorts events by 24h volume.
  */
 function filterAndSortEvents(events: Event[]): Event[] {
+  const now = Date.now();
   return events
-    .filter(e => e.volume24hr > 0 && Array.isArray(e.markets) && e.markets.length > 0)
+    // I1: min $1K liquidity · I2: client-side endDate expiry guard
+    .filter(e => {
+      if (!e.volume24hr || (e.liquidity ?? 0) < 1000) return false;
+      if (!Array.isArray(e.markets) || e.markets.length === 0) return false;
+      const endMs = (e as any).endDate ? new Date((e as any).endDate).getTime() : 0;
+      if (endMs > 0 && endMs < now) return false;
+      return true;
+    })
     .map(e => {
       const tradeableMarkets = e.markets.filter(m => {
         if (!m.active || m.closed) return false;
@@ -428,7 +445,8 @@ function filterAndSortEvents(events: Event[]): Event[] {
 
           const p0 = parseFloat(prices[0]);
           const p1 = parseFloat(prices[1]);
-          if (isNaN(p0) || isNaN(p1) || p0 < 0 || p0 > 1 || p1 < 0 || p1 > 1) return false;
+          // I3: exclude resolved/near-resolved markets (matches event detail page threshold)
+          if (isNaN(p0) || isNaN(p1) || p0 < 0.01 || p0 > 0.99 || p1 < 0.01 || p1 > 0.99) return false;
 
           if (!(m as any).conditionId && !(m as any).condition_id) return false;
 
@@ -547,8 +565,9 @@ export async function getTopMarkets(limit: number = 50): Promise<Market[]> {
 }
 
 /**
- * Gets events by category using the Gamma API's tag_id parameter.
- * Falls back to keyword filtering if tag_id is unknown.
+ * Gets events by category using the Gamma API's tag_slug parameter with related_tags.
+ * This matches how Polymarket's website fetches category events.
+ * Falls back to keyword filtering if tag_slug is unknown.
  */
 export async function getEventsByCategory(category: string, limit: number = 30): Promise<Event[]> {
   try {
@@ -559,19 +578,21 @@ export async function getEventsByCategory(category: string, limit: number = 30):
       return cached;
     }
 
-    logger.info(`Fetching events for category: ${category} (tag_id=${CATEGORY_TAG_IDS[category] ?? 'keyword'})`);
+    const tagSlug = CATEGORY_TAG_SLUGS[category];
+    logger.info(`Fetching events for category: ${category} (tag_slug=${tagSlug ?? 'keyword'})`);
 
-    const tagId = CATEGORY_TAG_IDS[category];
     const params: Record<string, any> = {
       active: true,
       closed: false,
+      end_date_min: new Date().toISOString(),
       order: 'volume24hr',
       ascending: false,
       limit: Math.min(limit + 15, 50),
     };
 
-    if (tagId) {
-      params.tag_id = tagId;
+    if (tagSlug) {
+      params.tag_slug = tagSlug;
+      params.related_tags = true;
     }
 
     const response = await axios.get(`${GAMMA_API_BASE}/events`, {
@@ -582,7 +603,7 @@ export async function getEventsByCategory(category: string, limit: number = 30):
     let events: Event[] = Array.isArray(response.data) ? response.data : [];
 
     // Keyword fallback for unknown categories
-    if (!tagId) {
+    if (!tagSlug) {
       const keywords = getCategoryKeywords(category);
       events = events.filter(event => {
         const searchText = `${event.title} ${event.slug} ${event.description || ''}`.toLowerCase();
@@ -598,6 +619,53 @@ export async function getEventsByCategory(category: string, limit: number = 30):
   } catch (error) {
     logger.error(`Error fetching events for category ${category}:`, error);
     throw new Error(`Failed to fetch events for category ${category}`);
+  }
+}
+
+/**
+ * Gets live sports events — games/matches happening now or starting within the next few hours.
+ * Filters sports events by endDate within 24h (same-day games).
+ */
+export async function getLiveSportsEvents(limit: number = 30): Promise<Event[]> {
+  try {
+    const cacheKey = `events:live_sports:${limit}`;
+    const cached = await redisCache.get<Event[]>(cacheKey);
+    if (cached) return cached;
+
+    logger.info('Fetching live sports events from Gamma API...');
+
+    const response = await axios.get(`${GAMMA_API_BASE}/events`, {
+      params: {
+        tag_slug: 'sports',
+        related_tags: true,
+        active: true,
+        closed: false,
+        end_date_min: new Date().toISOString(),
+        order: 'volume24hr',
+        ascending: false,
+        limit: 100,
+      },
+      timeout: 15000,
+    });
+
+    const events: Event[] = Array.isArray(response.data) ? response.data : [];
+    const now = Date.now();
+    const H24 = 24 * 60 * 60 * 1000;
+
+    // Keep only events ending within 24 hours (live/same-day matches)
+    const liveEvents = events.filter(e => {
+      if (!e.endDate) return false;
+      const endMs = new Date(e.endDate).getTime();
+      return endMs > now && endMs - now < H24;
+    });
+
+    const sorted = filterAndSortEvents(liveEvents).slice(0, limit);
+    await redisCache.set(cacheKey, sorted, 60); // 1 min cache — live data changes fast
+    logger.info(`Fetched ${sorted.length} live sports events`);
+    return sorted;
+  } catch (error) {
+    logger.error('Error fetching live sports events:', error);
+    throw new Error('Failed to fetch live sports events');
   }
 }
 
@@ -845,14 +913,15 @@ export async function getEventBySlug(slug: string): Promise<Event | null> {
 /**
  * Formats volume for display
  */
-export function formatVolume(volume: number): string {
-  if (volume == null || isNaN(volume)) return '$0';
-  if (volume >= 1000000) {
-    return `$${(volume / 1000000).toFixed(1)}M`;
-  } else if (volume >= 1000) {
-    return `$${(volume / 1000).toFixed(1)}K`;
+export function formatVolume(volume: number | string | null | undefined): string {
+  const v = typeof volume === 'string' ? parseFloat(volume) : (volume ?? 0);
+  if (v == null || isNaN(v)) return '$0';
+  if (v >= 1000000) {
+    return `$${(v / 1000000).toFixed(1)}M`;
+  } else if (v >= 1000) {
+    return `$${(v / 1000).toFixed(1)}K`;
   }
-  return `$${volume.toFixed(0)}`;
+  return `$${v.toFixed(0)}`;
 }
 
 /**

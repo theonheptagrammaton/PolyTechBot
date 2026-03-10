@@ -12,7 +12,8 @@ export interface SmartWalletInfo {
   address:        string;
   displayName:    string;
   copyCount:      number;   // PolyTech users who have ever copied this trader
-  specialty:      string;   // Derived from market titles in activity feed
+  specialty:      string;   // Primary specialty (first/dominant)
+  specialties:    string[]; // All matched specialties from activity feed
   pnlPct:         number;   // P&L % (pnl / vol × 100)
   pnlAbs:         number;   // Absolute P&L in USD (from leaderboard)
   volume:         number;   // Trading volume in USD (from leaderboard)
@@ -59,21 +60,53 @@ async function fetchActivity(address: string): Promise<any[]> {
   }
 }
 
-/** Derive specialty label from market titles in activity feed. */
-function deriveSpecialty(trades: any[]): string {
-  const text = trades
-    .map(t => (t.title ?? t.question ?? t.marketQuestion ?? t.description ?? '').toLowerCase())
-    .join(' ');
+/**
+ * Category patterns: label → regex.
+ * Order matters only for the "primary" specialty pick (first match wins).
+ */
+const SPECIALTY_PATTERNS: Array<{ label: string; re: RegExp }> = [
+  { label: '₿ Crypto',        re: /\b(btc|bitcoin|eth|ethereum|crypto|defi|token|solana|nft|altcoin|web3|blockchain)\b/ },
+  { label: '🏛️ Politics',    re: /\b(election|president|vote|trump|harris|democrat|republican|senate|congress|politics|ballot|primary|campaign|white house|supreme court|legislation)\b/ },
+  { label: '⚽ Sports',       re: /\b(nba|nfl|nhl|mlb|soccer|football|basketball|tennis|sport|league|championship|world cup|ufc|boxing|formula|f1|grand prix|olympics|gold medal|medal|player|team|coach|season|playoffs|finals|bracket)\b/ },
+  { label: '🎮 E-Sports',     re: /\b(esport|gaming|valorant|dota|counter.strike|cs2|league of legends|overwatch|rocket league|fortnite|apex legends|twitch)\b/ },
+  { label: '💻 Tech',         re: /\b(apple|microsoft|google|meta|amazon|tesla|nvidia|intel|samsung|iphone|android|macos|windows|startup|ipo|acquisition|merger|ceo|product launch)\b/ },
+  { label: '🤖 AI',           re: /\b(ai|openai|gpt|chatgpt|claude|anthropic|gemini|llm|machine learning|artificial intelligence|midjourney|stable diffusion|agi)\b/ },
+  { label: '🌍 Geopolitics',  re: /\b(war|russia|ukraine|israel|conflict|military|nato|geopolit|china|taiwan|iran|north korea|sanction|treaty|invasion|border|coup|ceasefire)\b/ },
+  { label: '💵 Finance',      re: /\b(stocks?|s&p|nasdaq|dow|fed|interest rate|inflation|gdp|bond|gold|oil|commodity|earnings|treasury|yield|recession|ecb|forex|currency|usd|eur|jpy|gbp|central bank)\b/ },
+  { label: '🎬 Entertainment', re: /\b(celebrity|oscar|emmy|grammy|taylor|entertainment|music|film|movie|tv|series|netflix|box office|award|grammy|billboard|album|concert|actor|actress)\b/ },
+];
 
-  if (/\b(btc|bitcoin|eth|ethereum|crypto|defi|token|solana|nft)\b/.test(text))                        return '₿ Crypto';
-  if (/\b(election|president|vote|trump|harris|democrat|republican|senate|congress|politics)\b/.test(text)) return '🏛️ Politics';
-  if (/\b(esport|gaming|game|valorant|dota|counter.strike|cs2|league of legends)\b/.test(text))        return '🎮 E-Sports';
-  if (/\b(nba|nfl|soccer|football|basketball|tennis|sport|league|championship|world cup|ufc)\b/.test(text)) return '⚽ Sports';
-  if (/\b(ai|openai|gpt|claude|tech|apple|microsoft|google|nvidia)\b/.test(text))                      return '💻 Tech';
-  if (/\b(war|russia|ukraine|israel|conflict|military|nato|geopolit)\b/.test(text))                    return '🌍 Geopolitics';
-  if (/\b(celebrity|oscar|emmy|grammy|taylor|entertainment|music|film|movie|tv)\b/.test(text))         return '🎬 Entertainment';
+/**
+ * Derive ALL matching specialties from market titles in activity feed.
+ * Returns array of matched labels; falls back to ['📊 General'] if none match.
+ * First element is the "primary" specialty (highest trade-count category).
+ */
+function deriveSpecialties(trades: any[]): string[] {
+  // Build per-category trade counts using only TRADE events
+  const counts = new Map<string, number>();
 
-  return '📊 General';
+  for (const t of trades) {
+    const type = (t.type ?? 'TRADE').toUpperCase();
+    if (type !== 'TRADE') continue;
+
+    const text = (t.title ?? t.question ?? t.marketQuestion ?? t.description ?? '').toLowerCase();
+    if (!text) continue;
+
+    for (const { label, re } of SPECIALTY_PATTERNS) {
+      if (re.test(text)) {
+        counts.set(label, (counts.get(label) ?? 0) + 1);
+      }
+    }
+  }
+
+  if (counts.size === 0) return ['📊 General'];
+
+  // Sort by trade count descending; return all with at least 1 trade
+  const sorted = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([label]) => label);
+
+  return sorted;
 }
 
 /** Extract USD value from an activity record. */
@@ -169,11 +202,11 @@ export function fmtUsd(n: number | undefined | null): string {
  * Results are cached for 5 minutes.
  */
 export async function getTopSmartWallets(
-  limit = 50,
+  limit = 100,
   timePeriod: 'DAY' | 'WEEK' | 'MONTH' | 'ALL' = 'ALL',
   orderBy: 'PNL' | 'VOL' = 'PNL',
 ): Promise<SmartWalletInfo[]> {
-  const cacheKey = `sw:v7:${limit}:${timePeriod}:${orderBy}`;
+  const cacheKey = `sw:v8:${limit}:${timePeriod}:${orderBy}`;
   const cached = await redisCache.get<SmartWalletInfo[]>(cacheKey);
   if (cached && cached.length > 0) return cached;
 
@@ -185,10 +218,7 @@ export async function getTopSmartWallets(
       const address = (entry.proxyWallet ?? '').toLowerCase();
       if (!address) return null;
 
-      const [, activity] = await Promise.all([
-        Promise.resolve(0), // copyCount removed from display
-        fetchActivity(address),
-      ]);
+      const activity = await fetchActivity(address);
 
       const pnlAbs = typeof entry.pnl === 'number' ? entry.pnl : 0;
       const volAbs = typeof entry.vol === 'number' ? entry.vol : 0;
@@ -197,6 +227,7 @@ export async function getTopSmartWallets(
         : 0;
 
       const { tradeCount, winRatePct, avgTradeSizeUsd } = analyseActivity(activity);
+      const specialties = deriveSpecialties(activity);
 
       const rawName = entry.userName ?? '';
       const displayName = rawName && rawName !== 'Anonymous'
@@ -207,7 +238,8 @@ export async function getTopSmartWallets(
         address,
         displayName,
         copyCount:       0,
-        specialty:       deriveSpecialty(activity),
+        specialty:       specialties[0], // primary (highest trade count)
+        specialties,
         pnlPct,
         pnlAbs,
         volume:          volAbs,
@@ -229,4 +261,52 @@ export async function getTopSmartWallets(
 
   logger.info(`[smartWallets] Loaded ${wallets.length} wallets (all-time leaderboard)`);
   return wallets;
+}
+
+// ─── Single Trader Stats ──────────────────────────────────────────────────────
+
+export interface TraderStats {
+  displayName: string;
+  winRatePct: number;   // -1 = not enough data
+  tradeCount: number;
+  pnlAbs: number | null;
+}
+
+/**
+ * Fetches profile stats for an arbitrary trader address.
+ * Used in the copy-add review step.
+ */
+export async function fetchTraderStats(address: string): Promise<TraderStats> {
+  const addr = address.toLowerCase();
+
+  const [activityResult, profileResult, closedResult] = await Promise.allSettled([
+    fetchActivity(addr),
+    fetch(`https://gamma-api.polymarket.com/users?address=${addr}`, {
+      signal: AbortSignal.timeout(5000),
+      headers: { Accept: 'application/json' },
+    }).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`https://data-api.polymarket.com/closed-positions?user=${addr}&limit=500`, {
+      signal: AbortSignal.timeout(6000),
+      headers: { Accept: 'application/json' },
+    }).then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+
+  const trades = activityResult.status === 'fulfilled' ? activityResult.value : [];
+  const { tradeCount, winRatePct } = analyseActivity(trades);
+
+  const profileData = profileResult.status === 'fulfilled' ? profileResult.value : null;
+  const profileArr  = Array.isArray(profileData) ? profileData : (profileData ? [profileData] : []);
+  const profile     = profileArr[0] ?? null;
+  const rawName     = profile?.name ?? profile?.username ?? profile?.pseudonym ?? '';
+  const displayName = rawName && rawName !== 'Anonymous'
+    ? rawName
+    : `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+
+  const closedData = closedResult.status === 'fulfilled' ? closedResult.value : null;
+  const closedArr  = Array.isArray(closedData) ? closedData : [];
+  const pnlAbs     = closedArr.length > 0
+    ? closedArr.reduce((sum: number, p: any) => sum + (typeof p.realizedPnl === 'number' ? p.realizedPnl : 0), 0)
+    : null;
+
+  return { displayName, winRatePct, tradeCount, pnlAbs };
 }

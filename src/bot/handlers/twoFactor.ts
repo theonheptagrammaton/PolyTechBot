@@ -127,8 +127,9 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
     // Send QR code as photo
     const message =
       '🔐 *Enable Two-Factor Authentication*\n\n' +
-      '*Step 1:* Scan this QR code with Google Authenticator or similar app\n\n' +
-      '*Step 2:* After scanning, you will receive a 6-digit code\n\n' +
+      '*Step 1:* Scan the QR code, or enter this key manually:\n' +
+      `\`${secret}\`\n\n` +
+      '*Step 2:* After adding, enter the 6-digit code shown in your app\n\n' +
       '*Step 3:* Send me the 6-digit code to verify\n\n' +
       '💡 *Tip:* The code changes every 30 seconds';
 
@@ -138,7 +139,10 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
       {
         caption: message,
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', '2fa_menu')]]),
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔑 Manual Key', '2fa_show_key')],
+          [Markup.button.callback('❌ Cancel', '2fa_menu')],
+        ]),
       }
     );
 
@@ -245,6 +249,56 @@ export async function handleVerifyTwoFactorSetup(
   } catch (error) {
     logger.error('Error verifying 2FA setup:', error);
     await ctx.reply('❌ An error occurred while verifying your code.');
+  }
+}
+
+/**
+ * Show manual setup key (alternative to QR code)
+ */
+export async function handleShowManualKey(ctx: Context): Promise<void> {
+  try {
+    await ctx.answerCbQuery();
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) {
+      await ctx.reply('❌ Could not identify your Telegram account.');
+      return;
+    }
+
+    const setupData = twoFactorSetupCache.get(telegramId);
+    if (!setupData || Date.now() - setupData.timestamp > 10 * 60 * 1000) {
+      twoFactorSetupCache.delete(telegramId!);
+      await ctx.reply(
+        '❌ *Setup Expired*\n\nYour 2FA setup session has expired. Please start again.',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔐 2FA Settings', '2fa_menu')]]),
+        }
+      );
+      return;
+    }
+
+    // Format secret in groups of 4 for easier manual entry
+    const formattedSecret = setupData.secret.match(/.{1,4}/g)?.join(' ') || setupData.secret;
+
+    const message =
+      '🔑 *Manual 2FA Setup*\n\n' +
+      'In Google Authenticator or any TOTP app:\n\n' +
+      '1️⃣ Open the app → tap *"+"* or *"Add account"*\n' +
+      '2️⃣ Select *"Enter a setup key"*\n' +
+      '3️⃣ Enter any name for the account\n' +
+      '4️⃣ Copy and paste the key below:\n\n' +
+      `\`${formattedSecret}\`\n\n` +
+      '5️⃣ After adding, send me the *6-digit code* shown in your app\n\n' +
+      '💡 Key type: *Time-based (TOTP)*';
+
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', '2fa_menu')]]),
+    });
+  } catch (error) {
+    logger.error('Error showing manual key:', error);
+    await ctx.reply('❌ An error occurred.');
   }
 }
 

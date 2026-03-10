@@ -57,6 +57,10 @@ model User {
   referralClaimable   Float    @default(0)    // Accumulated claimable earnings (USD)
   referralEarnedTotal Float    @default(0)    // Total lifetime referral earnings (USD)
 
+  // Cashback system (10% of platform fee returned to the trader)
+  cashbackClaimable   Float    @default(0)    // Accumulated claimable cashback (USD)
+  cashbackEarnedTotal Float    @default(0)    // Total lifetime cashback earned (USD)
+
   // Copy trading
   copySubscriptions CopySubscription[]
   copiedTrades      CopiedTrade[]
@@ -84,12 +88,17 @@ model CopySubscription {
   fixedAmount    Float?   // fixed USD amount
   multiplier     Float?   // proportional multiplier (0.1–5.0)
 
+  // Buy method: 'fixed' | 'exact' | 'percentage' | 'portfolio'
+  buyMethod      String   @default("fixed")
+
   // Stop condition
   autoStopBelowBalance Float @default(1.0)
 
   // Take Profit / Stop Loss (per-subscription)
-  takeProfitPct Float?   // e.g. 50.0 → sell when +50% from entry
-  stopLossPct   Float?   // e.g. 25.0 → sell when −25% from entry
+  takeProfitPct   Float?   // e.g. 50.0 → sell when +50% from entry
+  stopLossPct     Float?   // e.g. 25.0 → sell when −25% from entry
+  stopLossFixed   Float?   // sell if price drops to this (cents, e.g. 15 = 15¢)
+  takeProfitFixed Float?   // sell if price reaches this (cents, e.g. 85 = 85¢)
 
   // Extended settings (manage page)
   isPaused             Boolean @default(false)  // temporarily paused (isActive remains true)
@@ -97,8 +106,27 @@ model CopySubscription {
   slippage             Float   @default(10.0)   // max slippage % for copied orders
   priceMin             Float?                   // skip trades priced below this (cents)
   priceMax             Float?                   // skip trades priced above this (cents)
-  singleTradeMax       Float?                   // max USD per single copied trade
+  singleTradeMax       Float?                   // max USD per single copied trade (maxBuyAmount)
+  minBuyAmount         Float?                   // min USD per single BUY
+  maxSpendPerMarket    Float?                   // max USD spend per single market condition
+  maxSpendTotal        Float?                   // lifetime max total spend
   dailySpendMax        Float?                   // max USD to spend per day on this subscription
+
+  // Market filters
+  minTriggerPrice Float?   // only copy if price >= X cents
+  maxTriggerPrice Float?   // only copy if price <= X cents
+  maxDaysOut      Int?     // skip markets expiring > N days
+  minLiquidity    Float?   // min liquidity in USD
+  minVolume       Float?   // min volume in USD
+  categories      String?  // comma-separated category list or null=all
+
+  // Trade behavior
+  followBuys     Boolean  @default(true)   // follow leader's BUY trades
+  copySells      Boolean  @default(true)   // copy leader's SELL trades
+  buyOnSells     Boolean  @default(false)  // BUY when leader SELLs
+  counterTrade   Boolean  @default(false)  // take opposite side of leader
+  limitMode      Boolean  @default(false)  // use GTC limit orders instead of FAK market
+  copySide       String   @default("both") // 'both' | 'yes' | 'no'
 
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())

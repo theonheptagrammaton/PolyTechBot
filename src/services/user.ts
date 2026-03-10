@@ -328,6 +328,82 @@ export async function getAllUsers(): Promise<User[]> {
 }
 
 /**
+ * Replaces the user's wallet with a new private key (import wallet flow).
+ * Re-derives Polymarket proxy via CREATE2 — if the wallet was previously used on
+ * Polymarket the same proxy address is reused automatically.
+ */
+export async function replaceUserWallet(
+  userId: string,
+  privateKey: string,
+): Promise<{ walletAddress: string; polymarketProxyAddress: string }> {
+  const { getWalletFromPrivateKey } = await import('./wallet');
+  const eoaAddress = getWalletFromPrivateKey(privateKey).address;
+
+  // Duplicate-wallet check: another user must not own this EOA
+  const existing = await prisma.user.findFirst({
+    where: { walletAddress: eoaAddress, NOT: { id: userId } },
+  });
+  if (existing) {
+    throw new Error('This wallet address is already in use by another account.');
+  }
+
+  logger.info(`[importWallet] Setting up Polymarket account for EOA: ${eoaAddress}`);
+  const setup = await setupPolymarketAccount(privateKey);
+  logger.info(`[importWallet] Proxy: ${setup.proxyAddress}, API key: ${setup.apiKey.substring(0, 10)}...`);
+
+  const encryptedPrivateKey  = encrypt(privateKey);
+  const encryptedApiKey      = encrypt(setup.apiKey);
+  const encryptedApiSecret   = encrypt(setup.apiSecret);
+  const encryptedPassphrase  = encrypt(setup.passphrase);
+
+  // Fetch the old user record so we can invalidate its cache keys
+  const oldUser = await prisma.user.findUnique({ where: { id: userId } });
+
+  const updatedUser = await prisma.user.update({
+    where: { id: userId },
+    data: {
+      walletAddress:         eoaAddress,
+      encryptedPrivateKey,
+      polymarketProxyAddress: setup.proxyAddress,
+      depositAddressEvm:     setup.depositAddresses.evm,
+      depositAddressSvm:     setup.depositAddresses.svm,
+      depositAddressBtc:     setup.depositAddresses.btc,
+      depositAddressTvm:     setup.depositAddresses.tvm,
+      encryptedApiKey,
+      encryptedApiSecret,
+      encryptedPassphrase,
+      tradingEnabled:        false, // will be re-enabled by background job
+    },
+  });
+
+  // Invalidate old cache keys (old wallet address etc.)
+  if (oldUser) await invalidateUserCache(oldUser);
+
+  // Cache fresh record
+  await Promise.all([
+    redisCache.set(`user:telegram:${updatedUser.telegramId}`, updatedUser, 3600),
+    redisCache.set(`user:wallet:${updatedUser.walletAddress}`, updatedUser, 3600),
+    redisCache.set(`user:id:${updatedUser.id}`, updatedUser, 3600),
+  ]);
+
+  // Re-enable trading in the background (ERC-20 approval)
+  const { enableTrading } = await import('./deposit');
+  enableTrading(encryptedPrivateKey)
+    .then(async (result) => {
+      if (result.success) {
+        await prisma.user.update({ where: { id: userId }, data: { tradingEnabled: true } });
+        await invalidateUserCache(updatedUser);
+        logger.info(`[importWallet] Trading re-enabled for user ${userId}`);
+      } else {
+        logger.warn(`[importWallet] Could not re-enable trading for user ${userId}`);
+      }
+    })
+    .catch((err) => logger.error('[importWallet] enableTrading failed (non-blocking):', err));
+
+  return { walletAddress: eoaAddress, polymarketProxyAddress: setup.proxyAddress };
+}
+
+/**
  * Gets user count
  */
 export async function getUserCount(): Promise<number> {

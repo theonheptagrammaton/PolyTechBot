@@ -6,11 +6,9 @@ import { sendPage } from '../../utils/telegram';
 import {
   getAllBalances,
   getChainBalance,
-  approveAndDepositWithRelayer,
   formatBalance,
 } from '../../services/deposit';
-import { updateUserProxyAddress } from '../../services/polymarket';
-import { decrypt } from '../../utils/encryption';
+import { ce, EMOJI } from '../../utils/customEmoji';
 
 /**
  * Shows deposit menu
@@ -78,7 +76,51 @@ export async function handleDepositChain(
       return;
     }
 
-    // Get address based on chain
+    // Polygon and Ethereum/Arbitrum/Base/Optimism deposits use the Bridge API address.
+    // Bridge auto-relays to the user's Polymarket proxy — no bot action needed.
+    if (chain === 'polygon' || chain === 'ethereum') {
+      if (!user.depositAddressEvm) {
+        await sendPage(ctx,
+          '❌ *Deposit Address Not Available*\n\n' +
+          'Your deposit address is not yet configured. Please contact support.',
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
+          }
+        );
+        return;
+      }
+      const chainLabel = chain === 'polygon'
+        ? '🟣 *Deposit USDC — Polygon*'
+        : '🔵 *Deposit USDC — Ethereum / Arbitrum / Base / Optimism*';
+      const chainNote = chain === 'polygon'
+        ? '   _(Polygon USDC or USDC.e)_'
+        : '   _(Ethereum, Arbitrum, Base, Optimism)_';
+      let msg = `${chainLabel}\n\n`;
+      msg += '*Your Bridge Deposit Address:*\n';
+      msg += `\`${user.depositAddressEvm}\`\n\n`;
+      msg += '📝 *Instructions:*\n';
+      msg += '1. Send USDC to the address above\n';
+      msg += `${chainNote}\n`;
+      msg += '2. Bridge will automatically relay funds to your Polymarket account\n';
+      msg += '3. Wait 1–2 minutes for confirmation\n\n';
+      msg += '💡 *Minimum:* $10 USDC\n';
+      msg += '⚡ No action required after sending — Bridge handles the rest.';
+      await sendPage(ctx, msg, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true },
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('« Back', 'deposit_menu')],
+          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        ]),
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+      logger.info(`Deposit ${chain} (bridge) instructions shown to user: ${telegramId}`);
+      return;
+    }
+
+    // Get address based on chain (Solana only reaches here)
     let address: string;
     if (chain === 'solana') {
       if (!user.depositAddressSvm) {
@@ -95,7 +137,12 @@ export async function handleDepositChain(
       }
       address = user.depositAddressSvm;
     } else {
-      address = user.walletAddress;
+      // Fallback (should not be reached)
+      await sendPage(ctx, '❌ Unsupported chain.', {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
+      });
+      return;
     }
 
     // Chain info
@@ -106,19 +153,13 @@ export async function handleDepositChain(
         token: 'USDC (PoS)',
         explorer: 'https://polygonscan.com',
       },
-      ethereum: {
-        name: 'Ethereum',
-        icon: '🔵',
-        token: 'USDC',
-        explorer: 'https://etherscan.io',
-      },
       solana: {
         name: 'Solana',
         icon: '🟢',
         token: 'USDC (SPL)',
         explorer: 'https://solscan.io',
       },
-    };
+    } as Record<string, { name: string; icon: string; token: string; explorer: string }>;
 
     const info = chainInfo[chain];
 
@@ -179,6 +220,30 @@ export async function handleCheckBalance(
       return;
     }
 
+    // Polygon and Ethereum deposits use Bridge API — no balance check needed, Bridge auto-relays.
+    if (chain === 'polygon' || chain === 'ethereum') {
+      const backAction = chain === 'polygon' ? 'deposit_polygon' : 'deposit_ethereum';
+      const chainLabel = chain === 'polygon'
+        ? '🟣 <b>Polygon Deposit</b>'
+        : '🔵 <b>Ethereum / Arbitrum / Base / Optimism Deposit</b>';
+      await sendPage(ctx,
+        `${chainLabel}\n\n` +
+        'Bridge automatically relays your USDC to Polymarket.\n\n' +
+        ce(EMOJI.loading, '⏳') + ' If you already sent funds, please wait 1–2 minutes.\n' +
+        'No further action is required.',
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('« Back to Deposit', backAction)],
+            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          ]),
+        }
+      ).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+      return;
+    }
+
     let address: string;
     if (chain === 'solana') {
       if (!user.depositAddressSvm) {
@@ -187,7 +252,12 @@ export async function handleCheckBalance(
       }
       address = user.depositAddressSvm;
     } else {
-      address = user.walletAddress;
+      // Fallback (should not be reached)
+      await sendPage(ctx, '❌ Unsupported chain.', {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
+      });
+      return;
     }
 
     // Get balance
@@ -317,7 +387,7 @@ export async function handleCheckAllBalances(ctx: Context): Promise<void> {
  */
 export async function handleApproveDeposit(
   ctx: Context,
-  chain: 'polygon' | 'ethereum' | 'solana'
+  _chain: 'polygon' | 'ethereum' | 'solana'
 ): Promise<void> {
   try {
     await ctx.answerCbQuery();
@@ -334,63 +404,18 @@ export async function handleApproveDeposit(
       return;
     }
 
-    // Only Polygon supported for Polymarket deposit
-    if (chain !== 'polygon') {
-      await sendPage(ctx,
-        '⚠️ *Polymarket Only Supports Polygon*\n\n' +
-        'To deposit to Polymarket, you need USDC on Polygon.\n\n' +
-        'Please:\n' +
-        '1. Bridge your USDC to Polygon, or\n' +
-        '2. Send Polygon USDC directly',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
-        }
-      );
-      return;
-    }
-
-    const address = user.walletAddress;
-
-    // Get balance
-    const balance = await getChainBalance(chain, address);
-    const balanceNum = parseFloat(balance.balance);
-
-    if (balanceNum < 10) {
-      await sendPage(ctx,
-        '⚠️ *Insufficient Balance*\n\n' +
-        `Minimum deposit is $10.\n` +
-        `You have: ${formatBalance(balance.balance)}\n\n` +
-        'Please send more USDC first.',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('« Back', `deposit_${chain}`)]]),
-        }
-      );
-      return;
-    }
-
-    // Show confirmation
-    let message = '🚀 *Confirm Gasless Deposit*\n\n';
-    message += `Chain: *Polygon*\n`;
-    message += `Amount: *${formatBalance(balance.balance)}*\n\n`;
-    message += '🔥 *What happens:*\n';
-    message += '1. Approve USDC for Polymarket\n';
-    message += '2. Transfer funds to your Polymarket account\n\n';
-    message += '💰 *Gas fees: $0* (Polymarket pays for you!)\n';
-    message += '⚡ *Powered by Relayer API*\n\n';
-    message += '✅ Ready to proceed?';
-
-    await sendPage(ctx, message, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Yes, Deposit Now', `deposit_confirm_${chain}`)],
-        [Markup.button.callback('❌ Cancel', `deposit_${chain}`)],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-      ]),
-    });
-
-    logger.info(`Deposit confirmation shown to user: ${telegramId}`);
+    // All chains use Bridge API — no manual approve needed
+    await sendPage(ctx,
+      '⚡ <b>Bridge Handles This Automatically</b>\n\n' +
+      'Your USDC is relayed directly to your Polymarket account by Bridge.\n\n' +
+      ce(EMOJI.loading, '⏳') + ' Please wait 1–2 minutes after sending.\n' +
+      'No further action is required.',
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
+      }
+    );
+    logger.info(`Deposit approve (bridge redirect) for user: ${telegramId}`);
   } catch (error) {
     logger.error('Error in approve deposit:', error);
     await ctx.reply('❌ An error occurred.');
@@ -402,7 +427,7 @@ export async function handleApproveDeposit(
  */
 export async function handleConfirmDeposit(
   ctx: Context,
-  chain: 'polygon' | 'ethereum' | 'solana'
+  _chain: 'polygon' | 'ethereum' | 'solana'
 ): Promise<void> {
   try {
     await ctx.answerCbQuery();
@@ -419,78 +444,18 @@ export async function handleConfirmDeposit(
       return;
     }
 
-    // Send processing message
+    // All chains use Bridge API — no manual confirm needed
     await sendPage(ctx,
-      '⏳ *Processing Gasless Deposit*\n\n' +
-      '🔥 Using Polymarket Relayer (No Gas Fee!)\n' +
-      '1️⃣ Approving and depositing...\n' +
-      '⏳ Please wait, this may take 30-60 seconds.',
-      { parse_mode: 'Markdown' }
+      '⚡ <b>Bridge Handles This Automatically</b>\n\n' +
+      'Your USDC is relayed directly to your Polymarket account by Bridge.\n\n' +
+      ce(EMOJI.loading, '⏳') + ' Please wait 1–2 minutes after sending.\n' +
+      'No further action is required.',
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
+      }
     );
-
-    const address = user.walletAddress;
-    const balance = await getChainBalance(chain, address);
-    const amount = balance.balance;
-
-    try {
-      // Gasless approve + deposit via Relayer API
-      // Polymarket pays ALL gas fees!
-      const txHash = await approveAndDepositWithRelayer(user.encryptedPrivateKey, amount);
-
-      // Success!
-      let message = '✅ *Deposit Successful!*\n\n';
-      message += `Amount: *${formatBalance(amount)}*\n`;
-      message += `Chain: *Polygon*\n\n`;
-      message += '🎉 Your funds are now available for trading on Polymarket!\n\n';
-      message += '🔥 *Gas Fee: $0* (Polymarket paid for you!)\n\n';
-
-      if (txHash && txHash !== 'relayer_submitted') {
-        message += `🔍 [View Transaction](https://polygonscan.com/tx/${txHash})`;
-      } else {
-        message += '✅ Transaction submitted via Relayer';
-      }
-
-      await sendPage(ctx, message, {
-        parse_mode: 'Markdown',
-        link_preview_options: { is_disabled: true },
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('💼 View Wallet', 'wallet_page')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-        ]),
-      });
-
-      logger.info(`Deposit successful for user ${telegramId}: ${amount} USDC`);
-
-      // Fetch and update proxy address (async, don't block)
-      // After first deposit, Polymarket creates the proxy wallet
-      if (!user.polymarketProxyAddress) {
-        const privateKey = decrypt(user.encryptedPrivateKey);
-        updateUserProxyAddress(user.id, privateKey)
-          .then((proxyAddress) => {
-            if (proxyAddress) {
-              logger.info(`Proxy address fetched and saved for user ${user.id}: ${proxyAddress}`);
-            } else {
-              logger.debug('Proxy address not yet available for user ' + user.id);
-            }
-          })
-          .catch((err) => {
-            logger.error('Error fetching proxy address:', err);
-          });
-      }
-    } catch (error: any) {
-      logger.error('Error executing deposit:', error);
-
-      logger.error('[deposit] approveAndDepositWithRelayer failed:', error);
-      await sendPage(ctx,
-        '❌ *Deposit Failed*\n\n' +
-        'An error occurred while processing your deposit.\n\n' +
-        'Your funds are still in your wallet. Please try again or contact support.',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'deposit_menu')]]),
-        }
-      );
-    }
+    logger.info(`Deposit confirm (bridge redirect) for user: ${telegramId}`);
   } catch (error) {
     logger.error('Error in confirm deposit:', error);
     await ctx.reply('❌ An error occurred.');

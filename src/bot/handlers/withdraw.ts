@@ -3,8 +3,26 @@ import { Markup } from 'telegraf';
 import { ethers } from 'ethers';
 import { logger } from '../../utils/logger';
 import { getUserByTelegramId } from '../../services/user';
-import { getTokenBalance, executeWithdraw } from '../../services/withdraw';
+import { getTokenBalance, executeWithdraw, executeBridgeWithdraw } from '../../services/withdraw';
 import { sendPage } from '../../utils/telegram';
+import { ce, EMOJI } from '../../utils/customEmoji';
+import { RedisBackedState } from '../../utils/redisState';
+
+// ─── Cross-chain config ──────────────────────────────────────────────────────
+
+const CROSS_CHAIN_CONFIG: Record<string, {
+  label: string;
+  icon: string;
+  addressType: 'evm' | 'svm';
+  backAction: string;
+}> = {
+  solana:   { label: 'Solana',               icon: '🟣', addressType: 'svm', backAction: 'wd_chain_solana' },
+  ethereum: { label: 'Ethereum',             icon: '🔵', addressType: 'evm', backAction: 'wd_chain_ethereum' },
+  bsc:      { label: 'Binance Smart Chain',  icon: '🟡', addressType: 'evm', backAction: 'wd_chain_bsc' },
+};
+
+// USDC.e on Polygon (source token for all cross-chain withdrawals)
+const USDC_E = { address: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', decimals: 6, symbol: 'USDC.e' };
 
 // ─── Token config ───────────────────────────────────────────────────────────
 
@@ -50,7 +68,7 @@ interface WithdrawState {
   timestamp: number;
 }
 
-export const withdrawState = new Map<string, WithdrawState>();
+export const withdrawState = new RedisBackedState<WithdrawState>('withdraw', 600);
 
 // R6: Periodic cleanup of abandoned state entries (every 30 min, remove entries > 10 min old)
 setInterval(() => {
@@ -90,37 +108,152 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
   try {
     await ctx.answerCbQuery();
 
+    // ── Cross-chain: fetch USDC.e balance, go straight to address input ──────
     if (chain !== 'polygon') {
-      await sendPage(ctx,
-        `⚠️ *${chainLabel(chain)} — Coming Soon*\n\n` +
-        'Cross-chain withdrawals are not yet available.\n\n' +
-        'To withdraw to other chains:\n' +
-        '1. Withdraw to your Polygon wallet first\n' +
-        '2. Use a bridge service (e.g. Stargate, Across)',
-        {
+      const crossChain = CROSS_CHAIN_CONFIG[chain];
+      if (!crossChain) return;
+
+      const telegramId = ctx.from?.id.toString();
+      if (!telegramId) return;
+
+      const user = await getUserByTelegramId(telegramId);
+      if (!user?.polymarketProxyAddress) {
+        await sendPage(ctx, '❌ Wallet not set up. Use /start first.', {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('← Back', 'withdraw_menu')],
-            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-          ]),
+          ...Markup.inlineKeyboard([[Markup.button.callback('← Back', 'withdraw_menu')]]),
+        });
+        return;
+      }
+
+      let balance = '0.0000';
+      try {
+        const { formatted } = await getTokenBalance(
+          user.polymarketProxyAddress,
+          USDC_E.address,
+          USDC_E.decimals,
+        );
+        balance = formatted;
+      } catch (e) {
+        logger.warn('[withdraw] USDC.e balance fetch failed:', e);
+      }
+
+      const text =
+        `${crossChain.icon} *Withdraw USDC → ${crossChain.label}*\n\n` +
+        `💵 *Available:* $${balance} USDC.e\n\n` +
+        `📍 Please enter your ${crossChain.label} destination address:`;
+
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('← Back', 'withdraw_menu')],
+        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      ]);
+
+      const cbMsg = ctx.callbackQuery && 'message' in ctx.callbackQuery
+        ? ctx.callbackQuery.message : null;
+      const chatId = ctx.chat?.id;
+      let msgId: number | undefined;
+
+      if (cbMsg && 'photo' in cbMsg) {
+        const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+        msgId = sent.message_id;
+      } else if (cbMsg) {
+        try {
+          await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+          msgId = cbMsg.message_id;
+        } catch {
+          const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+          msgId = sent.message_id;
         }
-      );
+      } else {
+        const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+        msgId = sent.message_id;
+      }
+
+      withdrawState.set(telegramId, {
+        chain: chain as 'solana' | 'ethereum' | 'bsc',
+        token: 'USDC.e',
+        tokenAddress: USDC_E.address,
+        tokenDecimals: USDC_E.decimals,
+        tokenSymbol: USDC_E.symbol,
+        tokenAmountLabel: 'USD',
+        balance,
+        chatId,
+        msgId,
+        step: 'enter_address',
+        timestamp: Date.now(),
+      });
       return;
     }
 
-    await sendPage(ctx,
-      '🟢 *Polygon — Select Token*\n\nChoose which token you want to receive:',
-      {
+    // ── Polygon: direct USDC.e withdrawal (same UX as cross-chain) ──────────
+    const telegramIdPoly = ctx.from?.id.toString();
+    if (!telegramIdPoly) return;
+
+    const userPoly = await getUserByTelegramId(telegramIdPoly);
+    if (!userPoly?.polymarketProxyAddress) {
+      await sendPage(ctx, '❌ Wallet not set up. Use /start first.', {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('USDC',   'wd_token_USDC')],
-          [Markup.button.callback('POL',    'wd_token_POL')],
-          [Markup.button.callback('USDC.e', 'wd_token_USDC.e')],
-          [Markup.button.callback('USDT',   'wd_token_USDT')],
-          [Markup.button.callback('← Back', 'withdraw_menu')],
-        ]),
+        ...Markup.inlineKeyboard([[Markup.button.callback('← Back', 'withdraw_menu')]]),
+      });
+      return;
+    }
+
+    let balancePoly = '0.0000';
+    try {
+      const { formatted } = await getTokenBalance(
+        userPoly.polymarketProxyAddress,
+        USDC_E.address,
+        USDC_E.decimals,
+      );
+      balancePoly = formatted;
+    } catch (e) {
+      logger.warn('[withdraw] Polygon USDC.e balance fetch failed:', e);
+    }
+
+    const polyText =
+      `🟢 *Withdraw USDC.e — Polygon*\n\n` +
+      `💵 *Available:* $${balancePoly} USDC.e\n` +
+      `🌐 *Token:*\n\`${USDC_E.address}\`\n\n` +
+      `📍 Please enter your Polygon wallet address:`;
+
+    const polyKeyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('← Back', 'withdraw_menu')],
+      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+    ]);
+
+    const cbMsgPoly = ctx.callbackQuery && 'message' in ctx.callbackQuery
+      ? ctx.callbackQuery.message : null;
+    const chatIdPoly = ctx.chat?.id;
+    let msgIdPoly: number | undefined;
+
+    if (cbMsgPoly && 'photo' in cbMsgPoly) {
+      const sent = await ctx.reply(polyText, { parse_mode: 'Markdown', ...polyKeyboard });
+      msgIdPoly = sent.message_id;
+    } else if (cbMsgPoly) {
+      try {
+        await ctx.editMessageText(polyText, { parse_mode: 'Markdown', ...polyKeyboard });
+        msgIdPoly = cbMsgPoly.message_id;
+      } catch {
+        const sent = await ctx.reply(polyText, { parse_mode: 'Markdown', ...polyKeyboard });
+        msgIdPoly = sent.message_id;
       }
-    );
+    } else {
+      const sent = await ctx.reply(polyText, { parse_mode: 'Markdown', ...polyKeyboard });
+      msgIdPoly = sent.message_id;
+    }
+
+    withdrawState.set(telegramIdPoly, {
+      chain: 'polygon',
+      token: 'USDC.e',
+      tokenAddress: USDC_E.address,
+      tokenDecimals: USDC_E.decimals,
+      tokenSymbol: USDC_E.symbol,
+      tokenAmountLabel: 'USD',
+      balance: balancePoly,
+      chatId: chatIdPoly,
+      msgId: msgIdPoly,
+      step: 'enter_address',
+      timestamp: Date.now(),
+    });
   } catch (error) {
     logger.error('[withdraw] handleWithdrawChain error:', error);
   }
@@ -221,8 +354,14 @@ export async function handleWithdrawTextInput(ctx: Context, text: string): Promi
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const state = withdrawState.get(telegramId);
+  const state = await withdrawState.get(telegramId);
   if (!state) return;
+
+  // Expire stale state (10 min)
+  if (Date.now() - state.timestamp > 10 * 60 * 1000) {
+    withdrawState.delete(telegramId);
+    return;
+  }
 
   // Try to delete user's text message to keep chat clean
   try {
@@ -238,25 +377,49 @@ export async function handleWithdrawTextInput(ctx: Context, text: string): Promi
 
 // ─── Address input ───────────────────────────────────────────────────────────
 
+function isValidSolanaAddress(addr: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
+}
+
 async function handleAddressInput(
   ctx: Context,
   telegramId: string,
   state: WithdrawState,
   address: string
 ): Promise<void> {
-  // Validate Ethereum/Polygon address
-  if (!ethers.utils.isAddress(address)) {
-    await editWithdrawMessage(ctx, state,
-      `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
-      `🌐 *Token Address:*\n\`${TOKEN_CONTRACT_DISPLAY[state.token!]}\`\n\n` +
-      `❌ *Invalid address.* Please enter a valid Polygon wallet address:`,
-      [[Markup.button.callback('← Back', `wd_token_${state.token}`)]]
-    );
-    return;
-  }
+  const isCrossChain = state.chain !== 'polygon';
+  const crossChain = isCrossChain ? CROSS_CHAIN_CONFIG[state.chain] : null;
 
-  const checksummed = ethers.utils.getAddress(address);
+  // Validate address format
+  let checksummed: string;
+  if (isCrossChain && crossChain?.addressType === 'svm') {
+    // Solana address validation
+    if (!isValidSolanaAddress(address)) {
+      await editWithdrawMessage(ctx, state,
+        `${crossChain.icon} <b>Withdraw USDC → ${crossChain.label}</b>\n\n` +
+        `💵 <b>Available:</b> $${state.balance} USDC.e\n\n` +
+        `❌ <b>Invalid Solana address.</b> Please enter a valid Solana wallet address:`,
+        [[Markup.button.callback('← Back', 'withdraw_menu')]]
+      );
+      return;
+    }
+    checksummed = address.trim();
+  } else {
+    // EVM address validation (Polygon, Ethereum, BSC)
+    if (!ethers.utils.isAddress(address)) {
+      const backBtn = Markup.button.callback('← Back', 'withdraw_menu');
+      const label = isCrossChain
+        ? `${crossChain!.icon} <b>Withdraw USDC → ${crossChain!.label}</b>`
+        : `🟢 <b>Withdraw USDC.e — Polygon</b>`;
+      const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC.e`;
+      await editWithdrawMessage(ctx, state,
+        `${label}\n\n${balanceLine}\n\n❌ <b>Invalid address.</b> Please enter a valid EVM wallet address:`,
+        [[backBtn]]
+      );
+      return;
+    }
+    checksummed = ethers.utils.getAddress(address);
+  }
 
   // Update state
   state.destinationAddress = checksummed;
@@ -265,12 +428,18 @@ async function handleAddressInput(
   withdrawState.set(telegramId, state);
 
   const amountLabel = state.tokenAmountLabel || 'USD';
+  const isCrossChainAddrDone = state.chain !== 'polygon';
+  const crossChainAddrDone = isCrossChainAddrDone ? CROSS_CHAIN_CONFIG[state.chain] : null;
+
+  const headerLine = crossChainAddrDone
+    ? `${crossChainAddrDone.icon} <b>Withdraw USDC → ${crossChainAddrDone.label}</b>`
+    : `🟢 <b>Withdraw USDC.e — Polygon</b>`;
+  const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC.e`;
 
   await editWithdrawMessage(ctx, state,
-    `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-    `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
-    `🌐 *Token Address:*\n\`${TOKEN_CONTRACT_DISPLAY[state.token!]}\`\n` +
-    `📍 *Destination:*\n\`${checksummed}\`\n\n` +
+    `${headerLine}\n\n` +
+    `${balanceLine}\n` +
+    `📍 <b>Destination:</b>\n<code>${checksummed}</code>\n\n` +
     `💰 Please enter the amount to withdraw (in ${amountLabel}):`,
     [[Markup.button.callback('← Cancel', 'wd_cancel')]]
   );
@@ -299,12 +468,18 @@ async function handleAmountInput(
   })();
   const amount = parseFloat(normalized);
 
+  const isCrossChainAmt = state.chain !== 'polygon';
+  const crossChainAmt = isCrossChainAmt ? CROSS_CHAIN_CONFIG[state.chain] : null;
+  const headerAmt = crossChainAmt
+    ? `${crossChainAmt.icon} <b>Withdraw USDC → ${crossChainAmt.label}</b>`
+    : `🟢 <b>Withdraw USDC.e — Polygon</b>`;
+  const balanceAmt = `💵 <b>Available:</b> $${state.balance} USDC.e`;
+
   if (isNaN(amount) || amount <= 0) {
     await editWithdrawMessage(ctx, state,
-      `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
-      `📍 *Destination:*\n\`${state.destinationAddress}\`\n\n` +
-      `❌ *Invalid amount.* Please enter a positive number:`,
+      `${headerAmt}\n\n${balanceAmt}\n` +
+      `📍 <b>Destination:</b>\n<code>${state.destinationAddress}</code>\n\n` +
+      `❌ <b>Invalid amount.</b> Please enter a positive number:`,
       [[Markup.button.callback('← Cancel', 'wd_cancel')]]
     );
     return;
@@ -313,10 +488,9 @@ async function handleAmountInput(
   const available = parseFloat(state.balance || '0');
   if (amount > available) {
     await editWithdrawMessage(ctx, state,
-      `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* ${formatBalance(state.balance, state.tokenSymbol)}\n` +
-      `📍 *Destination:*\n\`${state.destinationAddress}\`\n\n` +
-      `❌ *Insufficient balance.* Max: ${state.balance} ${state.tokenSymbol}\n\nPlease enter a smaller amount:`,
+      `${headerAmt}\n\n${balanceAmt}\n` +
+      `📍 <b>Destination:</b>\n<code>${state.destinationAddress}</code>\n\n` +
+      `❌ <b>Insufficient balance.</b> Max: ${state.balance} ${state.tokenSymbol}\n\nPlease enter a smaller amount:`,
       [[Markup.button.callback('← Cancel', 'wd_cancel')]]
     );
     return;
@@ -324,9 +498,9 @@ async function handleAmountInput(
 
   // Show processing state
   await editWithdrawMessage(ctx, state,
-    `🏦 *Withdraw ${state.tokenSymbol} (Polygon)*\n\n` +
-    `⏳ Processing withdrawal of *${amount} ${state.tokenSymbol}*...\n` +
-    `📍 To: \`${state.destinationAddress}\``,
+    `${headerAmt}\n\n` +
+    `${ce(EMOJI.loading, '⏳')} Processing withdrawal of <b>${amount} ${state.tokenSymbol}</b>...\n` +
+    `📍 To: <code>${state.destinationAddress}</code>`,
     []
   );
 
@@ -344,28 +518,40 @@ async function handleAmountInput(
   withdrawState.delete(telegramId);
 
   try {
+    const isCrossChainExec = state.chain !== 'polygon';
+    const crossChainExec = isCrossChainExec ? CROSS_CHAIN_CONFIG[state.chain] : null;
 
-    const result = await executeWithdraw({
-      encryptedPrivateKey: user.encryptedPrivateKey,
-      proxyAddress: user.polymarketProxyAddress,
-      tokenAddress: state.tokenAddress!,
-      tokenDecimals: state.tokenDecimals!,
-      destinationAddress: state.destinationAddress!,
-      amount,
-    });
+    const result = isCrossChainExec
+      ? await executeBridgeWithdraw({
+          encryptedPrivateKey: user.encryptedPrivateKey,
+          proxyAddress: user.polymarketProxyAddress,
+          chain: state.chain,
+          recipientAddr: state.destinationAddress!,
+          amount,
+        })
+      : await executeWithdraw({
+          encryptedPrivateKey: user.encryptedPrivateKey,
+          proxyAddress: user.polymarketProxyAddress,
+          tokenAddress: state.tokenAddress!,
+          tokenDecimals: state.tokenDecimals!,
+          destinationAddress: state.destinationAddress!,
+          amount,
+        });
 
     if (result.success) {
       const statusLine = result.pending
-        ? '⏳ *Status:* Pending confirmation...'
-        : '✅ *Status:* Confirmed';
+        ? ce(EMOJI.loading, '⏳') + ' <b>Status:</b> Pending confirmation...'
+        : '✅ <b>Status:</b> Confirmed';
+      const chainNote = crossChainExec
+        ? `\n<i>Bridge is delivering USDC to your ${crossChainExec.label} address (1–2 min)</i>`
+        : `\n<i>You can track your transaction on Polygonscan</i>`;
 
       await editWithdrawMessage(ctx, state,
-        `✅ *Withdrawal Submitted*\n\n` +
-        `💸 *Amount:* ${amount} ${state.tokenSymbol}\n` +
-        `📍 *To:* \`${state.destinationAddress}\`\n` +
-        `🔗 *Tx:* \`${result.txHash}\`\n` +
-        `${statusLine}\n\n` +
-        `_You can track your transaction on Polygonscan_`,
+        `✅ <b>Withdrawal Submitted</b>\n\n` +
+        `💸 <b>Amount:</b> ${amount} ${state.tokenSymbol}\n` +
+        `📍 <b>To:</b> <code>${state.destinationAddress}</code>\n` +
+        `🔗 <b>Tx:</b> <code>${result.txHash}</code>\n` +
+        `${statusLine}${chainNote}`,
         [
           [Markup.button.callback('💼 My Wallet', 'wallet_page')],
           [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
@@ -373,9 +559,26 @@ async function handleAmountInput(
       );
     } else {
       logger.warn(`[withdraw] Withdrawal failed for user ${telegramId}: ${result.error}`);
+
+      // Build user-friendly reason from the error
+      let reason = '';
+      const err = result.error || '';
+      if (err.includes('invalid recipient address')) {
+        reason = '❗ The destination address format is invalid for this chain.\nPlease check the address and try again.';
+      } else if (err.includes('insufficient') || err.includes('balance')) {
+        reason = '❗ Insufficient balance to complete the withdrawal.';
+      } else if (err.includes('Platform executor not configured')) {
+        reason = '❗ Withdrawal service is not configured. Please try again later.';
+      } else if (err.includes('All RPCs unresponsive')) {
+        reason = '❗ Network is temporarily unavailable. Please try again in a moment.';
+      } else if (err) {
+        reason = `❗ ${err.length > 120 ? err.slice(0, 120) + '…' : err}`;
+      } else {
+        reason = '❗ Please check your balance and destination address, then try again.';
+      }
+
       await editWithdrawMessage(ctx, state,
-        `❌ *Withdrawal Failed*\n\n` +
-        `Please try again or contact support.`,
+        `❌ <b>Withdrawal Failed</b>\n\n${reason}`,
         [
           [Markup.button.callback('🔄 Try Again', 'withdraw_menu')],
           [Markup.button.callback('🏠 Main Menu',  'back_to_menu')],
@@ -385,7 +588,7 @@ async function handleAmountInput(
   } catch (error: any) {
     logger.error('[withdraw] executeWithdraw error:', error);
     await editWithdrawMessage(ctx, state,
-      `❌ *Withdrawal Failed*\n\nAn unexpected error occurred. Please try again.`,
+      `❌ <b>Withdrawal Failed</b>\n\n❗ An unexpected error occurred. Please try again.`,
       [
         [Markup.button.callback('🔄 Try Again', 'withdraw_menu')],
         [Markup.button.callback('🏠 Main Menu',  'back_to_menu')],
@@ -433,13 +636,13 @@ async function editWithdrawMessage(
         undefined,
         text,
         {
-          parse_mode: 'Markdown',
+          parse_mode: 'HTML',
           ...Markup.inlineKeyboard(buttons),
         }
       );
     } else {
       await ctx.reply(text, {
-        parse_mode: 'Markdown',
+        parse_mode: 'HTML',
         ...Markup.inlineKeyboard(buttons),
       });
     }
@@ -450,12 +653,3 @@ async function editWithdrawMessage(
   }
 }
 
-function chainLabel(chain: string): string {
-  const labels: Record<string, string> = {
-    polygon: 'Polygon',
-    solana: 'Solana',
-    ethereum: 'Ethereum',
-    bsc: 'Binance Smart Chain',
-  };
-  return labels[chain] || chain;
-}

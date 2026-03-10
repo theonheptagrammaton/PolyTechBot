@@ -11,7 +11,7 @@ import { logger } from '../utils/logger';
 import { maskSensitiveData } from '../utils/encryption';
 
 // Polygon RPC
-const POLYGON_RPC = 'https://polygon-bor-rpc.publicnode.com';
+const POLYGON_RPC = 'https://rpc.ankr.com/polygon';
 
 // Polymarket Builder Relayer URL (v2) - MUST USE THIS
 const RELAYER_URL = 'https://relayer-v2.polymarket.com';
@@ -22,7 +22,10 @@ const BRIDGE_API_URL = 'https://bridge.polymarket.com';
 
 // Polymarket Contract Addresses (Polygon Mainnet)
 const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const NATIVE_USDC_ADDR = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 const CTF_EXCHANGE_ADDRESS = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+const NEG_RISK_CTF_EXCHANGE_ADDRESS = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+const NEG_RISK_ADAPTER_ADDRESS = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
 const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 
 // Maximum approval amount (unlimited)
@@ -276,46 +279,30 @@ async function enableTradingAutomatically(privateKey: string, _proxyAddress: str
 
     logger.info('Sending approval transactions via Relayer...');
 
-    // 1. USDC Approval to CTFExchange
-    logger.info('Approving USDC for CTFExchange...');
-    const usdcApproveData = encodeApprovalData(CTF_EXCHANGE_ADDRESS, MAX_APPROVAL);
-
-    const usdcTxResponse = await relayClient.execute([
-      {
-        to: USDC_ADDRESS,
-        data: usdcApproveData,
-        value: '0',
-      },
-    ]);
-
-    if (usdcTxResponse) {
-      const usdcResult = await usdcTxResponse.wait();
-      if (usdcResult && usdcResult.transactionHash) {
-        logger.info(`✅ USDC approved - TX: ${usdcResult.transactionHash}`);
+    // Helper to execute + wait + log
+    const execAndWait = async (label: string, calls: { to: string; data: string; value: string }[]) => {
+      const resp = await relayClient.execute(calls);
+      if (resp) {
+        const result = await resp.wait();
+        if (result?.transactionHash) {
+          logger.info(`✅ ${label} - TX: ${result.transactionHash}`);
+        }
       }
-    }
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    };
 
-    // Small delay between transactions
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // 1. USDC approvals (native + USDC.e) for all three exchange contracts
+    await execAndWait('NativeUSDC → CTFExchange', [{ to: NATIVE_USDC_ADDR, data: encodeApprovalData(CTF_EXCHANGE_ADDRESS, MAX_APPROVAL), value: '0' }]);
+    await execAndWait('NativeUSDC → NegRiskCTFExchange', [{ to: NATIVE_USDC_ADDR, data: encodeApprovalData(NEG_RISK_CTF_EXCHANGE_ADDRESS, MAX_APPROVAL), value: '0' }]);
+    await execAndWait('NativeUSDC → NegRiskAdapter', [{ to: NATIVE_USDC_ADDR, data: encodeApprovalData(NEG_RISK_ADAPTER_ADDRESS, MAX_APPROVAL), value: '0' }]);
+    await execAndWait('USDCe → CTFExchange', [{ to: USDC_ADDRESS, data: encodeApprovalData(CTF_EXCHANGE_ADDRESS, MAX_APPROVAL), value: '0' }]);
+    await execAndWait('USDCe → NegRiskCTFExchange', [{ to: USDC_ADDRESS, data: encodeApprovalData(NEG_RISK_CTF_EXCHANGE_ADDRESS, MAX_APPROVAL), value: '0' }]);
+    await execAndWait('USDCe → NegRiskAdapter', [{ to: USDC_ADDRESS, data: encodeApprovalData(NEG_RISK_ADAPTER_ADDRESS, MAX_APPROVAL), value: '0' }]);
 
-    // 2. CTF SetApprovalForAll for CTFExchange
-    logger.info('Setting approval for all CTF tokens...');
-    const ctfApprovalData = encodeSetApprovalForAllData(CTF_EXCHANGE_ADDRESS, true);
-
-    const ctfTxResponse = await relayClient.execute([
-      {
-        to: CTF_ADDRESS,
-        data: ctfApprovalData,
-        value: '0',
-      },
-    ]);
-
-    if (ctfTxResponse) {
-      const ctfResult = await ctfTxResponse.wait();
-      if (ctfResult && ctfResult.transactionHash) {
-        logger.info(`✅ CTF approved - TX: ${ctfResult.transactionHash}`);
-      }
-    }
+    // 2. CTF ERC1155 setApprovalForAll for all three exchange contracts
+    await execAndWait('CTF → CTFExchange', [{ to: CTF_ADDRESS, data: encodeSetApprovalForAllData(CTF_EXCHANGE_ADDRESS, true), value: '0' }]);
+    await execAndWait('CTF → NegRiskCTFExchange', [{ to: CTF_ADDRESS, data: encodeSetApprovalForAllData(NEG_RISK_CTF_EXCHANGE_ADDRESS, true), value: '0' }]);
+    await execAndWait('CTF → NegRiskAdapter', [{ to: CTF_ADDRESS, data: encodeSetApprovalForAllData(NEG_RISK_ADAPTER_ADDRESS, true), value: '0' }]);
 
     logger.info('✅ All approval transactions completed successfully');
   } catch (error: any) {

@@ -31,7 +31,6 @@ export async function handleReferralHub(ctx: Context): Promise<void> {
     await ensureReferralCode(user.id, ctx.from?.username);
 
     const stats = await getReferralStats(user.id, BOT_USERNAME);
-    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(stats.inviteLink)}&text=${encodeURIComponent('Join me on Polymarket and start trading prediction markets! 🚀')}`;
 
     const t1Pct = '25%';
     const t2Pct = '5%';
@@ -76,7 +75,7 @@ export async function handleReferralHub(ctx: Context): Promise<void> {
           ),
         ],
         [
-          Markup.button.url('🔗 Share Link', shareUrl),
+          ({ text: '📋 Copy Link', copy_text: { text: stats.inviteLink } } as any),
           Markup.button.callback('🔄 Refresh', 'referral_hub'),
         ],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
@@ -126,12 +125,12 @@ export async function handleReferralClaim(ctx: Context): Promise<void> {
       });
     } else if (result.pending) {
       const msg =
-        `⏳ *Withdrawal Pending*\n\n` +
-        `Your earnings of *$${result.amount?.toFixed(2)}* have been queued.\n\n` +
+        ce(EMOJI.loading, '⏳') + ` <b>Withdrawal Pending</b>\n\n` +
+        `Your earnings of <b>$${result.amount?.toFixed(2)}</b> have been queued.\n\n` +
         `${result.error}`;
 
       await sendPage(ctx, msg, {
-        parse_mode: 'Markdown',
+        parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('👥 Back to Referrals', 'referral_hub')],
           [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
@@ -139,6 +138,7 @@ export async function handleReferralClaim(ctx: Context): Promise<void> {
       });
     } else {
       await sendPage(ctx, `❌ ${result.error}`, {
+        parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('👥 Back to Referrals', 'referral_hub')],
           [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],

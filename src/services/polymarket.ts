@@ -64,7 +64,7 @@ export async function getPolymarketProxyAddress(privateKey: string): Promise<str
   try {
     logger.info('Checking for existing Polymarket proxy address...');
 
-    const provider = new providers.JsonRpcProvider('https://polygon-bor-rpc.publicnode.com');
+    const provider = new providers.JsonRpcProvider('https://rpc.ankr.com/polygon');
     const wallet = new Wallet(privateKey, provider);
 
     // Create Relayer client to check for proxy address

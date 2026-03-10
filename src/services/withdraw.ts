@@ -2,12 +2,19 @@ import { ethers } from 'ethers';
 import { decrypt } from '../utils/encryption';
 import { config } from '../config';
 import { logger } from '../utils/logger';
+import { getPolygonProvider } from '../utils/provider';
 
-const RPC_URLS = [
-  'https://polygon-rpc.com',
-  'https://rpc-mainnet.matic.network',
-  'https://polygon-bor-rpc.publicnode.com',
-];
+const BRIDGE_API_URL = 'https://bridge.polymarket.com';
+
+// USDC.e on Polygon — always the source token for cross-chain withdrawals
+const USDC_E_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+
+// Destination USDC addresses per chain
+const BRIDGE_CHAIN_CONFIG: Record<string, { chainId: string; toTokenAddress: string }> = {
+  ethereum: { chainId: '1',                toTokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
+  bsc:      { chainId: '56',               toTokenAddress: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d' },
+  solana:   { chainId: '1151111081099710',  toTokenAddress: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
+};
 
 const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
@@ -20,20 +27,82 @@ const GNOSIS_SAFE_ABI = [
   'function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes calldata signatures) payable returns (bool success)',
 ];
 
-async function getProvider(): Promise<ethers.providers.JsonRpcProvider> {
-  for (const url of RPC_URLS) {
-    try {
-      const p = new ethers.providers.JsonRpcProvider(url);
-      await Promise.race([
-        p.getBlockNumber(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-      ]);
-      return p;
-    } catch {
-      logger.warn(`[withdraw] RPC ${url} unresponsive, trying next...`);
-    }
+/**
+ * Create a Bridge withdrawal address.
+ * Sends proxyAddress + destination info to Bridge API, returns the EVM address to send USDC.e to.
+ */
+async function createBridgeWithdrawAddress(
+  proxyAddress: string,
+  chain: string,
+  recipientAddr: string,
+): Promise<string> {
+  const chainConfig = BRIDGE_CHAIN_CONFIG[chain];
+  if (!chainConfig) throw new Error(`Unsupported bridge chain: ${chain}`);
+
+  // Bridge API expects lowercase hex for EVM recipient addresses
+  const normalizedRecipient = recipientAddr.startsWith('0x')
+    ? recipientAddr.toLowerCase()
+    : recipientAddr;
+
+  const requestBody = {
+    address: proxyAddress.toLowerCase(),
+    toChainId: chainConfig.chainId,
+    toTokenAddress: chainConfig.toTokenAddress,
+    recipientAddr: normalizedRecipient,
+  };
+  logger.info(`[withdraw] Bridge withdraw request: ${JSON.stringify(requestBody)}`);
+
+  const response = await fetch(`${BRIDGE_API_URL}/withdraw`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Bridge API error: ${response.status} - ${errorText}`);
   }
-  throw new Error('All RPCs unresponsive');
+
+  const data = await response.json();
+  logger.info(`[withdraw] Bridge withdraw response: ${JSON.stringify(data)}`);
+
+  const bridgeAddress = data.address?.evm;
+  if (!bridgeAddress) throw new Error('Bridge API returned no EVM withdrawal address');
+  if (!ethers.utils.isAddress(bridgeAddress)) throw new Error(`Bridge API returned invalid EVM address: ${bridgeAddress}`);
+  return bridgeAddress;
+}
+
+/**
+ * Execute a cross-chain withdrawal via Bridge API.
+ * Sends USDC.e from proxy → Bridge address → Bridge delivers USDC on destination chain.
+ */
+export async function executeBridgeWithdraw(params: {
+  encryptedPrivateKey: string;
+  proxyAddress: string;
+  chain: string;
+  recipientAddr: string;
+  amount: number;
+}): Promise<{ success: boolean; txHash?: string; pending?: boolean; error?: string }> {
+  try {
+    const bridgeAddress = await createBridgeWithdrawAddress(
+      params.proxyAddress,
+      params.chain,
+      params.recipientAddr,
+    );
+    logger.info(`[withdraw] Sending ${params.amount} USDC.e to Bridge address ${bridgeAddress} for ${params.chain} withdrawal`);
+
+    return await executeWithdraw({
+      encryptedPrivateKey: params.encryptedPrivateKey,
+      proxyAddress: params.proxyAddress,
+      tokenAddress: USDC_E_POLYGON,
+      tokenDecimals: 6,
+      destinationAddress: bridgeAddress,
+      amount: params.amount,
+    });
+  } catch (error: any) {
+    logger.error('[withdraw] Bridge withdraw failed:', error?.message);
+    return { success: false, error: error?.message || 'Unknown error' };
+  }
 }
 
 /**
@@ -44,7 +113,7 @@ export async function getTokenBalance(
   tokenAddress: string | 'native',
   decimals: number
 ): Promise<{ raw: bigint; formatted: string }> {
-  const provider = await getProvider();
+  const provider = await getPolygonProvider();
 
   let rawBN: ethers.BigNumber;
   if (tokenAddress === 'native') {
@@ -80,7 +149,7 @@ export async function executeWithdraw(params: {
   }
 
   try {
-    const provider = await getProvider();
+    const provider = await getPolygonProvider();
     const executor = new ethers.Wallet(executorKey, provider);
 
     const privateKey = decrypt(params.encryptedPrivateKey);
@@ -128,6 +197,16 @@ export async function executeWithdraw(params: {
 
     logger.info(`[withdraw] Sending Safe execTransaction from ${params.proxyAddress.substring(0, 10)}... → ${params.destinationAddress.substring(0, 10)}...`);
 
+    // Dynamic gas pricing — Polygon enforces a minimum gas tip (~25-30 gwei)
+    const feeData = await provider.getFeeData();
+    const MIN_PRIORITY = ethers.utils.parseUnits('30', 'gwei');
+    const MIN_MAX_FEE  = ethers.utils.parseUnits('100', 'gwei');
+    const rawPriority = feeData.maxPriorityFeePerGas ?? MIN_PRIORITY;
+    const rawMaxFee   = feeData.maxFeePerGas ?? MIN_MAX_FEE;
+    // Use whichever is higher: RPC suggestion or minimum floor, then bump 30%
+    const boostedPriority = (rawPriority.gt(MIN_PRIORITY) ? rawPriority : MIN_PRIORITY).mul(130).div(100);
+    const boostedMaxFee   = (rawMaxFee.gt(MIN_MAX_FEE) ? rawMaxFee : MIN_MAX_FEE).mul(130).div(100);
+
     const safeWithExecutor = safeContract.connect(executor);
     const tx = await Promise.race([
       safeWithExecutor.execTransaction(
@@ -137,8 +216,8 @@ export async function executeWithdraw(params: {
         signature,
         {
           gasLimit: 200_000,
-          maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
-          maxFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+          maxPriorityFeePerGas: boostedPriority,
+          maxFeePerGas: boostedMaxFee,
         }
       ),
       new Promise<never>((_, reject) =>

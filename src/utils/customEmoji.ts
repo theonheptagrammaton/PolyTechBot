@@ -36,6 +36,8 @@ export const a = (text: string, url: string) => `<a href="${url}">${text}</a>`;
 // Add more IDs here as you discover them via /emojiid
 
 export const EMOJI: Record<string, string> = {
+  // Process / loading
+  loading: '5346105514575025401', // ⏳ loading indicator
   // Main menu stats
   polymarket: '5836670421356781641', // Polymarket logo
   cherry:     '5843941440211655941', // 🌸 title
@@ -77,6 +79,16 @@ export const EMOJI: Record<string, string> = {
   solanaDeposit:  '5827847162666425855', // 🟣 solana deposit
   baseDeposit:    '5848124407645478260', // 🟦 base deposit
   usdc:           '5837102533721460863', // 💲 USDC / balance
+  // PNL page
+  pnlChart:       '5897958754267174109', // 📊 PNL title (money alias)
+  pnlUp:          '6030861234432121355', // ⬆️ positive PNL (priceUp alias)
+  pnlDown:        '5888645706096319818', // ⬇️ negative PNL (priceDown alias)
+  diamond:        '5967389567781703494', // 💎 total PNL (briefcase alias)
+  rocket:         '5355160022894539220', // 🚀 percent (lightning alias)
+  bag:            '5875291072225087249', // 💰 invested (vol alias)
+  trophy:         '5420534836798458790', // 🏆 position value (star alias)
+  target:         '5778168620278354602', // 🎯 avg cost (refLink alias)
+  fire:           '4969918262650340505', // 🔥 outcome
 };
 
 /**

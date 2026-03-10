@@ -1,8 +1,11 @@
+import http from 'http';
 import { config } from './config';
 import { logger } from './utils/logger';
 import { connectDatabase, disconnectDatabase } from './database/prisma';
 import { getRedisClient, disconnectRedis } from './database/redis';
 import { TelegramBot } from './bot';
+
+let healthServer: http.Server;
 
 async function main(): Promise<void> {
   try {
@@ -24,6 +27,16 @@ async function main(): Promise<void> {
     const bot = new TelegramBot();
     await bot.start();
 
+    // Health check endpoint for Docker/Coolify
+    healthServer = http.createServer((_, res) => {
+      res.writeHead(200);
+      res.end('ok');
+    });
+    const healthPort = parseInt(process.env.HEALTH_PORT || '3000', 10);
+    healthServer.listen(healthPort, () => {
+      logger.info(`Health check listening on port ${healthPort}`);
+    });
+
     logger.info('✅ All services started successfully');
     logger.info('Bot is ready to accept commands!');
 
@@ -38,6 +51,7 @@ async function cleanup(): Promise<void> {
   logger.info('Cleaning up resources...');
 
   try {
+    if (healthServer) healthServer.close();
     await disconnectDatabase();
     await disconnectRedis();
     logger.info('Cleanup completed');

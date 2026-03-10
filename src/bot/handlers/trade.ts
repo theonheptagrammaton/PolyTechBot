@@ -1,8 +1,20 @@
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
+import axios from 'axios';
+import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
+import { Wallet } from '@ethersproject/wallet';
 import { logger } from '../../utils/logger';
-import { COMMISSION_RATE } from '../../services/commission';
+import { COMMISSION_RATE, transferCommission } from '../../services/commission';
 import { config } from '../../config';
+import { ce, EMOJI } from '../../utils/customEmoji';
+import { RedisBackedState } from '../../utils/redisState';
+import { generatePositionPnlImage } from '../../services/pnlImage';
+import { getActivePositions, getBalance, invalidatePortfolioCache } from '../../services/portfolio';
+import { fetchProfilePhoto } from '../../utils/telegram';
+import { getUserByTelegramId } from '../../services/user';
+import { decrypt } from '../../utils/encryption';
+import { enableTrading } from '../../services/deposit';
+import { prisma } from '../../database/prisma';
 
 /**
  * Returns a "Trade Again" URL button that re-opens the custom trade flow via deep link.
@@ -18,19 +30,33 @@ function tradeAgainBtn(label: string, marketId: string) {
   return Markup.button.callback('« Back to Markets', 'show_categories');
 }
 
-// Trade state management
-export const tradeState = new Map<string, {
+function backToMarketBtn(marketId: string) {
+  const uname = config.telegram.botUsername;
+  if (uname) {
+    return Markup.button.url('« Back to Market', `https://t.me/${uname}?start=mkt_${marketId}`);
+  }
+  return Markup.button.callback('« Back to Markets', 'show_categories');
+}
+
+// Trade state management — Redis-backed to survive bot restarts
+export const tradeState = new RedisBackedState<{
   marketId: string;
   marketQuestion: string;
   outcome: 'yes' | 'no';
   outcomeIndex: number;
   price: number;
   amount?: number;  // set during large-trade confirmation flow
+  market?: any;     // cached market object — avoids re-fetch in handleTradeConfirm
   timestamp: number;
-}>();
+}>('trade', 600);
 
-// Limit order state management
-export const limitTradeState = new Map<string, {
+// CLOB market data cache: conditionId/marketId → { tokens, tickSize, negRisk }
+// Tick size and token IDs never change — safe to cache for 10 minutes.
+const clobMarketCache = new Map<string, { data: any; expiresAt: number }>();
+const CLOB_CACHE_TTL_MS = 10 * 60 * 1000;
+
+// Limit order state management — Redis-backed to survive bot restarts
+export const limitTradeState = new RedisBackedState<{
   step: 'awaiting_limit_price' | 'awaiting_limit_amount' | 'awaiting_confirmation';
   marketId: string;
   marketQuestion: string;
@@ -39,18 +65,22 @@ export const limitTradeState = new Map<string, {
   currentPrice: number;
   limitPrice?: number;
   amount?: number;
+  conditionId?: string;
+  tokenId?: string;
+  tickSize?: string;
+  negRisk?: boolean;
   timestamp: number;
-}>();
+}>('limitTrade', 600);
 
 // F1: Pending outcome selection — holds market data before user picks YES/NO.
 // Needed because the full marketId (66 chars) makes trade_outcome_${marketId}_yes_0
 // exceed Telegram's 64-byte callback data limit. We store the market here and use
 // short callbacks trade_oc_yes / trade_oc_no instead.
-const pendingCustomTrade = new Map<string, {
+const pendingCustomTrade = new RedisBackedState<{
   marketId: string;
   market: any;
   timestamp: number;
-}>();
+}>('pendingTrade', 600);
 
 // R6: Periodic cleanup of abandoned state entries (every 30 min, remove entries > 10 min old)
 setInterval(() => {
@@ -87,7 +117,7 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
     const outcomeOrCustom = parts[1];
 
     // Fetch market details from Gamma API (more reliable)
-    const axios = (await import('axios')).default;
+
     let market;
 
     try {
@@ -139,6 +169,7 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
           outcome,
           outcomeIndex: outcomeIdx,
           price,
+          market,
           timestamp: Date.now(),
         });
 
@@ -161,7 +192,7 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
       // 'default' token: fetch user's current defaultTradeAmount from DB
       let amount: number;
       if (!parts[2] || parts[2] === 'default') {
-        const { getUserByTelegramId } = await import('../../services/user');
+
         const user = await getUserByTelegramId(telegramId);
         amount = user?.defaultTradeAmount ?? 25;
       } else {
@@ -268,7 +299,7 @@ export async function handleOutcomeSelection(ctx: Context, data: string): Promis
     if (!telegramId) return;
 
     // Read pending market from state (set by handleCustomTradeFlow)
-    const pending = pendingCustomTrade.get(telegramId);
+    const pending = await pendingCustomTrade.get(telegramId);
     if (!pending) {
       await ctx.reply('❌ Trade session expired. Please start a new trade.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
@@ -350,6 +381,7 @@ async function handleLargeTradeConfirmation(
       outcomeIndex,
       price,
       amount,
+      market,
       timestamp: Date.now(),
     });
 
@@ -393,14 +425,13 @@ async function executeTrade(
   }
 
   let progressMsg;
-  const axios = (await import('axios')).default;
 
   try {
     // Step 1: Show initial progress
-    progressMsg = await ctx.reply('⏳ *Step 1/5:* Validating account...');
+    progressMsg = await ctx.reply(ce(EMOJI.loading, '⏳') + ' <b>Step 1/5:</b> Validating account...', { parse_mode: 'HTML' });
 
     // Step 2: Get user and decrypt credentials
-    const { getUserByTelegramId } = await import('../../services/user');
+
     const user = await getUserByTelegramId(telegramId);
 
     if (!user) {
@@ -433,49 +464,40 @@ async function executeTrade(
     }
 
     // Decrypt credentials
-    const { decrypt } = await import('../../utils/encryption');
+
     const privateKey = decrypt(user.encryptedPrivateKey);
     const apiKey = decrypt(user.encryptedApiKey);
     const apiSecret = decrypt(user.encryptedApiSecret);
     const passphrase = decrypt(user.encryptedPassphrase);
 
-    // Step 3: Check balance
+    // Step 2+3: Check balance (and trading approvals if needed) in parallel
     await ctx.telegram.editMessageText(
       ctx.chat!.id,
       progressMsg.message_id,
       undefined,
-      '⏳ *Step 2/5:* Checking balance...'
+      ce(EMOJI.loading, '⏳') + (!user.tradingEnabled
+        ? ' <b>Step 2/5:</b> Checking balance &amp; approvals...'
+        : ' <b>Step 2/5:</b> Checking balance...'),
+      { parse_mode: 'HTML' }
     );
 
-    const { ethers } = await import('ethers');
+    // Run balance fetch + enableTrading in parallel (for first-trade users both run concurrently)
+    const balancePromise = getBalance(
+      user.encryptedPrivateKey,
+      user.encryptedApiKey,
+      user.encryptedApiSecret,
+      user.encryptedPassphrase
+    ).catch(() => '0');
 
-    // Try multiple RPCs in order — use the first responsive one
-    const RPC_LIST = [
-      'https://polygon-rpc.com',
-      'https://rpc-mainnet.matic.network',
-      'https://polygon-bor-rpc.publicnode.com',
-    ];
-    let provider: any;
-    for (const rpcUrl of RPC_LIST) {
-      try {
-        const p = new ethers.providers.JsonRpcProvider(rpcUrl);
-        await Promise.race([
-          p.getBlockNumber(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('rpc timeout')), 4000)),
-        ]);
-        provider = p;
-        break;
-      } catch { /* try next */ }
-    }
-    if (!provider) provider = new ethers.providers.JsonRpcProvider('https://polygon-bor-rpc.publicnode.com');
+    const enablePromise = !user.tradingEnabled
+      ? enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress)
+      : null;
 
-    // USDC.e contract on Polygon
-    const usdcAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-    const usdcAbi = ['function balanceOf(address) view returns (uint256)'];
-    const usdcContract = new ethers.Contract(usdcAddress, usdcAbi, provider);
-
-    const balance = await usdcContract.balanceOf(user.polymarketProxyAddress);
-    const balanceUSD = parseFloat(ethers.utils.formatUnits(balance, 6)); // USDC.e has 6 decimals
+    const [balanceStr, enableResult] = await Promise.all([
+      balancePromise,
+      enablePromise ?? Promise.resolve(null),
+    ]);
+    const balanceUSD = parseFloat(balanceStr);
 
     if (balanceUSD < amount) {
       if (balanceUSD < 1) {
@@ -493,7 +515,7 @@ async function executeTrade(
             reply_markup: Markup.inlineKeyboard([
               [Markup.button.callback('💰 Deposit', 'deposit_menu')],
               [Markup.button.callback('💼 My Wallet', 'wallet_page')],
-              [Markup.button.callback('« Back to Markets', 'show_categories')],
+              [backToMarketBtn(marketId)],
             ]).reply_markup,
           }
         );
@@ -539,30 +561,17 @@ async function executeTrade(
       return;
     }
 
-    // Step 4: Ensure trading approvals are set (on-chain check, no-op if already approved)
-    await ctx.telegram.editMessageText(
-      ctx.chat!.id,
-      progressMsg.message_id,
-      undefined,
-      '⏳ *Step 3/5:* Checking trading approvals...'
-    );
-
-    const { enableTrading } = await import('../../services/deposit');
-    const enableResult = await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress);
-
-    if (enableResult.success && !enableResult.alreadyEnabled) {
-      // Update DB flag so next check is skipped
-      const { prisma } = await import('../../database/prisma');
-      await prisma.user.update({ where: { id: user.id }, data: { tradingEnabled: true } }).catch(() => {});
-      logger.info(`Trading approvals confirmed for user: ${user.id}`);
-    }
-    if (!enableResult.success) {
-      logger.warn(`[trade] Could not verify trading approvals for user ${user.id} — proceeding anyway`);
+    // Process enableTrading result (ran in parallel with balance check above)
+    if (enableResult) {
+      if (enableResult.success) {
+        await prisma.user.update({ where: { id: user.id }, data: { tradingEnabled: true } }).catch(() => {});
+        logger.info(`[trade] Trading approvals confirmed for user: ${user.id}`);
+      } else {
+        logger.warn(`[trade] Could not verify trading approvals for user ${user.id} — proceeding anyway`);
+      }
     }
 
     // Calculate commission and trade amount (commission collected after successful trade)
-    const { config } = await import('../../config');
-    const { transferCommission, COMMISSION_RATE } = await import('../../services/commission');
     const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(6));
     const tradeAmount = parseFloat((amount - commissionAmt).toFixed(6));
 
@@ -603,11 +612,10 @@ async function executeTrade(
       ctx.chat!.id,
       progressMsg.message_id,
       undefined,
-      '⏳ *Step 4/5:* Connecting to exchange...'
+      ce(EMOJI.loading, '⏳') + ' <b>Step 4/5:</b> Connecting to exchange...',
+      { parse_mode: 'HTML' }
     );
 
-    const { ClobClient, Side } = await import('@polymarket/clob-client');
-    const { Wallet } = await import('@ethersproject/wallet');
 
     const wallet = new Wallet(privateKey);
     const clobClient = new ClobClient(
@@ -624,7 +632,8 @@ async function executeTrade(
       ctx.chat!.id,
       progressMsg.message_id,
       undefined,
-      '⏳ *Step 5/5:* Preparing order...'
+      ce(EMOJI.loading, '⏳') + ' <b>Step 5/5:</b> Preparing order...',
+      { parse_mode: 'HTML' }
     );
 
     const outcomeIdx = outcome === 'yes' ? 0 : 1;
@@ -639,24 +648,31 @@ async function executeTrade(
       tokenId = market.clobTokenIds[outcomeIdx];
     }
 
-    // Always fetch from CLOB to get tick size + negRisk; also resolves missing tokenId
+    // Fetch CLOB market for tick size + negRisk; results are cached for 10 min.
+    // Tick size and token IDs never change, so cache is safe and eliminates ~300-800ms per trade.
     try {
       const conditionId = market.conditionId || market.condition_id;
       const idToTry = conditionId || marketId;
-      logger.info(`[trade] Fetching CLOB market: ${idToTry}`);
 
-      const clobResp = await axios.get(`https://clob.polymarket.com/markets/${idToTry}`, { timeout: 10000 });
-      const cm = clobResp.data;
+      const getClobMarket = async (id: string): Promise<any> => {
+        const cached = clobMarketCache.get(id);
+        if (cached && cached.expiresAt > Date.now()) return cached.data;
+        logger.info(`[trade] Fetching CLOB market: ${id}`);
+        const resp = await axios.get(`https://clob.polymarket.com/markets/${id}`, { timeout: 10000 });
+        clobMarketCache.set(id, { data: resp.data, expiresAt: Date.now() + CLOB_CACHE_TTL_MS });
+        return resp.data;
+      };
 
+      const cm = await getClobMarket(idToTry);
       if (!tokenId) tokenId = cm.tokens?.[outcomeIdx]?.token_id;
       if (cm.minimum_tick_size) tickSize = String(cm.minimum_tick_size);
       if (cm.neg_risk !== undefined) isNegRisk = !!cm.neg_risk;
 
       // Last-resort: try with raw marketId
       if (!tokenId && conditionId && conditionId !== marketId) {
-        const fb = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, { timeout: 10000 });
-        if (!tokenId) tokenId = fb.data.tokens?.[outcomeIdx]?.token_id;
-        if (fb.data.minimum_tick_size) tickSize = String(fb.data.minimum_tick_size);
+        const fb = await getClobMarket(marketId);
+        if (!tokenId) tokenId = fb.tokens?.[outcomeIdx]?.token_id;
+        if (fb.minimum_tick_size) tickSize = String(fb.minimum_tick_size);
       }
     } catch (err) {
       logger.error('[trade] Error fetching CLOB market data:', err);
@@ -666,7 +682,7 @@ async function executeTrade(
       await ctx.telegram.editMessageText(
         ctx.chat!.id, progressMsg.message_id, undefined,
         '❌ *Market Not Available for Trading*\n\nThis market cannot be traded at the moment.',
-        { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('« Back to Markets', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
+        { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[backToMarketBtn(marketId)], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
       );
       return;
     }
@@ -685,20 +701,28 @@ async function executeTrade(
     const slippageMult = 1 + slippagePct / 100;
 
     // Calculate market price and snap worst-case price to tick size
-    const marketPriceRaw = parseFloat(
-      (Array.isArray(market.outcomePrices) ? market.outcomePrices[outcomeIdx] : null) || '0.5'
-    );
+    let outcomePricesArr: string[] = ['0.5', '0.5'];
+    try {
+      outcomePricesArr = Array.isArray(market.outcomePrices)
+        ? market.outcomePrices
+        : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
+    } catch { /* keep defaults */ }
+    const marketPriceRaw = parseFloat(outcomePricesArr[outcomeIdx] ?? '0.5');
     const marketPrice = isNaN(marketPriceRaw) ? 0.5 : marketPriceRaw;
 
     // Worst-case price = market price + user slippage%, snapped to tick size, capped at 0.99
-    const tick = parseFloat(tickSize);
+    const tick = Math.max(parseFloat(tickSize), 0.001);
     const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
+    // For low-priced outcomes, ensure at least +1 tick above market price so FAK has room to fill
+    const rawWorst = marketPrice * slippageMult;
+    const snapped = Math.round(rawWorst / tick) * tick;
+    const withMinBump = snapped <= marketPrice ? snapped + tick : snapped;
     const worstPrice = parseFloat(
-      Math.min(Math.round((marketPrice * slippageMult) / tick) * tick, 0.99).toFixed(decimals)
+      Math.min(withMinBump, 0.99).toFixed(decimals)
     );
 
     // Estimated shares (for display only — FAK fills whatever is available at the price)
-    const estimatedSize = parseFloat((tradeAmount / worstPrice).toFixed(4));
+    const estimatedSize = worstPrice > 0 ? parseFloat((tradeAmount / worstPrice).toFixed(4)) : 0;
 
     // Build order options
     const orderOptions: any = {};
@@ -707,7 +731,6 @@ async function executeTrade(
 
     // FAK market order — executes immediately against best available asks up to worstPrice
     // amount = USD to spend (tradeAmount after commission deduction)
-    const { OrderType } = await import('@polymarket/clob-client');
 
     logger.info(`[trade] Placing FAK BUY: ~${estimatedSize} shares of ${outcome.toUpperCase()} tokenId=${tokenId.substring(0,16)}... maxPrice=${worstPrice} slippage=${slippagePct}% tickSize=${tickSize} negRisk=${isNegRisk}`);
 
@@ -723,18 +746,30 @@ async function executeTrade(
 
       // User-friendly messages for known CLOB errors
       if (errMsg.includes('balance') || errMsg.includes('allowance')) {
+        // Reset tradingEnabled so the approval flow re-runs on the next trade attempt
+
+        await prisma.user.update({ where: { id: user.id }, data: { tradingEnabled: false } }).catch(() => {});
         await ctx.telegram.editMessageText(
           ctx.chat!.id, progressMsg.message_id, undefined,
-          '❌ *Insufficient Balance*\n\nYou need USDC.e in your Polymarket proxy wallet.\n\nGo to 💼 My Wallet → Deposit to add funds.',
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('💰 Deposit Now', 'deposit_menu')], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
+          '❌ *Insufficient Balance or Approval Missing*\n\nYour wallet approval needs to be set up. Please try again — the bot will configure it automatically.',
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[tradeAgainBtn('🔄 Try Again', marketId)], [Markup.button.callback('💼 My Wallet', 'wallet_page')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
       if (errMsg.includes('no orders found') || errMsg.includes('liquidity') || errMsg.includes('FOK') || errMsg.includes('FAK')) {
+        const priceCents = (marketPrice * 100).toFixed(1);
+        const worstCents = (worstPrice * 100).toFixed(1);
         await ctx.telegram.editMessageText(
           ctx.chat!.id, progressMsg.message_id, undefined,
-          `❌ *No Liquidity*\n\nNo sellers available within the current slippage range (${slippagePct}%).\n\n• Increase slippage in ⚙️ Settings\n• Or try again shortly`,
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [tradeAgainBtn('🔄 Try Again', marketId)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
+          `❌ *No Liquidity*\n\n` +
+          `No sellers available for *${outcome.toUpperCase()}* within your price range.\n\n` +
+          `📊 Current price: *${priceCents}¢*\n` +
+          `📈 Max price (slippage ${slippagePct}%): *${worstCents}¢*\n\n` +
+          `💡 *What you can do:*\n` +
+          `• Increase slippage in ⚙️ Settings\n` +
+          `• Try a smaller trade amount\n` +
+          `• Try again later when sellers appear`,
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('⚙️ Settings', 'settings_menu')], [tradeAgainBtn('🔄 Try Again', marketId)], [backToMarketBtn(marketId)], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -749,7 +784,7 @@ async function executeTrade(
           `This market requires a minimum of *${minShares} shares* per order.\n\n` +
           `At the current price (${(worstPrice * 100).toFixed(1)}¢), you need at least *$${minUsd}*.\n\n` +
           `Please increase your trade amount and try again.`,
-          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[tradeAgainBtn('🔄 Try Again', marketId)], [Markup.button.callback('« Back', 'show_categories')], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
+          { parse_mode: 'Markdown', reply_markup: Markup.inlineKeyboard([[tradeAgainBtn('🔄 Try Again', marketId)], [backToMarketBtn(marketId)], [Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]).reply_markup }
         );
         return;
       }
@@ -766,40 +801,31 @@ async function executeTrade(
         .catch((err) => logger.warn(`[trade] Commission transfer failed for user ${telegramId}:`, err?.message || err));
     }
 
-    // Fetch current balance after order (non-blocking on error)
-    let newBalance = '';
-    try {
-      const balanceData = await clobClient.getBalanceAllowance({ asset_type: 'COLLATERAL' as any });
-      if (balanceData?.balance) {
-        newBalance = (parseFloat(balanceData.balance) / 1_000_000).toFixed(2);
-      }
-    } catch { /* balance fetch is best-effort */ }
+    // Invalidate portfolio caches so next view is fresh (fire-and-forget)
+    invalidatePortfolioCache(user.polymarketProxyAddress).catch(() => {});
 
-    // Invalidate portfolio caches so next view is fresh
-    const { invalidatePortfolioCache } = await import('../../services/portfolio');
-    await invalidatePortfolioCache(user.encryptedPrivateKey);
+    const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const marketQuestion = escHtml(market.question || 'Unknown Market');
+    const entryPriceCents = (worstPrice * 100).toFixed(1);
+    const polymarketLink = market.slug
+      ? `https://polymarket.com/event/${market.slug}`
+      : `https://polymarket.com`;
 
-    const balanceLine = newBalance ? `\n💳 *Balance:* $${newBalance}` : '';
-    const feeLine = config.commission?.adminWalletAddress
-      ? `\n• Platform fee (1%): -$${commissionAmt.toFixed(2)}\n• Trade amount: $${tradeAmount.toFixed(2)}`
-      : '';
     const message =
-      `✅ *Market Order Submitted*\n\n` +
-      `Market: ${market.question}\n` +
-      `Outcome: *${outcome.toUpperCase()}*\n\n` +
-      `💰 *Order Details:*\n` +
-      `• Total: ~$${amount.toFixed(2)}` +
-      feeLine + `\n` +
-      `• ~Est. Shares: ${estimatedSize}\n` +
-      `• Max price: ${(worstPrice * 100).toFixed(2)}¢ (slippage: ${slippagePct}%)\n` +
-      `• Order ID: \`${orderResponse.orderID}\`\n` +
-      balanceLine + `\n\n` +
-      `_FAK market order — fills immediately at best available ask. Unfilled remainder is cancelled._`;
+      `${ce(EMOJI.cherry, '🌸')} <b>Transaction Completed</b>\n\n` +
+      `📌 <b>Market:</b>\n${marketQuestion}\n` +
+      `<b>Order Type:</b> 📄 Market ${outcome.toUpperCase()}\n` +
+      `<b>Invested:</b> $${amount.toFixed(2)}\n` +
+      `<b>Shares:</b> ~${estimatedSize}\n` +
+      `<b>Entry Price:</b> ${entryPriceCents}¢\n\n` +
+      `<b>TX:</b> <code>${orderResponse.orderID}</code>\n\n` +
+      `${ce(EMOJI.marketsTitle, '🤑')} <a href="${polymarketLink}">View this market on Polymarket</a>`;
 
     await ctx.telegram.editMessageText(
       ctx.chat!.id, progressMsg.message_id, undefined, message,
       {
-        parse_mode: 'Markdown',
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
         reply_markup: Markup.inlineKeyboard([
           [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
           [Markup.button.callback('📋 Open Orders',  'portfolio_orders_1')],
@@ -810,6 +836,71 @@ async function executeTrade(
     );
 
     logger.info(`[trade] Order placed: user=${telegramId} market=${marketId} outcome=${outcome.toUpperCase()} amount=$${amount} orderID=${orderResponse.orderID}`);
+
+    // ── Auto-send PNL image for the just-traded position (fire-and-forget) ────
+    (async () => {
+      try {
+        if (!user.polymarketProxyAddress) return;
+
+        // Small delay for the Data API to reflect the new position
+        await new Promise((r) => setTimeout(r, 3000));
+
+        const positions = await getActivePositions(user.polymarketProxyAddress, true);
+        // Find the position matching this market + outcome
+        const pos = positions.find(
+          (p) => p.conditionId === marketId && p.outcome?.toUpperCase() === outcome.toUpperCase()
+        );
+        if (!pos) return;
+
+        const [profilePhotoBuffer, eventIconBuffer] = await Promise.all([
+          fetchProfilePhoto(ctx),
+          (async () => {
+            if (!pos.icon) return undefined;
+            try {
+              const res = await fetch(pos.icon);
+              if (!res.ok) return undefined;
+              return Buffer.from(await res.arrayBuffer());
+            } catch { return undefined; }
+          })(),
+        ]);
+
+        const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+        const imageBuffer = await generatePositionPnlImage({
+          title: pos.title,
+          outcome: pos.outcome,
+          cashPnl: pos.cashPnl,
+          percentPnl: pos.percentPnl,
+          avgPrice: pos.avgPrice,
+          curPrice: pos.curPrice,
+          invested: pos.initialValue,
+          currentValue: pos.currentValue,
+          username: ctx.from?.username,
+          displayName,
+          profilePhotoBuffer,
+          eventIconBuffer,
+        });
+
+        if (imageBuffer && ctx.chat) {
+          const pnlSign = pos.cashPnl >= 0 ? '+' : '';
+          const pctSign = pos.percentPnl >= 0 ? '+' : '';
+          const escTitle = (pos.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+          const caption =
+            `📊 <b>Position P&amp;L</b>\n\n` +
+            `<b>${pos.outcome}</b> — ${escTitle}\n\n` +
+            `💰 <b>P&amp;L:</b> ${pnlSign}$${pos.cashPnl.toFixed(2)} (${pctSign}${pos.percentPnl.toFixed(1)}%)\n` +
+            `🎯 <b>Entry:</b> ${(pos.avgPrice * 100).toFixed(1)}¢  →  <b>Current:</b> ${(pos.curPrice * 100).toFixed(1)}¢`;
+
+          await ctx.telegram.sendPhoto(
+            ctx.chat.id,
+            { source: imageBuffer },
+            { caption, parse_mode: 'HTML' }
+          );
+        }
+      } catch (pnlErr) {
+        logger.warn('[trade] Post-trade PNL image failed (non-critical):', pnlErr);
+      }
+    })();
 
   } catch (error: any) {
     logger.error('Error executing trade:', error);
@@ -829,7 +920,7 @@ async function executeTrade(
             parse_mode: 'Markdown',
             reply_markup: Markup.inlineKeyboard([
               [tradeAgainBtn('🔄 Try Again', marketId)],
-              [Markup.button.callback('« Back', 'show_categories')],
+              [backToMarketBtn(marketId)],
               [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
             ]).reply_markup,
           }
@@ -839,7 +930,7 @@ async function executeTrade(
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
             [tradeAgainBtn('🔄 Try Again', marketId)],
-            [Markup.button.callback('« Back', 'show_categories')],
+            [backToMarketBtn(marketId)],
           ]),
         });
       }
@@ -857,7 +948,7 @@ export async function handleTradeAmountInput(ctx: Context, amountText: string): 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const state = tradeState.get(telegramId);
+    const state = await tradeState.get(telegramId);
     if (!state) {
       await ctx.reply('❌ Trade session expired. Please start again.');
       return;
@@ -890,30 +981,30 @@ export async function handleTradeAmountInput(ctx: Context, amountText: string): 
     }
 
     // Fetch market for latest data BEFORE clearing state (if fetch fails, state is preserved for retry)
-    const axios = (await import('axios')).default;
-    let market;
 
-    try {
-      // Try Gamma API first (most common case)
-      const gammaResponse = await axios.get(`https://gamma-api.polymarket.com/markets/${state.marketId}`, {
-        timeout: 10000,
-      });
-      market = gammaResponse.data;
-    } catch (gammaError) {
-      // If Gamma fails, try CLOB API as fallback
+    // Use cached market from tradeState if available, otherwise re-fetch
+    let market = state.market;
+    if (!market) {
       try {
-        const clobResponse = await axios.get(`https://clob.polymarket.com/markets/${state.marketId}`, {
+        const gammaResponse = await axios.get(`https://gamma-api.polymarket.com/markets/${state.marketId}`, {
           timeout: 10000,
         });
-        market = clobResponse.data;
-      } catch (clobError) {
-        logger.error(`Error fetching market ${state.marketId} from both APIs:`, { gammaError, clobError });
-        await ctx.reply('❌ Market not found. This market may have been closed or removed.');
-        return;
+        market = gammaResponse.data;
+      } catch (gammaError) {
+        try {
+          const clobResponse = await axios.get(`https://clob.polymarket.com/markets/${state.marketId}`, {
+            timeout: 10000,
+          });
+          market = clobResponse.data;
+        } catch (clobError) {
+          logger.error(`Error fetching market ${state.marketId} from both APIs:`, { gammaError, clobError });
+          await ctx.reply('❌ Market not found. This market may have been closed or removed.');
+          return;
+        }
       }
     }
 
-    // Clear state only after market fetch succeeds
+    // Clear state after market is resolved
     tradeState.delete(telegramId);
 
     // Check if amount >= $100, require confirmation
@@ -939,7 +1030,7 @@ export async function handleTradeConfirm(ctx: Context): Promise<void> {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const state = tradeState.get(telegramId);
+    const state = await tradeState.get(telegramId);
     if (!state || state.amount == null) {
       await ctx.reply('❌ Trade session expired. Please start a new trade.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
@@ -949,32 +1040,31 @@ export async function handleTradeConfirm(ctx: Context): Promise<void> {
 
     const { marketId, outcome, amount } = state;
 
-    // Fetch market BEFORE clearing state — mirrors the fix in handleTradeAmountInput.
-    // If the fetch fails the user can retry the confirm button; state is preserved.
-    const axios = (await import('axios')).default;
-    let market;
+    // Use market cached in state (stored by handleLargeTradeConfirmation).
+    // Only falls back to a network fetch if state.market is somehow missing.
+    let market = state.market;
 
-    try {
-      // Try Gamma API first (most common case)
-      const gammaResponse = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, {
-        timeout: 10000,
-      });
-      market = gammaResponse.data;
-    } catch (gammaError) {
-      // If Gamma fails, try CLOB API as fallback
+    if (!market) {
+  
       try {
-        const clobResponse = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, {
+        const gammaResponse = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, {
           timeout: 10000,
         });
-        market = clobResponse.data;
-      } catch (clobError) {
-        logger.error(`Error fetching market ${marketId} from both APIs:`, { gammaError, clobError });
-        await ctx.reply('❌ Market not found. This market may have been closed or removed.');
-        return;
+        market = gammaResponse.data;
+      } catch (gammaError) {
+        try {
+          const clobResponse = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, {
+            timeout: 10000,
+          });
+          market = clobResponse.data;
+        } catch (clobError) {
+          logger.error(`Error fetching market ${marketId} from both APIs:`, { gammaError, clobError });
+          await ctx.reply('❌ Market not found. This market may have been closed or removed.');
+          return;
+        }
       }
     }
 
-    // Clear state only after a successful fetch (prevents phantom "session expired" on retry)
     tradeState.delete(telegramId);
 
     await executeTrade(ctx, marketId, market, outcome, amount);
@@ -992,13 +1082,14 @@ export async function handleTradeCancel(ctx: Context): Promise<void> {
     await ctx.answerCbQuery('Trade cancelled');
 
     const telegramId = ctx.from?.id.toString();
+    const savedMarketId = telegramId ? (await tradeState.get(telegramId))?.marketId : undefined;
     if (telegramId) {
       tradeState.delete(telegramId);
     }
 
     await ctx.editMessageText('❌ Trade cancelled.', {
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('« Back to Markets', 'show_categories')],
+        [savedMarketId ? backToMarketBtn(savedMarketId) : Markup.button.callback('« Back to Markets', 'show_categories')],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
     });
@@ -1015,7 +1106,6 @@ export async function handleTradeCancel(ctx: Context): Promise<void> {
  */
 export async function handleLimitChoiceFlow(ctx: Context, marketId: string): Promise<void> {
   const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
-  const axios = (await import('axios')).default;
   let market: any;
   try {
     const r = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, { timeout: 10000 });
@@ -1070,7 +1160,6 @@ export async function handleLimitOrderStart(
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const axios = (await import('axios')).default;
   let market: any;
   try {
     const r = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, { timeout: 10000 });
@@ -1102,6 +1191,44 @@ export async function handleLimitOrderStart(
   const currentCents = (currentPrice * 100).toFixed(1);
   const exampleCents = Math.max(1, Math.round(currentPrice * 100) - 5);
 
+  // Extract token info from Gamma response
+  let tokenId: string | undefined;
+  if (market.tokens && Array.isArray(market.tokens)) {
+    tokenId = market.tokens[outcomeIndex]?.token_id;
+  } else if (market.clobTokenIds && Array.isArray(market.clobTokenIds)) {
+    tokenId = market.clobTokenIds[outcomeIndex];
+  }
+
+  const conditionId = market.conditionId || market.condition_id;
+  let tickSize = '0.01';
+  let isNegRisk = false;
+
+  // Fetch CLOB market for tick size + negRisk (use conditionId, not marketId)
+  try {
+    const idToTry = conditionId || marketId;
+    const cached = clobMarketCache.get(idToTry);
+    let cm: any;
+    if (cached && cached.expiresAt > Date.now()) {
+      cm = cached.data;
+    } else {
+      const clobResp = await axios.get(`https://clob.polymarket.com/markets/${idToTry}`, { timeout: 10000 });
+      cm = clobResp.data;
+      clobMarketCache.set(idToTry, { data: cm, expiresAt: Date.now() + CLOB_CACHE_TTL_MS });
+    }
+    if (!tokenId) tokenId = cm.tokens?.[outcomeIndex]?.token_id;
+    if (cm.minimum_tick_size) tickSize = String(cm.minimum_tick_size);
+    if (cm.neg_risk !== undefined) isNegRisk = !!cm.neg_risk;
+  } catch (err) {
+    logger.warn('[limit] Could not fetch CLOB market data in start:', err);
+  }
+
+  if (!tokenId) {
+    await ctx.reply('❌ Market not available for limit orders at the moment.', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
+    });
+    return;
+  }
+
   limitTradeState.set(telegramId, {
     step: 'awaiting_limit_price',
     marketId,
@@ -1109,6 +1236,10 @@ export async function handleLimitOrderStart(
     outcome,
     outcomeIndex,
     currentPrice,
+    conditionId,
+    tokenId,
+    tickSize,
+    negRisk: isNegRisk,
     timestamp: Date.now(),
   });
 
@@ -1135,7 +1266,7 @@ export async function handleLimitTradeInput(ctx: Context, text: string): Promise
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return false;
 
-  const state = limitTradeState.get(telegramId);
+  const state = await limitTradeState.get(telegramId);
   if (!state) return false;
 
   if (Date.now() - state.timestamp > 10 * 60 * 1000) {
@@ -1263,7 +1394,7 @@ export async function handleLimitConfirm(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const state = limitTradeState.get(telegramId);
+  const state = await limitTradeState.get(telegramId);
   if (!state || state.step !== 'awaiting_confirmation' || !state.limitPrice || !state.amount) {
     await ctx.editMessageText('❌ Session expired. Please start again.').catch(() => {});
     return;
@@ -1278,9 +1409,9 @@ export async function handleLimitConfirm(ctx: Context): Promise<void> {
   limitTradeState.delete(telegramId);
 
   // Show progress immediately
-  await ctx.editMessageText('⏳ Placing limit order...').catch(() => {});
+  await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ' Placing limit order...', { parse_mode: 'HTML' }).catch(() => {});
 
-  await executeLimitTrade(ctx, state.marketId, state.marketQuestion, state.outcome, state.limitPrice, state.amount);
+  await executeLimitTrade(ctx, state.marketId, state.marketQuestion, state.outcome, state.limitPrice, state.amount, state.tokenId, state.tickSize, state.negRisk);
 }
 
 /**
@@ -1290,11 +1421,12 @@ export async function handleLimitCancel(ctx: Context): Promise<void> {
   await ctx.answerCbQuery('Cancelled');
 
   const telegramId = ctx.from?.id.toString();
+  const savedMarketId = telegramId ? (await limitTradeState.get(telegramId))?.marketId : undefined;
   if (telegramId) limitTradeState.delete(telegramId);
 
   await ctx.editMessageText('❌ Limit order cancelled.', {
     ...Markup.inlineKeyboard([
-      [Markup.button.callback('« Back to Markets', 'show_categories')],
+      [savedMarketId ? backToMarketBtn(savedMarketId) : Markup.button.callback('« Back to Markets', 'show_categories')],
     ]),
   }).catch(() => {});
 }
@@ -1309,14 +1441,15 @@ async function executeLimitTrade(
   outcome: 'yes' | 'no',
   limitPrice: number,
   amount: number,
+  stateTokenId?: string,
+  stateTickSize?: string,
+  stateNegRisk?: boolean,
 ): Promise<void> {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const axios = (await import('axios')).default;
-
   try {
-    const { getUserByTelegramId } = await import('../../services/user');
+
     const user = await getUserByTelegramId(telegramId);
 
     if (!user) {
@@ -1337,40 +1470,26 @@ async function executeLimitTrade(
       return;
     }
 
-    const { decrypt } = await import('../../utils/encryption');
+
     const privateKey  = decrypt(user.encryptedPrivateKey);
     const apiKey      = decrypt(user.encryptedApiKey);
     const apiSecret   = decrypt(user.encryptedApiSecret);
     const passphrase  = decrypt(user.encryptedPassphrase);
 
-    // Fetch CLOB market data for tokenId, tickSize, negRisk
-    const outcomeIdx = outcome === 'yes' ? 0 : 1;
-    let tokenId: string | undefined;
-    let tickSize = '0.01';
-    let isNegRisk = false;
-
-    try {
-      const clobResp = await axios.get(`https://clob.polymarket.com/markets/${marketId}`, { timeout: 10000 });
-      const cm = clobResp.data;
-      tokenId = cm.tokens?.[outcomeIdx]?.token_id;
-      if (cm.minimum_tick_size) tickSize = String(cm.minimum_tick_size);
-      if (cm.neg_risk !== undefined) isNegRisk = !!cm.neg_risk;
-    } catch (err) {
-      logger.warn('[limit] Could not fetch CLOB market data:', err);
-    }
+    const tokenId = stateTokenId;
+    const tickSize = stateTickSize || '0.01';
+    const isNegRisk = stateNegRisk || false;
 
     if (!tokenId) {
       await ctx.editMessageText('❌ Market not available for trading at the moment.').catch(() => {});
       return;
     }
 
-    const { config } = await import('../../config');
-    const { transferCommission } = await import('../../services/commission');
     const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(6));
     const tradeAmount   = parseFloat((amount - commissionAmt).toFixed(6));
 
     // Snap limit price to tick size
-    const tick     = parseFloat(tickSize);
+    const tick     = Math.max(parseFloat(tickSize), 0.001);
     const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
     const snappedPrice = parseFloat(
       Math.min(Math.round(limitPrice / tick) * tick, 0.99).toFixed(decimals)
@@ -1384,8 +1503,6 @@ async function executeLimitTrade(
       return;
     }
 
-    const { ClobClient, Side } = await import('@polymarket/clob-client');
-    const { Wallet } = await import('@ethersproject/wallet');
 
     const wallet = new Wallet(privateKey);
     const clobClient = new ClobClient(
@@ -1406,8 +1523,13 @@ async function executeLimitTrade(
       `tokenId=${tokenId.substring(0, 16)}... price=${snappedPrice} tickSize=${tickSize} negRisk=${isNegRisk}`
     );
 
+    let feeRateBps = 0;
+    try {
+      feeRateBps = await clobClient.getFeeRateBps(tokenId);
+    } catch { /* proceed with 0 */ }
+
     const orderResp = await clobClient.createAndPostOrder(
-      { tokenID: tokenId, side: Side.BUY, price: snappedPrice, size: sharesToBuy, feeRateBps: 0 },
+      { tokenID: tokenId, side: Side.BUY, price: snappedPrice, size: sharesToBuy, feeRateBps },
       Object.keys(orderOptions).length > 0 ? orderOptions : undefined
     );
 
@@ -1458,7 +1580,7 @@ async function executeLimitTrade(
       {
         parse_mode: 'Markdown',
         reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback('« Back to Markets', 'show_categories')],
+          [backToMarketBtn(marketId)],
           [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
         ]).reply_markup,
       }

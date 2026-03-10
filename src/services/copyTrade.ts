@@ -30,19 +30,29 @@ export interface DetectedTrade {
 
 /**
  * Parses a Polymarket wallet address or profile URL into a normalized lowercase address.
- * Returns null if the input is not recognizable.
+ * Returns `{ address }` on success, `{ error }` with a user-friendly message on failure.
  */
-export function parseTraderAddress(input: string): string | null {
-  const trimmed = input.trim().toLowerCase();
+export function parseTraderAddress(input: string): { address: string } | { error: string } {
+  const trimmed = input.trim();
 
   // Direct 0x address
-  if (/^0x[a-f0-9]{40}$/.test(trimmed)) return trimmed;
+  if (/^0x[a-f0-9]{40}$/i.test(trimmed)) return { address: trimmed.toLowerCase() };
 
   // polymarket.com/profile/0x...
   const profileMatch = trimmed.match(/polymarket\.com\/profile\/(0x[a-f0-9]{40})/i);
-  if (profileMatch) return profileMatch[1].toLowerCase();
+  if (profileMatch) return { address: profileMatch[1].toLowerCase() };
 
-  return null;
+  // polymarket.com/profile/USERNAME — username URLs can't be resolved to an address
+  const usernameMatch = trimmed.match(/polymarket\.com\/profile\/([a-zA-Z0-9_.-]+)/i);
+  if (usernameMatch) {
+    return {
+      error:
+        `⚠️ Username-based profile links are not supported.\n\n` +
+        `Open the trader's profile on Polymarket, find the wallet address (<code>0x...</code>), and send it here.`,
+    };
+  }
+
+  return { error: '❌ Invalid address. Send a <code>0x...</code> address or a Polymarket profile URL containing the wallet address.' };
 }
 
 /**
@@ -76,6 +86,23 @@ export function computeCopySize(
  * Fetches recent MINED trades for a trader address from the CLOB API.
  * Uses Redis to remember the last-seen timestamp so we only process new trades.
  */
+async function fetchWithRetry(url: string, maxRetries = 2): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        signal: AbortSignal.timeout(15_000),
+        headers: { 'User-Agent': 'PolyTech/1.0', 'Accept': 'application/json' },
+      });
+      return resp;
+    } catch (err: any) {
+      if (attempt === maxRetries) throw err;
+      // Wait 1s before retry
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  throw new Error('fetchWithRetry exhausted');
+}
+
 async function fetchNewTradesForTrader(traderAddress: string): Promise<DetectedTrade[]> {
   const redisKey = `copy:last_seen:${traderAddress}`;
 
@@ -85,7 +112,7 @@ async function fetchNewTradesForTrader(traderAddress: string): Promise<DetectedT
 
   try {
     const url = `${DATA_API_BASE}/activity?user=${traderAddress}&limit=50`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const resp = await fetchWithRetry(url);
 
     if (!resp.ok) {
       logger.warn(`[copy] Data API /activity returned ${resp.status} for ${traderAddress}`);
@@ -247,8 +274,14 @@ async function executeCopyOrder(
       return { status: 'failed', errorMsg: 'could not resolve tokenId' };
     }
 
+    // Fetch fee rate dynamically — do not hardcode 0 (some markets require non-zero)
+    let feeRateBps = 0;
+    try {
+      feeRateBps = await clobClient.getFeeRateBps(tokenId);
+    } catch { /* proceed with 0 */ }
+
     const isSell = trade.side === 'SELL';
-    const tick = parseFloat(tickSize);
+    const tick = Math.max(parseFloat(tickSize), 0.001);
     const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
     const slippagePct  = (subSlippage ?? user.slippageTolerance) ?? 1.0;
     const slippageMult = slippagePct / 100;
@@ -290,6 +323,10 @@ async function executeCopyOrder(
       commissionAmt = parseFloat((copySize * COMMISSION_RATE).toFixed(6));
       const tradeAmount = parseFloat((copySize - commissionAmt).toFixed(6));
 
+      if (tradeAmount < 1.0) {
+        return { status: 'skipped', errorMsg: 'trade amount too small after commission' };
+      }
+
       // Worst-case price = market price + user slippage%, snapped up to tick, max 0.99
       price = parseFloat(
         Math.min(Math.round((trade.price * (1 + slippageMult)) / tick) * tick, 0.99).toFixed(decimals)
@@ -303,7 +340,7 @@ async function executeCopyOrder(
 
       // FAK market order: pass USD amount, not shares
       const orderResp = await clobClient.createAndPostMarketOrder(
-        { tokenID: tokenId, side: Side.BUY, amount: tradeAmount, price, feeRateBps: 0 } as any,
+        { tokenID: tokenId, side: Side.BUY, amount: tradeAmount, price, feeRateBps } as any,
         { tickSize: tickSize as any, negRisk: isNegRisk },
         OrderType.FAK
       );
@@ -328,9 +365,17 @@ async function executeCopyOrder(
       return { status: 'filled', orderID: orderResp.orderID, filledPrice: price };
     }
 
+    // SELL path: ensure all approvals are set (NegRisk adapter approval required for NegRisk sells)
+    if (isNegRisk) {
+      const { enableTrading } = await import('./deposit');
+      await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress).catch((err) =>
+        logger.warn(`[copy] enableTrading failed before NegRisk sell: ${err?.message}`)
+      );
+    }
+
     // SELL path: FAK market order, amount = shares
     const orderResp = await clobClient.createAndPostMarketOrder(
-      { tokenID: tokenId, side: Side.SELL, amount: size, price, feeRateBps: 0 } as any,
+      { tokenID: tokenId, side: Side.SELL, amount: size, price, feeRateBps } as any,
       { tickSize: tickSize as any, negRisk: isNegRisk },
       OrderType.FAK
     );
@@ -359,7 +404,20 @@ async function tickForTrader(
   // Load active subscriptions first — needed for both new-trade processing and TP/SL checks
   const subs = await prisma.copySubscription.findMany({
     where: { traderAddress, isActive: true, isPaused: false },
-    include: { user: true },
+    include: {
+      user: {
+        select: {
+          id: true,
+          telegramId: true,
+          encryptedPrivateKey: true,
+          encryptedApiKey: true,
+          encryptedApiSecret: true,
+          encryptedPassphrase: true,
+          polymarketProxyAddress: true,
+          slippageTolerance: true,
+        },
+      },
+    },
   });
 
   if (subs.length === 0) return;
@@ -403,6 +461,10 @@ async function tickForTrader(
     }
   }
 
+  // Tracks (userId + tradeKey) pairs already notified this tick — prevents duplicate
+  // notifications when a user has multiple subscriptions to the same trader.
+  const notifiedThisTick = new Set<string>();
+
   for (const trade of newTrades) {
     for (const sub of subs) {
       const user = sub.user;
@@ -411,6 +473,28 @@ async function tickForTrader(
       try {
         // Skip if balance fetch failed this tick — avoid false auto-stops
         if (balanceFetchFailed.has(sub.userId)) continue;
+
+        // ── Trade behavior filtering ────────────────────────────────────────
+        // Determine the effective side to execute (may differ from leader's side)
+        let effectiveSide = trade.side;
+        let effectiveOutcome = trade.outcome;
+
+        if (sub.counterTrade) {
+          // Counter trade: flip the side
+          effectiveSide = trade.side === 'BUY' ? 'SELL' : 'BUY';
+          effectiveOutcome = trade.outcome === 'YES' ? 'NO' : 'YES';
+        } else if (sub.buyOnSells && trade.side === 'SELL') {
+          // Buy when leader sells
+          effectiveSide = 'BUY';
+        } else {
+          // Normal mode: check followBuys / copySells
+          if (trade.side === 'BUY' && !sub.followBuys) continue;
+          if (trade.side === 'SELL' && !sub.copySells) continue;
+        }
+
+        // Copy side filter (only copy YES, NO, or both outcomes)
+        if (sub.copySide === 'yes' && effectiveOutcome !== 'YES') continue;
+        if (sub.copySide === 'no' && effectiveOutcome !== 'NO') continue;
 
         const balance = balanceCache.get(sub.userId) ?? 0;
 
@@ -423,9 +507,9 @@ async function tickForTrader(
           const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
           await sendNotification(
             user.telegramId,
-            `⚠️ *Copy Stopped — Low Balance*\n\n` +
-            `Trader: \`${shortAddr}\`\n` +
-            `Balance $${balance.toFixed(2)} < Minimum $${sub.autoStopBelowBalance.toFixed(2)}\n\n` +
+            `⚠️ <b>Copy Stopped — Low Balance</b>\n\n` +
+            `Trader: <code>${shortAddr}</code>\n` +
+            `Balance $${balance.toFixed(2)} &lt; Minimum $${sub.autoStopBelowBalance.toFixed(2)}\n\n` +
             `Use /deposit to top up`
           );
 
@@ -499,9 +583,9 @@ async function tickForTrader(
             const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
             await sendNotification(
               user.telegramId,
-              `⏭ *Trade Skipped*\n\n` +
-              `Trader: \`${shortAddr}\`\n` +
-              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
+              `⏭ <b>Trade Skipped</b>\n\n` +
+              `Trader: <code>${shortAddr}</code>\n` +
+              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
               `Side: ${trade.side} ${trade.outcome}\n` +
               `Reason: Copy size below minimum`
             );
@@ -510,43 +594,76 @@ async function tickForTrader(
         }
 
         // ── Filter: price range (BUY only — priceMin/priceMax in cents 0–100) ─────
-        if (trade.side === 'BUY') {
+        if (effectiveSide === 'BUY') {
           const priceCents = trade.price * 100;
           if (sub.priceMin != null && priceCents < sub.priceMin) {
-            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below min filter` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nReason: Price ${priceCents.toFixed(1)}¢ < min ${sub.priceMin}¢`);
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below min filter` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &lt; min ${sub.priceMin}¢`);
             continue;
           }
           if (sub.priceMax != null && priceCents > sub.priceMax) {
-            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above max filter` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nReason: Price ${priceCents.toFixed(1)}¢ > max ${sub.priceMax}¢`);
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above max filter` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &gt; max ${sub.priceMax}¢`);
             continue;
           }
         }
 
         // ── Filter: single trade max cap (BUY only) ───────────────────────────────
-        if (trade.side === 'BUY' && sub.singleTradeMax != null && copySize > sub.singleTradeMax) {
+        if (effectiveSide === 'BUY' && sub.singleTradeMax != null && copySize > sub.singleTradeMax) {
           copySize = sub.singleTradeMax;
           if (copySize < 1.0) {
-            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: 'below min after singleTradeMax cap' } });
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: 'below min after singleTradeMax cap' } });
+            continue;
+          }
+        }
+
+        // ── Filter: min buy amount (BUY only) ───────────────────────────────────
+        if (effectiveSide === 'BUY' && sub.minBuyAmount != null && copySize < sub.minBuyAmount) {
+          await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `copy size $${copySize.toFixed(2)} below min $${sub.minBuyAmount}` } });
+          continue;
+        }
+
+        // ── Filter: max spend per market (BUY only) ─────────────────────────────
+        if (effectiveSide === 'BUY' && sub.maxSpendPerMarket != null) {
+          const mktKey = `copy:mktspend:${sub.id}:${trade.marketId}`;
+          const spentOnMarket = (await redisCache.get<number>(mktKey)) ?? 0;
+          if (spentOnMarket + copySize > sub.maxSpendPerMarket) {
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `market spend limit ($${spentOnMarket.toFixed(2)}/$${sub.maxSpendPerMarket})` } });
+            continue;
+          }
+        }
+
+        // ── Filter: max spend total (BUY only) ─────────────────────────────────
+        if (effectiveSide === 'BUY' && sub.maxSpendTotal != null) {
+          const totalKey = `copy:totalspend:${sub.id}`;
+          const spentTotal = (await redisCache.get<number>(totalKey)) ?? 0;
+          if (spentTotal + copySize > sub.maxSpendTotal) {
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `total spend limit reached` } });
             continue;
           }
         }
 
         // ── Filter: daily spend limit (BUY only) ──────────────────────────────────
-        if (trade.side === 'BUY' && sub.dailySpendMax != null) {
+        if (effectiveSide === 'BUY' && sub.dailySpendMax != null) {
           const today = new Date().toISOString().slice(0, 10);
           const spendKey = `copy:daily:${sub.id}:${today}`;
           const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
           if (spentToday + copySize > sub.dailySpendMax) {
-            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: trade.outcome, side: trade.side, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ *Trade Skipped — Daily Limit*\n\nTrader: \`${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}\`\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped — Daily Limit</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
             continue;
           }
         }
 
+        // Build the effective trade (may have flipped side/outcome for counter trade)
+        const effectiveTrade: DetectedTrade = {
+          ...trade,
+          side: effectiveSide,
+          outcome: effectiveOutcome,
+        };
+
         // Execute the copy
-        const result = await executeCopyOrder(user, trade, copySize, sub.slippage);
+        const result = await executeCopyOrder(user, effectiveTrade, copySize, sub.slippage);
 
         // Save to DB
         await prisma.copiedTrade.create({
@@ -556,11 +673,10 @@ async function tickForTrader(
             traderAddress,
             marketId: trade.marketId,
             assetId: trade.assetId || null,
-            outcome: trade.outcome,
-            side: trade.side,
+            outcome: effectiveOutcome,
+            side: effectiveSide,
             sourceSize: trade.sizeUsd,
             copiedSize: copySize,
-            // F4: Use our execution price for TP/SL calculations; fall back to trader's price
             price: result.filledPrice ?? trade.price,
             orderID: result.orderID ?? null,
             status: result.status,
@@ -568,50 +684,69 @@ async function tickForTrader(
           },
         });
 
-        // Track daily spend for successful BUY fills
-        if (result.status === 'filled' && trade.side === 'BUY' && sub.dailySpendMax != null) {
-          const today = new Date().toISOString().slice(0, 10);
-          const spendKey = `copy:daily:${sub.id}:${today}`;
-          const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
-          await redisCache.set(spendKey, spentToday + copySize, 25 * 3600);
+        // Track spend for successful BUY fills
+        if (result.status === 'filled' && effectiveSide === 'BUY') {
+          // Daily spend
+          if (sub.dailySpendMax != null) {
+            const today = new Date().toISOString().slice(0, 10);
+            const spendKey = `copy:daily:${sub.id}:${today}`;
+            const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
+            await redisCache.set(spendKey, spentToday + copySize, 25 * 3600);
+          }
+          // Per-market spend
+          if (sub.maxSpendPerMarket != null) {
+            const mktKey = `copy:mktspend:${sub.id}:${trade.marketId}`;
+            const spent = (await redisCache.get<number>(mktKey)) ?? 0;
+            await redisCache.set(mktKey, spent + copySize, 90 * 24 * 3600);
+          }
+          // Total spend
+          if (sub.maxSpendTotal != null) {
+            const totalKey = `copy:totalspend:${sub.id}`;
+            const spent = (await redisCache.get<number>(totalKey)) ?? 0;
+            await redisCache.set(totalKey, spent + copySize, 365 * 24 * 3600);
+          }
         }
 
         // Send Telegram notification (respects notificationsEnabled per subscription)
         if (sub.notificationsEnabled) {
-          const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
-          const modeLabel = sub.fixedAmount
-            ? `$${sub.fixedAmount} fixed`
-            : `×${(sub.multiplier ?? 1).toFixed(2)}`;
-          const safeMd = (s: string) => s.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+          const tradeKey = `${user.telegramId}:${trade.marketId}:${trade.assetId}:${effectiveSide}:${trade.timestamp}`;
+          const alreadyNotified = notifiedThisTick.has(tradeKey);
 
-          if (result.status === 'filled') {
+          const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+          const methodLabels: Record<string, string> = { fixed: 'Fixed', exact: 'Exact', percentage: '%', portfolio: 'Portfolio' };
+          const modeLabel = methodLabels[sub.buyMethod] || 'Fixed';
+          const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+          if (result.status === 'filled' && !alreadyNotified) {
+            notifiedThisTick.add(tradeKey);
             await sendNotification(
               user.telegramId,
-              `✅ *Trade Copied*\n\n` +
-              `Trader: \`${shortAddr}\`\n` +
-              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-              `Side: ${trade.side} ${trade.outcome}\n` +
+              `✅ <b>Trade Copied</b>\n\n` +
+              `Trader: <code>${shortAddr}</code>\n` +
+              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
+              `Side: ${effectiveSide} ${effectiveOutcome}\n` +
               `Original: $${trade.sizeUsd.toFixed(2)}\n` +
               `Copied: $${copySize.toFixed(2)} (${modeLabel})\n` +
-              `Order: \`${result.orderID}\``
+              `Order: <code>${result.orderID}</code>`
             );
-          } else if (result.status === 'failed') {
+          } else if (result.status === 'failed' && !alreadyNotified) {
+            notifiedThisTick.add(tradeKey);
             await sendNotification(
               user.telegramId,
-              `❌ *Copy Failed*\n\n` +
-              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-              `Error: ${safeMd(result.errorMsg ?? 'unknown error')}\n` +
+              `❌ <b>Copy Failed</b>\n\n` +
+              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
+              `Error: ${escHtml(result.errorMsg ?? 'unknown error')}\n` +
               `Copy size: $${copySize.toFixed(2)}`
             );
-          } else if (result.status === 'skipped') {
-            // D2: Notify user when a trade was skipped (BUY or SELL)
+          } else if (result.status === 'skipped' && !alreadyNotified) {
+            notifiedThisTick.add(tradeKey);
             await sendNotification(
               user.telegramId,
-              `⏭ *Trade Skipped*\n\n` +
-              `Trader: \`${shortAddr}\`\n` +
-              `Market: \`${trade.marketId.slice(0, 20)}...\`\n` +
-              `Side: ${trade.side} ${trade.outcome}\n` +
-              `Reason: ${safeMd(result.errorMsg ?? 'no position found')}`
+              `⏭ <b>Trade Skipped</b>\n\n` +
+              `Trader: <code>${shortAddr}</code>\n` +
+              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
+              `Side: ${effectiveSide} ${effectiveOutcome}\n` +
+              `Reason: ${escHtml(result.errorMsg ?? 'no position found')}`
             );
           }
         }
@@ -624,10 +759,18 @@ async function tickForTrader(
 
   // TP/SL check — run once per subscription after all new trades are processed
   for (const sub of subs) {
-    if (sub.takeProfitPct != null || sub.stopLossPct != null) {
+    if (sub.takeProfitPct != null || sub.stopLossPct != null || sub.takeProfitFixed != null || sub.stopLossFixed != null) {
       await checkTpSlPositions(
         sub.user,
-        { subscriptionId: sub.id, traderAddress: sub.traderAddress, takeProfitPct: sub.takeProfitPct, stopLossPct: sub.stopLossPct, slippage: sub.slippage },
+        {
+          subscriptionId: sub.id,
+          traderAddress: sub.traderAddress,
+          takeProfitPct: sub.takeProfitPct,
+          stopLossPct: sub.stopLossPct,
+          takeProfitFixed: sub.takeProfitFixed ?? null,
+          stopLossFixed: sub.stopLossFixed ?? null,
+          slippage: sub.slippage,
+        },
         sendNotification
       ).catch((err) =>
         logger.error(`[copy] TP/SL check error for ${sub.userId}: ${err?.message}`)
@@ -658,11 +801,13 @@ async function checkTpSlPositions(
     traderAddress: string;
     takeProfitPct: number | null;
     stopLossPct: number | null;
+    takeProfitFixed: number | null;
+    stopLossFixed: number | null;
     slippage?: number;
   },
   sendNotification: (telegramId: string, msg: string) => Promise<void>
 ): Promise<void> {
-  if (sub.takeProfitPct == null && sub.stopLossPct == null) return;
+  if (sub.takeProfitPct == null && sub.stopLossPct == null && sub.takeProfitFixed == null && sub.stopLossFixed == null) return;
 
   // Find open BUY positions that have not yet been TP/SL exited.
   // Filter by subscriptionId so that re-creating a subscription to the same trader
@@ -711,11 +856,18 @@ async function checkTpSlPositions(
     const currentPrice = parseFloat(currentPriceStr);
     if (isNaN(currentPrice) || pos.price <= 0) continue;
 
+    // TP price: percentage-based (relative to entry) or fixed (absolute in 0–1 decimal)
     const tpPrice = sub.takeProfitPct != null
       ? pos.price * (1 + sub.takeProfitPct / 100)
+      : sub.takeProfitFixed != null
+      ? sub.takeProfitFixed / 100  // fixed is in cents, convert to decimal (e.g. 85¢ → 0.85)
       : null;
+
+    // SL price: percentage-based (relative to entry) or fixed (absolute in 0–1 decimal)
     const slPrice = sub.stopLossPct != null
       ? pos.price * (1 - sub.stopLossPct / 100)
+      : sub.stopLossFixed != null
+      ? sub.stopLossFixed / 100  // fixed is in cents, convert to decimal
       : null;
 
     let triggerType: 'tp_triggered' | 'sl_triggered' | null = null;
@@ -766,16 +918,17 @@ async function checkTpSlPositions(
     const icon = triggerType === 'tp_triggered' ? '📈' : '🛑';
     const label = triggerType === 'tp_triggered' ? 'Take Profit Triggered' : 'Stop Loss Triggered';
 
+    const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const statusLine = result.status === 'filled'
       ? `✅ Sell order placed`
       : result.status === 'skipped'
-        ? `⏭ Skipped: ${result.errorMsg ?? ''}`
-        : `❌ Error: ${result.errorMsg ?? 'unknown'}`;
+        ? `⏭ Skipped: ${escHtml(result.errorMsg ?? '')}`
+        : `❌ Error: ${escHtml(result.errorMsg ?? 'unknown')}`;
 
     await sendNotification(
       user.telegramId,
-      `${icon} *${label}*\n\n` +
-      `Trader: \`${shortAddr}\`\n` +
+      `${icon} <b>${label}</b>\n\n` +
+      `Trader: <code>${shortAddr}</code>\n` +
       `Entry: ${entryFormatted}  →  Exit: ${exitFormatted}\n` +
       `Change: ${changeSign}${changePct}%\n` +
       statusLine

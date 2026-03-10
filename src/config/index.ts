@@ -8,6 +8,9 @@ interface Config {
     botToken: string;
     botUsername: string;
     adminUserIds: number[];
+    groupBotToken?: string;
+    requiredGroupId?: number;
+    requiredGroupLink?: string;
   };
   polymarket: {
     host: string;
@@ -72,6 +75,11 @@ function validateConfig(): Config {
       botToken: process.env.TELEGRAM_BOT_TOKEN!,
       botUsername: process.env.BOT_USERNAME || '',
       adminUserIds: adminIds,
+      groupBotToken: process.env.TELEGRAM_GROUP_BOT_TOKEN || undefined,
+      requiredGroupId: process.env.TELEGRAM_REQUIRED_GROUP_ID
+        ? parseInt(process.env.TELEGRAM_REQUIRED_GROUP_ID, 10)
+        : undefined,
+      requiredGroupLink: process.env.TELEGRAM_GROUP_LINK || undefined,
     },
     polymarket: {
       host: process.env.POLYMARKET_HOST || 'https://clob.polymarket.com',

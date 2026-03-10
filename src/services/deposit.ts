@@ -2,10 +2,6 @@ import { ethers, Wallet, Contract, providers } from 'ethers';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { ClobClient } from '@polymarket/clob-client';
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client';
-import { BuilderConfig } from '@polymarket/builder-signing-sdk';
-import { privateKeyToAccount } from 'viem/accounts';
-import { createWalletClient, http } from 'viem';
-import { polygon } from 'viem/chains';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
@@ -20,13 +16,28 @@ const USDC_ADDRESSES = {
 
 // RPC Endpoints - Using reliable public nodes
 const RPC_URLS = {
-  polygon: 'https://polygon-bor-rpc.publicnode.com', // More reliable than polygon-rpc.com
+  polygon: 'https://rpc.ankr.com/polygon',
   ethereum: 'https://eth.llamarpc.com',
   solana: 'https://api.mainnet-beta.solana.com',
 };
 
-// Polymarket Relayer URL (using v2 endpoint)
+// Polymarket Relayer URL (used by approveAndDepositWithRelayer)
 const POLYMARKET_RELAYER_URL = 'https://relayer-v2.polymarket.com/';
+
+// RPC fallback list (same as withdraw.ts)
+const POLYGON_RPC_LIST = [
+  'https://polygon-bor-rpc.publicnode.com',
+  'https://rpc.ankr.com/polygon',
+  'https://polygon.llamarpc.com',
+  'https://1rpc.io/matic',
+];
+
+// Gnosis Safe ABI — same minimal set as withdraw.ts
+const GNOSIS_SAFE_ABI = [
+  'function nonce() view returns (uint256)',
+  'function getTransactionHash(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) view returns (bytes32)',
+  'function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes calldata signatures) payable returns (bool success)',
+];
 
 // Polymarket Contract Addresses (Polygon)
 const POLYMARKET_ADDRESSES = {
@@ -335,107 +346,151 @@ export async function enableTrading(
   proxyAddress?: string
 ): Promise<{ success: boolean; txHash?: string; alreadyEnabled?: boolean }> {
   try {
-    logger.info('[Relayer] Enabling trading with all required approvals...');
+    logger.info('[Trading] Enabling trading with all required approvals...');
 
     const privateKey = decrypt(encryptedPrivateKey);
-    const provider = new providers.JsonRpcProvider(RPC_URLS.polygon);
-    const ethersWallet = new Wallet(privateKey, provider);
 
-    // Check approval on the proxy wallet (Safe), not the EOA signer
+    // Find a working RPC — race all in parallel, first to respond wins
+    let provider: providers.JsonRpcProvider;
+    try {
+      provider = await Promise.any(
+        POLYGON_RPC_LIST.map(async (url) => {
+          const p = new providers.JsonRpcProvider(url);
+          await Promise.race([
+            p.getBlockNumber(),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+          ]);
+          return p;
+        })
+      );
+    } catch {
+      throw new Error('All RPCs unresponsive');
+    }
+
+    const ethersWallet = new Wallet(privateKey);
     const checkAddress = proxyAddress || ethersWallet.address;
     const ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, provider);
 
-    const [stdApproved, negRiskApproved] = await Promise.all([
+    const NATIVE_USDC = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
+    const nativeUsdcContract = new Contract(NATIVE_USDC, ERC20_ABI, provider);
+    const usdceContract = new Contract(POLYMARKET_ADDRESSES.USDCe, ERC20_ABI, provider);
+
+    const threshold = ethers.utils.parseUnits('1000', 6);
+
+    const [
+      stdApproved, negRiskApproved, negRiskAdapterApproved,
+      nativeCtfAllowance, nativeNegRiskAllowance, nativeAdapterAllowance,
+      usdceCtfAllowance, usdceNegRiskAllowance, usdceAdapterAllowance,
+    ] = await Promise.all([
       ctfContract.isApprovedForAll(checkAddress, POLYMARKET_ADDRESSES.CTF_EXCHANGE),
-      ctfContract.isApprovedForAll(checkAddress, NEG_RISK_OPERATOR),
+      ctfContract.isApprovedForAll(checkAddress, POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE),
+      ctfContract.isApprovedForAll(checkAddress, POLYMARKET_ADDRESSES.NEG_RISK_ADAPTER),
+      nativeUsdcContract.allowance(checkAddress, POLYMARKET_ADDRESSES.CTF_EXCHANGE),
+      nativeUsdcContract.allowance(checkAddress, POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE),
+      nativeUsdcContract.allowance(checkAddress, POLYMARKET_ADDRESSES.NEG_RISK_ADAPTER),
+      usdceContract.allowance(checkAddress, POLYMARKET_ADDRESSES.CTF_EXCHANGE),
+      usdceContract.allowance(checkAddress, POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE),
+      usdceContract.allowance(checkAddress, POLYMARKET_ADDRESSES.NEG_RISK_ADAPTER),
     ]);
 
-    logger.info(`[Relayer] On-chain approvals — CTF Exchange: ${stdApproved}, NegRisk Exchange: ${negRiskApproved}`);
+    const nativeCtfOk       = (nativeCtfAllowance as ethers.BigNumber).gte(threshold);
+    const nativeNegRiskOk   = (nativeNegRiskAllowance as ethers.BigNumber).gte(threshold);
+    const nativeAdapterOk   = (nativeAdapterAllowance as ethers.BigNumber).gte(threshold);
+    const usdceCtfOk        = (usdceCtfAllowance as ethers.BigNumber).gte(threshold);
+    const usdceNegRiskOk    = (usdceNegRiskAllowance as ethers.BigNumber).gte(threshold);
+    const usdceAdapterOk    = (usdceAdapterAllowance as ethers.BigNumber).gte(threshold);
 
-    if (stdApproved && negRiskApproved) {
-      logger.info('[Relayer] Trading already enabled (all approvals confirmed on-chain)');
+    logger.info(
+      `[Trading] On-chain approvals for ${checkAddress.slice(0, 10)}... — ` +
+      `CTF ERC1155: ${stdApproved}, NegRisk ERC1155: ${negRiskApproved}, NegRiskAdapter ERC1155: ${negRiskAdapterApproved}, ` +
+      `NativeUSDC→CTF: ${nativeCtfOk}, NativeUSDC→NegRisk: ${nativeNegRiskOk}, NativeUSDC→Adapter: ${nativeAdapterOk}, ` +
+      `USDCe→CTF: ${usdceCtfOk}, USDCe→NegRisk: ${usdceNegRiskOk}, USDCe→Adapter: ${usdceAdapterOk}`
+    );
+
+    if (stdApproved && negRiskApproved && negRiskAdapterApproved && nativeCtfOk && nativeNegRiskOk && nativeAdapterOk && usdceCtfOk && usdceNegRiskOk && usdceAdapterOk) {
+      logger.info('[Trading] All approvals already set on-chain');
       return { success: true, alreadyEnabled: true };
     }
 
-    // Use viem wallet + RelayerTxType.PROXY (same as polymarketSetup.ts — the version that works)
-    logger.info('[Relayer] Setting missing approvals via Builder Relayer (PROXY type)...');
-    const viemAccount = privateKeyToAccount(privateKey as `0x${string}`);
-    const viemWallet = createWalletClient({
-      account: viemAccount,
-      chain: polygon,
-      transport: http(RPC_URLS.polygon),
-    });
+    // Build list of approval calls needed
+    const erc20Iface = new ethers.utils.Interface(ERC20_ABI);
+    const ctfIface   = new ethers.utils.Interface(CTF_ABI);
 
-    const builderConfig = new BuilderConfig({
-      localBuilderCreds: {
-        key: config.polymarket.builder.apiKey,
-        secret: config.polymarket.builder.secret,
-        passphrase: config.polymarket.builder.passphrase,
-      },
-    });
+    type ApprovalCall = { to: string; data: string; label: string };
+    const calls: ApprovalCall[] = [];
 
-    const relayerClient = new RelayClient(
-      POLYMARKET_RELAYER_URL,
-      137,
-      viemWallet as any,
-      builderConfig,
-      RelayerTxType.PROXY   // PROXY matches the wallet type deployed during setup
-    );
+    if (!nativeCtfOk)    calls.push({ to: NATIVE_USDC, data: erc20Iface.encodeFunctionData('approve', [POLYMARKET_ADDRESSES.CTF_EXCHANGE, ethers.constants.MaxUint256]), label: 'NativeUSDC→CTF_Exchange' });
+    if (!nativeNegRiskOk) calls.push({ to: NATIVE_USDC, data: erc20Iface.encodeFunctionData('approve', [POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE, ethers.constants.MaxUint256]), label: 'NativeUSDC→NegRisk' });
+    if (!nativeAdapterOk) calls.push({ to: NATIVE_USDC, data: erc20Iface.encodeFunctionData('approve', [POLYMARKET_ADDRESSES.NEG_RISK_ADAPTER, ethers.constants.MaxUint256]), label: 'NativeUSDC→NegRiskAdapter' });
+    if (!usdceCtfOk)     calls.push({ to: POLYMARKET_ADDRESSES.USDCe, data: erc20Iface.encodeFunctionData('approve', [POLYMARKET_ADDRESSES.CTF_EXCHANGE, ethers.constants.MaxUint256]), label: 'USDCe→CTF_Exchange' });
+    if (!usdceNegRiskOk) calls.push({ to: POLYMARKET_ADDRESSES.USDCe, data: erc20Iface.encodeFunctionData('approve', [POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE, ethers.constants.MaxUint256]), label: 'USDCe→NegRisk' });
+    if (!usdceAdapterOk) calls.push({ to: POLYMARKET_ADDRESSES.USDCe, data: erc20Iface.encodeFunctionData('approve', [POLYMARKET_ADDRESSES.NEG_RISK_ADAPTER, ethers.constants.MaxUint256]), label: 'USDCe→NegRiskAdapter' });
+    if (!stdApproved)           calls.push({ to: POLYMARKET_ADDRESSES.CTF, data: ctfIface.encodeFunctionData('setApprovalForAll', [POLYMARKET_ADDRESSES.CTF_EXCHANGE, true]), label: 'CTF→CTF_Exchange' });
+    if (!negRiskApproved)       calls.push({ to: POLYMARKET_ADDRESSES.CTF, data: ctfIface.encodeFunctionData('setApprovalForAll', [POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE, true]), label: 'CTF→NegRisk' });
+    if (!negRiskAdapterApproved) calls.push({ to: POLYMARKET_ADDRESSES.CTF, data: ctfIface.encodeFunctionData('setApprovalForAll', [POLYMARKET_ADDRESSES.NEG_RISK_ADAPTER, true]), label: 'CTF→NegRiskAdapter' });
 
-    const erc20Interface = new ethers.utils.Interface(ERC20_ABI);
-    const ctfInterface = new ethers.utils.Interface(CTF_ABI);
+    logger.info(`[Trading] Setting ${calls.length} missing approvals: ${calls.map(c => c.label).join(', ')}`);
 
-    // Only include transactions for approvals that are actually missing
-    const transactions: Array<{ to: string; data: string; value: string }> = [];
-
-    // 1. USDC.e → CTF (needed for buying, set always if NegRisk is missing too)
-    transactions.push({
-      to: POLYMARKET_ADDRESSES.USDCe,
-      data: erc20Interface.encodeFunctionData('approve', [
-        POLYMARKET_ADDRESSES.CTF,
-        ethers.constants.MaxUint256,
-      ]),
-      value: '0',
-    });
-
-    if (!stdApproved) {
-      logger.info('[Relayer]   + Adding CTF → CTF Exchange approval');
-      transactions.push({
-        to: POLYMARKET_ADDRESSES.CTF,
-        data: ctfInterface.encodeFunctionData('setApprovalForAll', [
-          POLYMARKET_ADDRESSES.CTF_EXCHANGE,
-          true,
-        ]),
-        value: '0',
-      });
+    // Use Gnosis Safe execTransaction (same as withdraw.ts) — platform executor pays gas.
+    // This executes approvals ON the correct proxy (checkAddress = user.polymarketProxyAddress),
+    // unlike the builder relayer which uses its own unrelated proxy address.
+    const executorKey = config.commission?.platformExecutorKey;
+    if (!executorKey) {
+      logger.error('[Trading] platformExecutorKey not configured — cannot set approvals');
+      return { success: false };
     }
 
-    if (!negRiskApproved) {
-      logger.info('[Relayer]   + Adding CTF → NegRisk CTF Exchange approval');
-      transactions.push({
-        to: POLYMARKET_ADDRESSES.CTF,
-        data: ctfInterface.encodeFunctionData('setApprovalForAll', [
-          POLYMARKET_ADDRESSES.NEG_RISK_CTF_EXCHANGE,
-          true,
-        ]),
-        value: '0',
-      });
-    }
+    const executor   = new Wallet(executorKey, provider);
+    const userSigner = new Wallet(privateKey);
+    const signingKey = new ethers.utils.SigningKey(userSigner.privateKey);
 
-    logger.info(`[Relayer] Executing ${transactions.length} gasless approval transaction(s)...`);
-    const response = await relayerClient.execute(
-      transactions,
-      'Enable trading on Polymarket'
-    );
+    const safeContract = new ethers.Contract(checkAddress, GNOSIS_SAFE_ABI, provider);
+    const safeWithExecutor = safeContract.connect(executor);
 
-    logger.info('[Relayer] Waiting for on-chain confirmation...');
-    const result = await response.wait();
-    logger.info('[Relayer] Approvals confirmed!', result);
+    // Get current nonce once, then pre-compute all nonces for parallel broadcast
+    const baseNonce: ethers.BigNumber = await safeContract.nonce();
+    logger.info(`[Trading] Broadcasting ${calls.length} approval txs in parallel (base nonce: ${baseNonce.toString()})`);
 
-    const txHash = result?.transactionHash || 'relayer_submitted';
-    return { success: true, txHash };
+    const txPromises = calls.map(async (call, i) => {
+      const nonce = baseNonce.add(i);
+      const txHash: string = await safeContract.getTransactionHash(
+        call.to, 0, call.data, 0,
+        0, 0, 0,
+        ethers.constants.AddressZero,
+        ethers.constants.AddressZero,
+        nonce
+      );
+      const { v, r, s } = signingKey.signDigest(ethers.utils.arrayify(txHash));
+      const signature = ethers.utils.hexlify(ethers.utils.concat([r, s, [v]]));
+
+      logger.info(`[Trading]   → ${call.label} (nonce=${nonce.toString()})`);
+      const tx = await Promise.race([
+        safeWithExecutor.execTransaction(
+          call.to, 0, call.data, 0,
+          0, 0, 0,
+          ethers.constants.AddressZero,
+          ethers.constants.AddressZero,
+          signature,
+          {
+            gasLimit: 150_000,
+            nonce: await executor.getTransactionCount('pending').then(n => n + i),
+            maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
+            maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
+          }
+        ),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('execTransaction timeout')), 30_000)),
+      ]);
+      const receipt = await (tx as ethers.ContractTransaction).wait(1);
+      logger.info(`[Trading]   ✓ ${call.label} confirmed: ${receipt.transactionHash}`);
+      return receipt.transactionHash;
+    });
+
+    const hashes = await Promise.all(txPromises);
+    const lastTxHash = hashes[hashes.length - 1];
+
+    return { success: true, txHash: lastTxHash };
   } catch (error) {
-    logger.error('[Relayer] Error enabling trading:', error);
+    logger.error('[Trading] Error enabling trading:', error);
     return { success: false };
   }
 }

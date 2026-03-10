@@ -1,7 +1,7 @@
 import { Telegraf, Context } from 'telegraf';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { handleStart } from './handlers/start';
+import { handleStart, handleCheckMembership } from './handlers/start';
 import { handleHelp } from './handlers/help';
 import { handleWallet } from './handlers/wallet';
 import {
@@ -27,11 +27,12 @@ import {
   handleSwCategoryFilter,
   handleSwSortFilter,
   handleRefreshCategory,
+  handleSportsCategory,
+  handleLiveSports,
 } from './handlers/markets';
 import {
   handleWalletPage,
   handlePortfolio,
-  handleWithdraw,
   handleOpenPositions,
   handleOpenOrders,
   handleClosedPositions,
@@ -40,7 +41,11 @@ import {
   handleCancelOrderExecute,
   handleCancelAllConfirm,
   handleCancelAllExecute,
+  handleCloseAllConfirm,
+  handleCloseAllExecute,
   handlePnl,
+  handlePortfolioPnl,
+  handlePnlShare,
 } from './handlers/walletPage';
 import {
   handleCryptoCategory,
@@ -61,6 +66,7 @@ import {
   handleDisableTwoFactor,
   handleConfirmDisableTwoFactor,
   handleShowBackupCodes,
+  handleShowManualKey,
   userState,
 } from './handlers/twoFactor';
 import {
@@ -105,6 +111,10 @@ import {
   handlePositionCancel,
   handlePositionExecuteSell,
   handlePositionExecuteBuy,
+  handlePositionStopLoss,
+  handlePositionExecuteStopLoss,
+  handlePositionPnl,
+  handlePositionPnlShare,
   positionTradeState,
 } from './handlers/positionTrade';
 import {
@@ -120,37 +130,66 @@ import {
   handleReferralClaim,
 } from './handlers/referral';
 import {
+  handleCashbackPage,
+  handleCashbackClaim,
+} from './handlers/cashback';
+import {
   handleCopyCommand,
   handleCopyList,
   startCopyAdd,
   handleCopyAddInput,
-  handleCopyModeFixed,
-  handleCopyModeMultiplier,
-  handleCopyStopAllAction,
-  handleCopyHistory,
   handleCopyCancel,
-  handleCopyTpSlChoice,
-  handleCopyNicknameSkip,
+  handleCopyClose,
+  handleCopyConfirmAdd,
   handleSmartCopyStart,
+  handleCopyStopAllAction,
+  handleCopyStartAll,
+  handleCopyHistory,
   copyAddState,
-  // Manage / Share / Edit
   copyEditState,
   handleCopyEditInput,
   handleCopyManage,
   handleCopyShare,
-  handleCopyChangeMode,
-  handleCopyEditModeChoice,
-  handleCopyRename,
-  handleCopySetSlippage,
-  handleCopySetPriceRange,
-  handleCopyPriceRangeClear,
-  handleCopySetDailyLimit,
-  handleCopySetSingleLimit,
-  handleCopyPause,
-  handleCopyResume,
-  handleCopyToggleMute,
-  handleCopyDeleteConfirm,
-  handleCopyDeleteExecute,
+  // 9-step add flow handlers
+  handleAddMethodFixed,
+  handleAddMethodExact,
+  handleAddMethodPct,
+  handleAddMethodPortfolio,
+  handleAddSlippage,
+  handleAddSlippageCustom,
+  handleAddSkipMaxMarket,
+  handleAddOddsPreset,
+  handleAddOddsSkip,
+  handleAddOddsCustom,
+  handleAddSlType,
+  handleAddTpType,
+  handleAddBehavior,
+  handleAddBack,
+  // Manage page handlers
+  handleCopyTaskById,
+  handleCopyTaskByAddr,
+  handleManageToggle,
+  handleManageStart,
+  handleManagePause,
+  handleManageMute,
+  handleManageBuyMethod,
+  handleManageCopySide,
+  handleManageEditPrompt,
+  handleManageClear,
+  handleManageDelete,
+  handleManageDeleteExecute,
+  handleManageRename,
+  handleManageSlPrompt,
+  handleManageSlTypePct,
+  handleManageSlTypeFix,
+  handleManageTpPrompt,
+  handleManageTpTypePct,
+  handleManageTpTypeFix,
+  // List page extras
+  handleCopyRemovePrompt,
+  handleCopyRemoveExecute,
+  handleCopyDeleteAllConfirm,
+  handleCopyDeleteAllExecute,
 } from './handlers/copyTrade';
 import { startCopyTradeMonitor } from '../services/copyTrade';
 
@@ -199,6 +238,15 @@ export class TelegramBot {
     this.bot.command('settings', handleSettingsMenu);
     this.bot.command('markets', handleShowCategories);
     this.bot.command('traders', (ctx) => handleSmartWallets(ctx));
+
+    // Alias / shortcut commands
+    this.bot.command('home',         handleBackToMenu);
+    this.bot.command('trade',        handleShowCategories);
+    this.bot.command('trending',     (ctx) => handleCategorySelection(ctx, 'trending'));
+    this.bot.command('smartwallet',  (ctx) => handleSmartWallets(ctx));
+    this.bot.command('copytrade',    async (ctx) => handleCopyCommand(ctx, undefined));
+    this.bot.command('limitorders',  (ctx) => handleOpenOrders(ctx, 1));
+    this.bot.command('history',      (ctx) => handleClosedPositions(ctx, 1));
 
     // Instant info commands
     this.bot.command('pnl', handlePnl);
@@ -273,6 +321,9 @@ export class TelegramBot {
       await handleCopyCommand(ctx, arg);
     });
 
+    // Group membership check callback (used during new user onboarding)
+    this.bot.action('check_membership', handleCheckMembership);
+
     // Callback query handlers for buttons
     this.bot.action('show_categories', handleShowCategories);
     this.bot.action('back_to_menu', handleBackToMenu);
@@ -292,7 +343,6 @@ export class TelegramBot {
     });
     this.bot.action('wallet_page', handleWalletPage);
     this.bot.action('portfolio', handlePortfolio);
-    this.bot.action('withdraw', handleWithdraw);
     this.bot.action('search_markets', handleSearchPrompt);
     this.bot.action('noop', (ctx) => ctx.answerCbQuery()); // No-op for page indicator
 
@@ -303,6 +353,12 @@ export class TelegramBot {
       await handleUpDownMarketDetail(ctx, ctx.match[1], true);
     });
 
+    // Sports subcategory handlers
+    this.bot.action('category_sports_sub', handleSportsCategory);
+    this.bot.action('sports_live', (ctx) => handleLiveSports(ctx, 1));
+    this.bot.action(/^sports_live_(\d+)$/, async (ctx) => {
+      await handleLiveSports(ctx, parseInt(ctx.match[1]));
+    });
     // Category selection handlers
     this.bot.action(/^category_(.+)$/, async (ctx) => {
       const category = ctx.match[1];
@@ -372,8 +428,10 @@ export class TelegramBot {
     });
 
     // Cancel all orders: confirm → execute
-    this.bot.action('cancel_all_confirm',  handleCancelAllConfirm);
-    this.bot.action('cancel_all_do',       handleCancelAllExecute);
+    this.bot.action('cancel_all_confirm',    handleCancelAllConfirm);
+    this.bot.action('cancel_all_do',         handleCancelAllExecute);
+    this.bot.action('close_all_pos_confirm', handleCloseAllConfirm);
+    this.bot.action('close_all_pos_do',      handleCloseAllExecute);
 
     this.bot.action(/^portfolio_closed_(\d+)$/, async (ctx) => {
       const page = parseInt(ctx.match[1], 10);
@@ -404,10 +462,30 @@ export class TelegramBot {
       await handlePositionSellPct(ctx, parseInt(ctx.match[1], 10), parseInt(ctx.match[2], 10));
     });
 
+    // Position PNL
+    this.bot.action(/^pos_pnl_(\d+)$/, async (ctx) => {
+      await handlePositionPnl(ctx, parseInt(ctx.match[1], 10));
+    });
+    this.bot.action(/^pos_pnl_share_(\d+)$/, async (ctx) => {
+      await handlePositionPnlShare(ctx, parseInt(ctx.match[1], 10));
+    });
+
     // Execute / cancel
     this.bot.action('pos_execute_sell', handlePositionExecuteSell);
     this.bot.action('pos_execute_buy', handlePositionExecuteBuy);
+    this.bot.action('pos_execute_sl', handlePositionExecuteStopLoss);
     this.bot.action('pos_cancel', handlePositionCancel);
+
+    // Stop loss trigger
+    this.bot.action(/^pos_sl_(\d+)$/, async (ctx) => {
+      await handlePositionStopLoss(ctx, parseInt(ctx.match[1], 10));
+    });
+
+    // PNL handlers
+    this.bot.action('pnl_alltime', handlePnl);
+    this.bot.action('portfolio_pnl', handlePortfolioPnl);
+    this.bot.action('pnl_share_alltime', async (ctx) => await handlePnlShare(ctx, 'alltime'));
+    this.bot.action('pnl_share_portfolio', async (ctx) => await handlePnlShare(ctx, 'portfolio'));
 
     // Settings handlers
     this.bot.action('settings_menu', handleSettingsMenu);
@@ -423,6 +501,7 @@ export class TelegramBot {
     this.bot.action('settings_slippage_1',  async (ctx) => await handleSetSlippage(ctx, 1.0));
     this.bot.action('settings_slippage_2',  async (ctx) => await handleSetSlippage(ctx, 2.0));
     this.bot.action('settings_slippage_5',  async (ctx) => await handleSetSlippage(ctx, 5.0));
+
 
     // Trade handlers
     // F1: Short callbacks trade_oc_yes/trade_oc_no (full conditionId in callback exceeded 64 bytes)
@@ -468,9 +547,10 @@ export class TelegramBot {
     this.bot.action('2fa_enable', handleEnableTwoFactor);
     this.bot.action('2fa_disable', handleDisableTwoFactor);
     this.bot.action('2fa_backup_codes', handleShowBackupCodes);
+    this.bot.action('2fa_show_key', handleShowManualKey);
 
-    // Deposit handlers
-    this.bot.action('deposit_menu', handleDepositMenu);
+    // Deposit button opens the wallet page directly (Bridge API addresses are shown there)
+    this.bot.action('deposit_menu', handleWalletPage);
     this.bot.action('deposit_polygon', (ctx) => handleDepositChain(ctx, 'polygon'));
     this.bot.action('deposit_ethereum', (ctx) => handleDepositChain(ctx, 'ethereum'));
     this.bot.action('deposit_solana', (ctx) => handleDepositChain(ctx, 'solana'));
@@ -503,84 +583,195 @@ export class TelegramBot {
     // Referral handlers
     this.bot.action('referral_hub', handleReferralHub);
     this.bot.action('referral_claim', handleReferralClaim);
+    this.bot.action('cashback_page', handleCashbackPage);
+    this.bot.action('cashback_claim', handleCashbackClaim);
 
-    // Copy trading handlers
+    // ── Copy Trading ───────────────────────────────────────────────────────
     this.bot.action('copy_list', handleCopyList);
     this.bot.action('copy_start_add', startCopyAdd);
-    this.bot.action('copy_mode_fixed', handleCopyModeFixed);
-    this.bot.action('copy_mode_multiplier', handleCopyModeMultiplier);
-    this.bot.action('copy_stop_all', handleCopyStopAllAction);
     this.bot.action('copy_cancel', handleCopyCancel);
-    this.bot.action('copy_nickname_skip', handleCopyNicknameSkip);
-    this.bot.action('copy_tpsl_none', async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'none'); });
-    this.bot.action('copy_tpsl_tp',   async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'tp'); });
-    this.bot.action('copy_tpsl_sl',   async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'sl'); });
-    this.bot.action('copy_tpsl_both', async (ctx) => { await ctx.answerCbQuery(); await handleCopyTpSlChoice(ctx, 'both'); });
+    this.bot.action('copy_close', handleCopyClose);
+    this.bot.action('copy_confirm_add', handleCopyConfirmAdd);
+    this.bot.action('copy_stop_all', handleCopyStopAllAction);
+    this.bot.action('copy_start_all', handleCopyStartAll);
 
-    // Smart Wallet quick-copy: smart_copy_<0x address>
-    this.bot.action(/^smart_copy_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      const addr = ctx.match[1].toLowerCase();
-      await handleSmartCopyStart(ctx, addr);
+    // List page: Remove / Delete All
+    this.bot.action('copy_remove_prompt', handleCopyRemovePrompt);
+    this.bot.action(/^copy_remove_(?!prompt)(.+)$/, async (ctx) => {
+      await handleCopyRemoveExecute(ctx, ctx.match[1]);
     });
+    this.bot.action('copy_delete_all_confirm', handleCopyDeleteAllConfirm);
+    this.bot.action('copy_delete_all_do', handleCopyDeleteAllExecute);
+
+    // Activity
     this.bot.action(/^copy_history_(\d+)$/, async (ctx) => {
       await handleCopyHistory(ctx, parseInt(ctx.match[1], 10));
     });
-    this.bot.action(/^copy_stop_(.+)$/, async (ctx) => {
-      const { parseTraderAddress } = await import('../services/copyTrade');
-      const { handleCopyStop } = await import('./handlers/copyTrade');
-      const addr = parseTraderAddress(ctx.match[1]);
-      if (addr) await handleCopyStop(ctx, addr);
-      else await ctx.answerCbQuery('Invalid address');
+
+    // Smart Wallet quick-copy
+    this.bot.action(/^smart_copy_(0x[a-f0-9]{40})$/i, async (ctx) => {
+      await handleSmartCopyStart(ctx, ctx.match[1].toLowerCase());
     });
 
-    // ── Manage / Share / Edit actions ──────────────────────────────────────
+    // ── 9-Step Add Flow ─────────────────────────────────────────────────────
+    this.bot.action('copy_add_back', handleAddBack);
+
+    // Step 3: Buy method
+    this.bot.action('copy_add_method_fixed', handleAddMethodFixed);
+    this.bot.action('copy_add_method_exact', handleAddMethodExact);
+    this.bot.action('copy_add_method_pct', handleAddMethodPct);
+    this.bot.action('copy_add_method_portfolio', handleAddMethodPortfolio);
+
+    // Step 4: Max per market skip
+    this.bot.action('copy_add_skip_max_market', handleAddSkipMaxMarket);
+
+    // Step 5: Slippage presets
+    this.bot.action('copy_add_slip_2', async (ctx) => handleAddSlippage(ctx, 2));
+    this.bot.action('copy_add_slip_5', async (ctx) => handleAddSlippage(ctx, 5));
+    this.bot.action('copy_add_slip_10', async (ctx) => handleAddSlippage(ctx, 10));
+    this.bot.action('copy_add_slip_custom', handleAddSlippageCustom);
+
+    // Step 6: Odds filter
+    this.bot.action('copy_add_odds_10_90', async (ctx) => handleAddOddsPreset(ctx, 10, 90));
+    this.bot.action('copy_add_odds_20_80', async (ctx) => handleAddOddsPreset(ctx, 20, 80));
+    this.bot.action('copy_add_odds_custom', handleAddOddsCustom);
+    this.bot.action('copy_add_odds_skip', handleAddOddsSkip);
+
+    // Step 7: Stop Loss
+    this.bot.action('copy_add_sl_pct', async (ctx) => handleAddSlType(ctx, 'pct'));
+    this.bot.action('copy_add_sl_fixed', async (ctx) => handleAddSlType(ctx, 'fixed'));
+    this.bot.action('copy_add_sl_skip', async (ctx) => handleAddSlType(ctx, 'skip'));
+
+    // Step 8: Take Profit
+    this.bot.action('copy_add_tp_pct', async (ctx) => handleAddTpType(ctx, 'pct'));
+    this.bot.action('copy_add_tp_fixed', async (ctx) => handleAddTpType(ctx, 'fixed'));
+    this.bot.action('copy_add_tp_skip', async (ctx) => handleAddTpType(ctx, 'skip'));
+
+    // Step 9: Trade Behavior
+    this.bot.action('copy_add_behavior_buys', async (ctx) => handleAddBehavior(ctx, 'buys_only'));
+    this.bot.action('copy_add_behavior_both', async (ctx) => handleAddBehavior(ctx, 'buys_sells'));
+    this.bot.action('copy_add_behavior_counter', async (ctx) => handleAddBehavior(ctx, 'counter'));
+
+    // ── Per-task manage page ────────────────────────────────────────────────
+    this.bot.action(/^copy_task_(.+)$/, async (ctx) => {
+      const id = ctx.match[1];
+      // Check if it's a byaddr_ prefix
+      if (id.startsWith('byaddr_')) {
+        await handleCopyTaskByAddr(ctx, id.slice(7));
+      } else {
+        await handleCopyTaskById(ctx, id);
+      }
+    });
+
+    // Manage page: Start / Pause
+    this.bot.action(/^cpm_start_(.+)$/, async (ctx) => handleManageStart(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_pause_(.+)$/, async (ctx) => handleManagePause(ctx, ctx.match[1]));
+
+    // Manage page: Buy method switches
+    this.bot.action(/^cpm_bm_fixed_(.+)$/, async (ctx) => handleManageBuyMethod(ctx, ctx.match[1], 'fixed'));
+    this.bot.action(/^cpm_bm_exact_(.+)$/, async (ctx) => handleManageBuyMethod(ctx, ctx.match[1], 'exact'));
+    this.bot.action(/^cpm_bm_pct_(.+)$/, async (ctx) => handleManageBuyMethod(ctx, ctx.match[1], 'pct'));
+    this.bot.action(/^cpm_bm_port_(.+)$/, async (ctx) => handleManageBuyMethod(ctx, ctx.match[1], 'port'));
+
+    // Manage page: Toggle booleans
+    this.bot.action(/^cpm_tgl_buys_(.+)$/, async (ctx) => handleManageToggle(ctx, ctx.match[1], 'buys'));
+    this.bot.action(/^cpm_tgl_sells_(.+)$/, async (ctx) => handleManageToggle(ctx, ctx.match[1], 'sells'));
+    this.bot.action(/^cpm_tgl_bos_(.+)$/, async (ctx) => handleManageToggle(ctx, ctx.match[1], 'bos'));
+    this.bot.action(/^cpm_tgl_ct_(.+)$/, async (ctx) => handleManageToggle(ctx, ctx.match[1], 'ct'));
+    this.bot.action(/^cpm_tgl_limit_(.+)$/, async (ctx) => handleManageToggle(ctx, ctx.match[1], 'limit'));
+
+    // Manage page: Copy side cycle
+    this.bot.action(/^cpm_copyside_(.+)$/, async (ctx) => handleManageCopySide(ctx, ctx.match[1]));
+
+    // Manage page: Mute toggle
+    this.bot.action(/^cpm_mute_(.+)$/, async (ctx) => handleManageMute(ctx, ctx.match[1]));
+
+    // Manage page: Edit fields (prompt for text input)
+    this.bot.action(/^cpm_amount_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_amount',
+        `💰 <b>Edit Amount</b>\n\nEnter the new amount:`);
+    });
+    this.bot.action(/^cpm_slip_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_slippage',
+        `⚡ <b>Edit Slippage</b>\n\nEnter slippage % (0.1–50):`);
+    });
+    this.bot.action(/^cpm_maxbuy_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_buy',
+        `📈 <b>Max Buy Amount</b>\n\nEnter max USD per single BUY:`);
+    });
+    this.bot.action(/^cpm_minbuy_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_buy',
+        `📉 <b>Min Buy Amount</b>\n\nEnter min USD per single BUY:`);
+    });
+    this.bot.action(/^cpm_maxspm_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_spend_market',
+        `💸 <b>Max Spend Per Market</b>\n\nEnter max USD per market:`);
+    });
+    this.bot.action(/^cpm_maxspt_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_spend_total',
+        `💸 <b>Max Spend Total</b>\n\nEnter lifetime max spend in USD:`);
+    });
+    this.bot.action(/^cpm_daily_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_daily_limit',
+        `📅 <b>Daily Spend Limit</b>\n\nEnter max USD per day:`);
+    });
+    this.bot.action(/^cpm_mintrig_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_trigger',
+        `⬇️ <b>Min Trigger Price</b>\n\nOnly copy if price ≥ X¢. Enter cents (0–100):`);
+    });
+    this.bot.action(/^cpm_maxtrig_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_trigger',
+        `⬆️ <b>Max Trigger Price</b>\n\nOnly copy if price ≤ X¢. Enter cents (0–100):`);
+    });
+    this.bot.action(/^cpm_maxdays_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_days',
+        `📅 <b>Max Days Out</b>\n\nSkip markets expiring in more than N days. Enter number:`);
+    });
+    this.bot.action(/^cpm_minliq_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_liq',
+        `💧 <b>Min Liquidity</b>\n\nEnter minimum liquidity in USD:`);
+    });
+    this.bot.action(/^cpm_minvol_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_vol',
+        `📊 <b>Min Volume</b>\n\nEnter minimum volume in USD:`);
+    });
+    this.bot.action(/^cpm_prmin_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_price_min',
+        `⬇️ <b>Min Price Filter</b>\n\nSkip trades priced below X¢. Enter cents (0–100):`);
+    });
+    this.bot.action(/^cpm_prmax_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_price_max',
+        `⬆️ <b>Max Price Filter</b>\n\nSkip trades priced above X¢. Enter cents (0–100):`);
+    });
+    this.bot.action(/^cpm_cats_(.+)$/, async (ctx) => {
+      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_categories',
+        `📁 <b>Categories</b>\n\nEnter comma-separated category names, or type "all" for all:`);
+    });
+
+    // Manage page: Rename / Delete
+    this.bot.action(/^cpm_rename_(.+)$/, async (ctx) => handleManageRename(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_del_(.+)$/, async (ctx) => handleManageDelete(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_deldo_(.+)$/, async (ctx) => handleManageDeleteExecute(ctx, ctx.match[1]));
+
+    // Manage page: Clear fields
+    this.bot.action(/^cpm_clear_(.+?)_(.+)$/, async (ctx) => {
+      await handleManageClear(ctx, ctx.match[2], ctx.match[1]);
+    });
+
+    // Manage page: SL / TP prompts
+    this.bot.action(/^cpm_sl_(.+)$/, async (ctx) => handleManageSlPrompt(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_tp_(.+)$/, async (ctx) => handleManageTpPrompt(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_sltype_pct_(.+)$/, async (ctx) => handleManageSlTypePct(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_sltype_fix_(.+)$/, async (ctx) => handleManageSlTypeFix(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_tptype_pct_(.+)$/, async (ctx) => handleManageTpTypePct(ctx, ctx.match[1]));
+    this.bot.action(/^cpm_tptype_fix_(.+)$/, async (ctx) => handleManageTpTypeFix(ctx, ctx.match[1]));
+
+    // Legacy deep-link manage/share via address
     this.bot.action(/^copy_manage_(0x[a-f0-9]{40})$/i, async (ctx) => {
       await handleCopyManage(ctx, ctx.match[1].toLowerCase());
     });
     this.bot.action(/^copy_share_(0x[a-f0-9]{40})$/i, async (ctx) => {
       await handleCopyShare(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_chmode_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyChangeMode(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_editmode_fixed_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyEditModeChoice(ctx, ctx.match[1].toLowerCase(), 'fixed');
-    });
-    this.bot.action(/^copy_editmode_mult_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyEditModeChoice(ctx, ctx.match[1].toLowerCase(), 'multiplier');
-    });
-    this.bot.action(/^copy_rename_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyRename(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_slippage_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopySetSlippage(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_prng_clear_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyPriceRangeClear(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_prng_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopySetPriceRange(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_dlimit_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopySetDailyLimit(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_slim_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopySetSingleLimit(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_pause_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyPause(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_resume_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyResume(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_mute_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyToggleMute(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_delconf_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyDeleteConfirm(ctx, ctx.match[1].toLowerCase());
-    });
-    this.bot.action(/^copy_del_(0x[a-f0-9]{40})$/i, async (ctx) => {
-      await handleCopyDeleteExecute(ctx, ctx.match[1].toLowerCase());
     });
 
     // Withdraw handlers
@@ -609,9 +800,11 @@ export class TelegramBot {
         return;
       }
 
+
       // Active trade flows always take priority over settings amount input
       // Check if user is in a trade flow (waiting for amount input)
-      const tradeStateData = tradeState.get(telegramId);
+      // Uses async Redis-backed state to survive bot restarts
+      const tradeStateData = await tradeState.get(telegramId);
       if (tradeStateData) {
         settingsAmountState.delete(telegramId); // discard stale settings state
         await handleTradeAmountInput(ctx, text);
@@ -619,7 +812,7 @@ export class TelegramBot {
       }
 
       // Check if user is in a limit order flow (price or amount input)
-      const ltState = limitTradeState.get(telegramId);
+      const ltState = await limitTradeState.get(telegramId);
       if (ltState) {
         settingsAmountState.delete(telegramId);
         const consumed = await handleLimitTradeInput(ctx, text);
@@ -627,33 +820,37 @@ export class TelegramBot {
       }
 
       // Check if user is in a position trade flow (sell/buy from positions)
-      const posStateData = positionTradeState.get(telegramId);
+      const posStateData = await positionTradeState.get(telegramId);
       if (posStateData) {
         settingsAmountState.delete(telegramId);
         await handlePositionTradeInput(ctx, text);
         return;
       }
 
-      // Check if user is in a withdraw flow (entering address or amount)
-      const wdStateData = withdrawState.get(telegramId);
-      if (wdStateData) {
-        settingsAmountState.delete(telegramId);
-        await handleWithdrawTextInput(ctx, text);
-        return;
-      }
-
       // Check if user is in a copy-add flow (entering address or amount)
-      const copyState = copyAddState.get(telegramId);
+      // Copy trade flows checked BEFORE withdraw — withdraw deletes user messages,
+      // and a stale withdraw state must never intercept copy trade text input.
+      const copyState = await copyAddState.get(telegramId);
       if (copyState) {
+        withdrawState.delete(telegramId); // clear stale withdraw state
         const consumed = await handleCopyAddInput(ctx, text);
         if (consumed) return;
       }
 
       // Check if user is in a copy-edit flow (manage page edits)
-      const copyEdit = copyEditState.get(telegramId);
+      const copyEdit = await copyEditState.get(telegramId);
       if (copyEdit) {
+        withdrawState.delete(telegramId);
         const consumed = await handleCopyEditInput(ctx, text);
         if (consumed) return;
+      }
+
+      // Check if user is in a withdraw flow (entering address or amount)
+      const wdStateData = await withdrawState.get(telegramId);
+      if (wdStateData) {
+        settingsAmountState.delete(telegramId);
+        await handleWithdrawTextInput(ctx, text);
+        return;
       }
 
       // Check if user is typing a custom default trade amount (lower priority than active flows)
@@ -707,7 +904,17 @@ export class TelegramBot {
       }
 
       // Global keyword search — runs only when no active user flow consumed the text
-      if (!text.startsWith('/') && !copyAddState.has(telegramId)) {
+      const hasActiveFlow =
+        tradeState.has(telegramId) ||
+        limitTradeState.has(telegramId) ||
+        positionTradeState.has(telegramId) ||
+        withdrawState.has(telegramId) ||
+        copyAddState.has(telegramId) ||
+        copyEditState.has(telegramId) ||
+        settingsAmountState.has(telegramId) ||
+        settingsSlippageState.has(telegramId) ||
+        userState.has(telegramId);
+      if (!text.startsWith('/') && !hasActiveFlow) {
         await handleKeywordSearch(ctx, text);
         return;
       }
@@ -775,7 +982,7 @@ export class TelegramBot {
       // Start copy trade monitor (polls every 30s)
       startCopyTradeMonitor(async (telegramId: string, message: string) => {
         try {
-          await this.bot.telegram.sendMessage(telegramId, message, { parse_mode: 'Markdown' });
+          await this.bot.telegram.sendMessage(telegramId, message, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
         } catch (err: any) {
           logger.warn(`[copy] Failed to send notification to ${telegramId}: ${err?.message}`);
         }

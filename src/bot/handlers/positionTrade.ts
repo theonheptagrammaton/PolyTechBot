@@ -1,11 +1,30 @@
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
+import { config } from '../../config';
 import { getActivePositions, ActivePosition } from '../../services/portfolio';
 import { decrypt } from '../../utils/encryption';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
-import { sendPage } from '../../utils/telegram';
+import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
+import { ce, EMOJI } from '../../utils/customEmoji';
+import { generatePositionPnlImage } from '../../services/pnlImage';
+import { RedisBackedState } from '../../utils/redisState';
+
+// ─── Helpers: image fetching ────────────────────────────────────────────────
+
+/** Fetches an image URL as a Buffer. Returns undefined on failure. */
+async function fetchImageBuffer(url?: string): Promise<Buffer | undefined> {
+  if (!url) return undefined;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return undefined;
+    const ab = await res.arrayBuffer();
+    return Buffer.from(ab);
+  } catch {
+    return undefined;
+  }
+}
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -20,7 +39,7 @@ export const positionListCache = new Map<string, ActivePosition[]>();
 // ─── State ─────────────────────────────────────────────────────────────────
 
 interface PositionTradeState {
-  action: 'buy' | 'sell';
+  action: 'buy' | 'sell' | 'stop_loss';
   assetId: string;
   conditionId: string;
   negRisk: boolean;
@@ -28,13 +47,13 @@ interface PositionTradeState {
   outcome: string;
   currentSize: number;
   curPrice: number;       // current market price (used as default for confirmations)
-  step: 'awaiting_price_size';
+  step: 'awaiting_price_size' | 'awaiting_sl_price';
   price?: number;
   size?: number;
   timestamp: number;
 }
 
-export const positionTradeState = new Map<string, PositionTradeState>();
+export const positionTradeState = new RedisBackedState<PositionTradeState>('positionTrade', 600);
 
 // R6: Periodic cleanup of abandoned state entries (every 30 min, remove entries > 10 min old)
 setInterval(() => {
@@ -50,6 +69,19 @@ function getPos(telegramId: string, idx: number): ActivePosition | null {
   const list = positionListCache.get(telegramId);
   if (!list || idx < 0 || idx >= list.length) return null;
   return list[idx];
+}
+
+/** Try cache first, then fetch fresh positions from API if cache misses */
+async function getPosOrFetch(telegramId: string, idx: number): Promise<ActivePosition | null> {
+  const cached = getPos(telegramId, idx);
+  if (cached) return cached;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user?.polymarketProxyAddress) return null;
+
+  const fresh = await getActivePositions(user.polymarketProxyAddress).catch(() => []);
+  if (fresh.length > 0) positionListCache.set(telegramId, fresh);
+  return idx >= 0 && idx < fresh.length ? fresh[idx] : null;
 }
 
 function truncate(s: string, n: number): string {
@@ -117,9 +149,9 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const pos = getPos(telegramId, idx);
+    const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. Please refresh your positions.');
+      await ctx.reply('⚠️ Position not found. You may have no active positions.');
       return;
     }
 
@@ -151,11 +183,188 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
           Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
           Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
         ],
+        [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
         [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
       ]),
     });
   } catch (error) {
     logger.error('Error showing position view:', error);
+  }
+}
+
+// ─── Position PNL image ───────────────────────────────────────────────────
+
+export async function handlePositionPnl(ctx: Context, idx: number): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    // Always fetch fresh data on Refresh (callback) — stale cache defeats the purpose
+    let pos: ActivePosition | null = null;
+    if (ctx.callbackQuery) {
+      const user = await getUserByTelegramId(telegramId);
+      if (user?.polymarketProxyAddress) {
+        const fresh = await getActivePositions(user.polymarketProxyAddress, true).catch(() => []);
+        if (fresh.length > 0) positionListCache.set(telegramId, fresh);
+        pos = idx >= 0 && idx < fresh.length ? fresh[idx] : null;
+      }
+    } else {
+      pos = await getPosOrFetch(telegramId, idx);
+    }
+
+    if (!pos) {
+      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      return;
+    }
+
+    // Build sender's referral share URL for Telegram's native share dialog
+    let shareUrl = '';
+    const telegramIdForShare = ctx.from?.id.toString() ?? telegramId;
+    try {
+      const senderUser = await getUserByTelegramId(telegramIdForShare);
+      if (senderUser) {
+        const { ensureReferralCode } = await import('../../services/referral');
+        const code = await ensureReferralCode(senderUser.id, senderUser.username ?? undefined);
+        const refLink = `https://t.me/${config.telegram.botUsername}?start=ref_${code}`;
+        const shareText = encodeURIComponent('🌸 Start winning with PolyTech\n');
+        shareUrl = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${shareText}`;
+      }
+    } catch { /* proceed without share button */ }
+
+    const pnlKeyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('📈 Buy', `pos_buy_${idx}`),
+        Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+      ],
+      [
+        Markup.button.callback('🔄 Refresh', `pos_pnl_${idx}`),
+        ...(shareUrl ? [Markup.button.url('📤 Share', shareUrl)] : []),
+      ],
+      [Markup.button.callback('🛑 Stop Loss', `pos_sl_${idx}`)],
+      [Markup.button.callback('« Back', `pos_view_${idx}`)],
+    ]);
+
+    // Build rich HTML caption
+    const pnlDir = pos.cashPnl >= 0 ? ce(EMOJI.pnlUp, '📈') : ce(EMOJI.pnlDown, '📉');
+    const pnlSign = pos.cashPnl >= 0 ? '+' : '';
+    const pctSign = pos.percentPnl >= 0 ? '+' : '';
+    const escTitle = pos.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    let caption = `${ce(EMOJI.pnlChart, '📊')} <b>Position P&amp;L</b>\n\n`;
+    caption += `${ce(EMOJI.fire, '🔥')} <b>${pos.outcome}</b> — ${escTitle}\n\n`;
+    caption += `${ce(EMOJI.diamond, '💎')} <b>P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${pos.cashPnl.toFixed(2)}</b>\n`;
+    caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${pos.percentPnl.toFixed(1)}%\n\n`;
+    caption += `${ce(EMOJI.target, '🎯')} <b>Entry:</b>  ${(pos.avgPrice * 100).toFixed(1)}¢\n`;
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>Current:</b>  ${(pos.curPrice * 100).toFixed(1)}¢`;
+
+    // Try image generation
+    try {
+      const [profilePhotoBuffer, eventIconBuffer] = await Promise.all([
+        fetchProfilePhoto(ctx),
+        fetchImageBuffer(pos.icon),
+      ]);
+      const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+
+      const imageBuffer = await generatePositionPnlImage({
+        title: pos.title,
+        outcome: pos.outcome,
+        cashPnl: pos.cashPnl,
+        percentPnl: pos.percentPnl,
+        avgPrice: pos.avgPrice,
+        curPrice: pos.curPrice,
+        invested: pos.initialValue,
+        currentValue: pos.currentValue,
+        username: ctx.from?.username,
+        displayName,
+        profilePhotoBuffer,
+        eventIconBuffer,
+      });
+
+      if (imageBuffer) {
+        await sendImageBufferPage(ctx, imageBuffer, caption, {
+          parse_mode: 'HTML',
+          ...pnlKeyboard,
+        });
+        return;
+      }
+    } catch (imgErr) {
+      logger.warn('[pnlImage] Position PNL image generation failed, using text fallback:', imgErr);
+    }
+
+    // Text fallback (same rich caption, no image)
+    await sendPage(ctx, caption, {
+      parse_mode: 'HTML',
+      ...pnlKeyboard,
+    });
+  } catch (error) {
+    logger.error('Error in handlePositionPnl:', error);
+    await ctx.reply('❌ Failed to generate P&L. Please try again.').catch(() => {});
+  }
+}
+
+/**
+ * Share a position PNL image (forwardable, no keyboard)
+ */
+export async function handlePositionPnlShare(ctx: Context, idx: number): Promise<void> {
+  try {
+    await ctx.answerCbQuery('Generating share image...').catch(() => {});
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const pos = await getPosOrFetch(telegramId, idx);
+    if (!pos) {
+      await ctx.reply('⚠️ Position not found.');
+      return;
+    }
+
+    const [profilePhotoBuffer, eventIconBuffer] = await Promise.all([
+      fetchProfilePhoto(ctx),
+      fetchImageBuffer(pos.icon),
+    ]);
+    const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+
+    const imageBuffer = await generatePositionPnlImage({
+      title: pos.title,
+      outcome: pos.outcome,
+      cashPnl: pos.cashPnl,
+      percentPnl: pos.percentPnl,
+      avgPrice: pos.avgPrice,
+      curPrice: pos.curPrice,
+      invested: pos.initialValue,
+      currentValue: pos.currentValue,
+      username: ctx.from?.username,
+      displayName,
+      profilePhotoBuffer,
+      eventIconBuffer,
+    });
+
+    if (imageBuffer) {
+      // Build sender's referral link for the share caption
+      let senderReferralLink = '';
+      try {
+        const senderUser = await getUserByTelegramId(telegramId);
+        if (senderUser) {
+          const { ensureReferralCode } = await import('../../services/referral');
+          const code = await ensureReferralCode(senderUser.id, senderUser.username ?? undefined);
+          senderReferralLink = `https://t.me/${config.telegram.botUsername}?start=ref_${code}`;
+        }
+      } catch { /* proceed without link */ }
+
+      const shareCaption =
+        `${ce(EMOJI.cherry, '🌸')} <b>Start winning with PolyTech</b>\n` +
+        (senderReferralLink ? `\n${senderReferralLink}` : '');
+
+      await ctx.replyWithPhoto(
+        { source: imageBuffer },
+        { caption: shareCaption, parse_mode: 'HTML' },
+      );
+    } else {
+      await ctx.answerCbQuery('No PNL templates available yet.', { show_alert: true });
+    }
+  } catch (error) {
+    logger.error('Error in handlePositionPnlShare:', error);
+    await ctx.reply('❌ Failed to generate share image.');
   }
 }
 
@@ -167,9 +376,9 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const pos = getPos(telegramId, idx);
+    const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. Please refresh your positions.');
+      await ctx.reply('⚠️ Position not found. You may have no active positions.');
       return;
     }
 
@@ -221,9 +430,9 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const pos = getPos(telegramId, idx);
+    const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. Please refresh your positions.');
+      await ctx.reply('⚠️ Position not found. You may have no active positions.');
       return;
     }
 
@@ -259,13 +468,182 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
   }
 }
 
+// ─── Stop Loss flow ────────────────────────────────────────────────────────
+
+export async function handlePositionStopLoss(ctx: Context, idx: number): Promise<void> {
+  try {
+    await ctx.answerCbQuery();
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const pos = await getPosOrFetch(telegramId, idx);
+    if (!pos) {
+      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      return;
+    }
+
+    positionTradeState.set(telegramId, {
+      action: 'stop_loss',
+      assetId: pos.asset,
+      conditionId: pos.conditionId,
+      negRisk: pos.negativeRisk,
+      title: pos.title,
+      outcome: pos.outcome,
+      currentSize: pos.size,
+      curPrice: pos.curPrice,
+      step: 'awaiting_sl_price',
+      timestamp: Date.now(),
+    });
+
+    const curCents = (pos.curPrice * 100).toFixed(1);
+    const suggestSl = ((pos.curPrice * 0.8) * 100).toFixed(0); // 20% below as example
+
+    const msg =
+      `🛑 *Stop Loss*\n\n` +
+      `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
+      `You hold: *${pos.size.toFixed(4)} shares*\n` +
+      `Current price: *${curCents}¢*\n\n` +
+      `Enter the *stop loss price in cents* (must be below current price).\n` +
+      `A GTC limit sell order will be placed for all your shares.\n\n` +
+      `Example: \`${suggestSl}\` → sells at ${suggestSl}¢`;
+
+    await ctx.reply(msg, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'pos_cancel')]]),
+    });
+  } catch (error) {
+    logger.error('Error starting stop loss flow:', error);
+  }
+}
+
+async function showStopLossConfirmation(
+  ctx: Context,
+  telegramId: string,
+  state: PositionTradeState,
+  slPrice: number,
+): Promise<void> {
+  positionTradeState.set(telegramId, { ...state, price: slPrice, timestamp: Date.now() });
+
+  const slCents   = (slPrice * 100).toFixed(1);
+  const curCents  = (state.curPrice * 100).toFixed(1);
+  const estValue  = (state.currentSize * slPrice).toFixed(2);
+  const dropPct   = (((state.curPrice - slPrice) / state.curPrice) * 100).toFixed(1);
+
+  const msg =
+    `🛑 *Stop Loss Confirmation*\n\n` +
+    `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
+    `📦 Shares to sell: *${state.currentSize.toFixed(4)}*\n` +
+    `📊 Current price: *${curCents}¢*\n` +
+    `🎯 Stop loss price: *${slCents}¢* (${dropPct}% below)\n` +
+    `💰 Est. proceeds: ~$${estValue}\n\n` +
+    `_A GTC limit SELL order will be placed at ${slCents}¢._\n` +
+    `_It will fill automatically when the price drops to this level._`;
+
+  await ctx.reply(msg, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback('✅ Place Stop Loss', 'pos_execute_sl'),
+        Markup.button.callback('❌ Cancel', 'pos_cancel'),
+      ],
+    ]),
+  });
+}
+
+export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  await ctx.answerCbQuery('Placing stop loss…').catch(() => {});
+
+  const state = await positionTradeState.get(telegramId);
+  if (!state || state.action !== 'stop_loss' || !state.price) {
+    await ctx.reply('❌ Session expired. Please start again.').catch(() => {});
+    return;
+  }
+  positionTradeState.delete(telegramId);
+
+  try {
+    const user = await getUserByTelegramId(telegramId);
+    if (!user?.polymarketProxyAddress) {
+      await ctx.reply('❌ Trading wallet not set up.').catch(() => {});
+      return;
+    }
+
+    const { ClobClient, Side } = await import('@polymarket/clob-client');
+    const { Wallet } = await import('@ethersproject/wallet');
+    const { decrypt: dec } = await import('../../utils/encryption');
+    const { config: cfg } = await import('../../config');
+
+    const wallet     = new Wallet(dec(user.encryptedPrivateKey));
+    const clobClient = new ClobClient(
+      cfg.polymarket.host,
+      cfg.polymarket.chainId,
+      wallet,
+      { key: dec(user.encryptedApiKey), secret: dec(user.encryptedApiSecret), passphrase: dec(user.encryptedPassphrase) },
+      2,
+      user.polymarketProxyAddress,
+    );
+
+    // Snap price to 0.01 tick
+    const tick       = 0.01;
+    const snappedPrice = parseFloat(Math.max(Math.round(state.price / tick) * tick, 0.01).toFixed(2));
+    const shares     = parseFloat(state.currentSize.toFixed(4));
+
+    let slFeeRateBps = 0;
+    try { slFeeRateBps = await clobClient.getFeeRateBps(state.assetId); } catch { /* proceed with 0 */ }
+
+    logger.info(
+      `[stopLoss] Placing GTC SELL: ${shares} shares of ${state.outcome} ` +
+      `assetId=${state.assetId.substring(0, 16)}... price=${snappedPrice}`
+    );
+
+    const orderResp = await clobClient.createAndPostOrder(
+      { tokenID: state.assetId, side: Side.SELL, price: snappedPrice, size: shares, feeRateBps: slFeeRateBps },
+      state.negRisk ? { negRisk: true } : undefined,
+    );
+
+    if (!orderResp.success || !orderResp.orderID) {
+      const errMsg = orderResp.errorMsg || (orderResp as any).error || 'Order rejected by exchange';
+      throw new Error(errMsg);
+    }
+
+    const slCents = (snappedPrice * 100).toFixed(1);
+    await ctx.reply(
+      `✅ *Stop Loss Placed*\n\n` +
+      `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
+      `🛑 Trigger price: *${slCents}¢*\n` +
+      `📦 Shares: *${shares}*\n` +
+      `🆔 Order ID: \`${orderResp.orderID}\`\n\n` +
+      `_GTC limit sell order resting on the book. Cancel it from Open Orders if needed._`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📋 Open Orders', 'portfolio_orders_1')],
+          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        ]),
+      },
+    ).catch(() => {});
+
+    logger.info(
+      `[stopLoss] Placed: user=${telegramId} outcome=${state.outcome} price=${snappedPrice} shares=${shares} orderID=${orderResp.orderID}`
+    );
+  } catch (error: any) {
+    logger.error('[stopLoss] Error executing stop loss:', error);
+    await ctx.reply(
+      `❌ *Stop Loss Failed*\n\n${error?.message || 'Unknown error'}\n\nPlease try again.`,
+      { parse_mode: 'Markdown' },
+    ).catch(() => {});
+  }
+}
+
 // ─── Quick % sell ──────────────────────────────────────────────────────────
 
 export async function handlePositionSellPct(ctx: Context, idx: number, pct: number): Promise<void> {
   try {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
-    const state = positionTradeState.get(telegramId);
+    const state = await positionTradeState.get(telegramId);
     const pos = getPos(telegramId, idx);
 
     if (!state || !pos) {
@@ -308,7 +686,7 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const state = positionTradeState.get(telegramId);
+  const state = await positionTradeState.get(telegramId);
   if (!state) return;
 
   if (Date.now() - state.timestamp > 10 * 60 * 1000) {
@@ -317,15 +695,36 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
     return;
   }
 
-  const val = parseFloat(text.trim().replace(/[^0-9.]/g, ''));
+  const val = parseFloat(text.trim().replace(/[^0-9.,]/g, '').replace(',', '.'));
 
   if (isNaN(val) || val <= 0) {
     await ctx.reply(
       state.action === 'sell'
         ? '❌ Enter the number of shares to sell. Example: `7.5`'
+        : state.action === 'stop_loss'
+        ? '❌ Enter the stop loss price in cents. Example: `35` for 35¢'
         : '❌ Enter the USDC amount to spend. Example: `10`',
       { parse_mode: 'Markdown' }
     );
+    return;
+  }
+
+  if (state.action === 'stop_loss') {
+    // val is in cents (e.g. 35 = 35¢ = 0.35)
+    const slPrice = val > 1 ? val / 100 : val; // support both 35 and 0.35
+    if (slPrice >= state.curPrice) {
+      await ctx.reply(
+        `❌ Stop loss price must be *below* current price.\n\n` +
+        `Current: *${(state.curPrice * 100).toFixed(1)}¢*\nYou entered: *${(slPrice * 100).toFixed(1)}¢*`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    if (slPrice < 0.01) {
+      await ctx.reply('❌ Minimum price is 1¢.', { parse_mode: 'Markdown' });
+      return;
+    }
+    await showStopLossConfirmation(ctx, telegramId, state, slPrice);
     return;
   }
 
@@ -476,7 +875,7 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const state = positionTradeState.get(telegramId);
+    const state = await positionTradeState.get(telegramId);
     if (!state || state.price === undefined || state.size === undefined) {
       await ctx.reply('❌ Session expired. Please start again.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
@@ -485,7 +884,7 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
     }
     positionTradeState.delete(telegramId);
 
-    try { await ctx.editMessageText('⏳ Placing sell order...'); } catch { await ctx.reply('⏳ Placing sell order...'); }
+    try { await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ' Placing sell order...', { parse_mode: 'HTML' }); } catch { await ctx.reply(ce(EMOJI.loading, '⏳') + ' Placing sell order...', { parse_mode: 'HTML' }); }
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) { await ctx.reply('❌ User not found.'); return; }
@@ -497,7 +896,7 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
       positionListCache.delete(telegramId);
       try {
         const { invalidatePortfolioCache } = await import('../../services/portfolio');
-        await invalidatePortfolioCache(user.encryptedPrivateKey);
+        await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
       } catch {}
 
       const msg =
@@ -541,7 +940,7 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
-    const state = positionTradeState.get(telegramId);
+    const state = await positionTradeState.get(telegramId);
     if (!state || state.price === undefined || state.size === undefined) {
       await ctx.reply('❌ Session expired. Please start again.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
@@ -550,7 +949,7 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
     }
     positionTradeState.delete(telegramId);
 
-    try { await ctx.editMessageText('⏳ Placing buy order...'); } catch { await ctx.reply('⏳ Placing buy order...'); }
+    try { await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ' Placing buy order...', { parse_mode: 'HTML' }); } catch { await ctx.reply(ce(EMOJI.loading, '⏳') + ' Placing buy order...', { parse_mode: 'HTML' }); }
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) { await ctx.reply('❌ User not found.'); return; }
@@ -562,7 +961,7 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
       positionListCache.delete(telegramId);
       try {
         const { invalidatePortfolioCache } = await import('../../services/portfolio');
-        await invalidatePortfolioCache(user.encryptedPrivateKey);
+        await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
       } catch {}
 
       const usdAmount = state.size * state.price;
@@ -653,6 +1052,12 @@ async function executePositionOrder(
   if (tickSize) orderOptions.tickSize = tickSize;
   if (negRisk) orderOptions.negRisk = true;
 
+  // Fetch fee rate dynamically — do not hardcode 0 (some markets require non-zero)
+  let feeRateBps = 0;
+  try {
+    feeRateBps = await clobClient.getFeeRateBps(assetId);
+  } catch { /* proceed with 0 */ }
+
   // For SELL orders: verify on-chain that the proxy actually holds the tokens,
   // then refresh the CLOB's cached view. The previous approach using
   // updateBalanceAllowance(CONDITIONAL) may refresh the EOA balance (0) instead
@@ -660,14 +1065,15 @@ async function executePositionOrder(
   // proxy via a prior GNOSIS_SAFE order. We call it AFTER verifying on-chain so
   // we know the tokens really exist before asking the CLOB to re-read.
   if (action === 'sell') {
-    const { Contract, providers: ethersProviders } = await import('ethers');
+    const { Contract } = await import('ethers');
+    const { getPolygonProvider } = await import('../../utils/provider');
     const CTF_CONTRACT_ADDR = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
     const NEG_RISK_EXCHANGE_ADDR = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
     const CTF_ABI_MIN = [
       'function balanceOf(address account, uint256 id) view returns (uint256)',
       'function isApprovedForAll(address owner, address operator) view returns (bool)',
     ];
-    const rpcProvider = new ethersProviders.JsonRpcProvider('https://polygon-bor-rpc.publicnode.com');
+    const rpcProvider = await getPolygonProvider();
     const ctfOnChain = new Contract(CTF_CONTRACT_ADDR, CTF_ABI_MIN, rpcProvider);
 
     // Check on-chain token balance
@@ -682,76 +1088,87 @@ async function executePositionOrder(
       );
     }
 
-    // Check NegRisk CTF Exchange approval on-chain
-    const isNegRiskApproved = await ctfOnChain.isApprovedForAll(user.polymarketProxyAddress, NEG_RISK_EXCHANGE_ADDR);
-    logger.info(`[positionTrade] On-chain NegRisk approval: ${isNegRiskApproved}`);
+    // Check NegRisk approvals on-chain (exchange + adapter — both required for CLOB NegRisk sells)
+    const NEG_RISK_ADAPTER_ADDR = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
+    const [isNegRiskApproved, isNegRiskAdapterApproved] = await Promise.all([
+      ctfOnChain.isApprovedForAll(user.polymarketProxyAddress, NEG_RISK_EXCHANGE_ADDR),
+      ctfOnChain.isApprovedForAll(user.polymarketProxyAddress, NEG_RISK_ADAPTER_ADDR),
+    ]);
+    logger.info(`[positionTrade] On-chain NegRisk approval: exchange=${isNegRiskApproved} adapter=${isNegRiskAdapterApproved}`);
 
-    if (!isNegRiskApproved) {
-      logger.warn('[positionTrade] NegRisk approval missing on-chain — setting now...');
+    if (!isNegRiskApproved || !isNegRiskAdapterApproved) {
+      logger.warn('[positionTrade] NegRisk approval(s) missing — setting now...');
       const { enableTrading } = await import('../../services/deposit');
       const approvalResult = await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress);
       if (!approvalResult.success) {
-        throw new Error('Failed to set NegRisk CTF Exchange approval on proxy wallet');
+        throw new Error('Failed to set NegRisk approvals on proxy wallet');
       }
-      logger.info('[positionTrade] NegRisk approval set successfully');
-    }
-
-    // Refresh CLOB's cached view of the proxy's conditional token balance.
-    // With signature_type=2 in the query, the CLOB server uses the proxy as funder.
-    try {
-      await clobClient.updateBalanceAllowance({
-        asset_type: 'CONDITIONAL' as any,
-        token_id: assetId,
-      });
-      logger.info(`[positionTrade] CLOB balance cache refreshed for token ${assetId.substring(0, 16)}...`);
-    } catch (e) {
-      logger.warn('[positionTrade] Could not refresh CLOB balance cache (non-fatal):', e);
+      logger.info('[positionTrade] NegRisk approvals set successfully');
     }
 
     const tick = tickSize ? parseFloat(tickSize) : 0.01;
     const decimals = tickSize?.includes('.') ? tickSize.split('.')[1].length : 2;
 
-    // Step 1: Fetch order book — find the lowest bid level needed to fill the full order.
-    // This avoids blind slippage and sets an accurate floor based on real liquidity.
+    // Run balance refresh and order book fetch in parallel — they are independent:
+    // updateBalanceAllowance updates CLOB's internal view of the user's token balance.
+    // For NegRisk positions, call without token_id first (broad refresh) then with token_id
+    // because the token-scoped refresh alone doesn't update NegRisk allowance tracking.
+    // getOrderBook reads public market liquidity. Neither depends on the other.
     let smartFloor = tick; // fallback: accept any price
 
-    try {
-      const book = await clobClient.getOrderBook(assetId);
-      if (book.bids && book.bids.length > 0) {
-        // bids are sorted best (highest) to worst (lowest)
-        let remaining = size;
-        let lastBidPrice = parseFloat(book.bids[0].price);
+    const refreshBalance = async () => {
+      // Broad CONDITIONAL refresh (no token_id) — covers NegRisk allowance tracking
+      await clobClient.updateBalanceAllowance({ asset_type: 'CONDITIONAL' as any }).catch(() => {});
+      // Token-specific refresh
+      await clobClient.updateBalanceAllowance({
+        asset_type: 'CONDITIONAL' as any,
+        token_id: assetId,
+      }).catch(() => {});
+      logger.info(`[positionTrade] CLOB balance cache refreshed (broad + token) for ${assetId.substring(0, 16)}...`);
+    };
 
-        for (const bid of book.bids) {
-          const bidPrice = parseFloat(bid.price);
-          const bidSize  = parseFloat(bid.size);
-          remaining    -= bidSize;
-          lastBidPrice  = bidPrice;
-          if (remaining <= 0) break; // enough liquidity found at this level
-        }
+    const [, bookResult] = await Promise.allSettled([
+      refreshBalance(),
+      clobClient.getOrderBook(assetId),
+    ]);
 
-        // Snap to tick
-        const snapped = parseFloat((Math.floor(lastBidPrice / tick) * tick).toFixed(decimals));
-        smartFloor = Math.max(snapped, tick);
+    const book = bookResult.status === 'fulfilled' ? bookResult.value : null;
+    if (book && book.bids && book.bids.length > 0) {
+      // bids are sorted best (highest) to worst (lowest)
+      let remaining = size;
+      let lastBidPrice = parseFloat(book.bids[0].price);
 
-        logger.info(
-          `[positionTrade] Order book — best_bid: ${(parseFloat(book.bids[0].price) * 100).toFixed(2)}¢` +
-          `, smart_floor: ${(smartFloor * 100).toFixed(2)}¢` +
-          ` (${book.bids.length} bid levels, need ${size} shares)`
-        );
-      } else {
-        logger.warn('[positionTrade] No bids in order book — using 1-tick floor');
+      for (const bid of book.bids) {
+        const bidPrice = parseFloat(bid.price);
+        const bidSize  = parseFloat(bid.size);
+        remaining    -= bidSize;
+        lastBidPrice  = bidPrice;
+        if (remaining <= 0) break; // enough liquidity found at this level
       }
-    } catch (bookErr: any) {
-      logger.warn('[positionTrade] Could not fetch order book (using 1-tick floor):', bookErr?.message || bookErr);
+
+      // Snap to tick
+      const snapped = parseFloat((Math.floor(lastBidPrice / tick) * tick).toFixed(decimals));
+      smartFloor = Math.max(snapped, tick);
+
+      logger.info(
+        `[positionTrade] Order book — best_bid: ${(parseFloat(book.bids[0].price) * 100).toFixed(2)}¢` +
+        `, smart_floor: ${(smartFloor * 100).toFixed(2)}¢` +
+        ` (${book.bids.length} bid levels, need ${size} shares)`
+      );
+    } else if (bookResult.status === 'rejected') {
+      logger.warn('[positionTrade] Could not fetch order book (using 1-tick floor):', bookResult.reason);
+    } else {
+      logger.warn('[positionTrade] No bids in order book — using 1-tick floor');
     }
 
     // Step 2: Place FAK with smart floor. If market moved between fetch and placement,
     // retry once with 1-tick floor (accept any available price).
+    // On balance/allowance errors, do a second broad refresh and retry once.
     const floorsToTry = smartFloor > tick ? [smartFloor, tick] : [tick];
 
     let sellOrderResponse: any;
     let lastErrMsg = '';
+    let balanceRetried = false;
 
     for (const floorPrice of floorsToTry) {
       logger.info(
@@ -759,7 +1176,7 @@ async function executePositionOrder(
       );
 
       sellOrderResponse = await clobClient.createAndPostMarketOrder(
-        { tokenID: assetId, side: Side.SELL, amount: size, price: floorPrice, feeRateBps: 0 },
+        { tokenID: assetId, side: Side.SELL, amount: size, price: floorPrice, feeRateBps },
         Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
         OrderType.FAK
       );
@@ -771,6 +1188,26 @@ async function executePositionOrder(
 
       lastErrMsg = sellOrderResponse.errorMsg || (sellOrderResponse as any).error || 'Sell order not filled';
       logger.warn(`[positionTrade] FAK sell rejected at ${(floorPrice * 100).toFixed(2)}¢: ${lastErrMsg}`);
+
+      // On balance/allowance error: do a second forced refresh and retry at tick floor
+      if ((lastErrMsg.includes('balance') || lastErrMsg.includes('allowance')) && !balanceRetried) {
+        balanceRetried = true;
+        logger.info('[positionTrade] Balance error — forcing second broad CLOB refresh and retrying at tick floor');
+        await refreshBalance();
+        // Retry at minimum tick (most permissive price floor)
+        sellOrderResponse = await clobClient.createAndPostMarketOrder(
+          { tokenID: assetId, side: Side.SELL, amount: size, price: tick, feeRateBps },
+          Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
+          OrderType.FAK
+        );
+        if (sellOrderResponse.success && sellOrderResponse.orderID) {
+          price = tick;
+          break;
+        }
+        lastErrMsg = sellOrderResponse.errorMsg || (sellOrderResponse as any).error || 'Sell order not filled';
+        logger.warn(`[positionTrade] FAK sell retry rejected at tick floor: ${lastErrMsg}`);
+        break; // no more retries
+      }
 
       // Only retry on liquidity errors
       if (!lastErrMsg.includes('no orders found') && !lastErrMsg.includes('FAK') && !lastErrMsg.includes('FOK')) break;
@@ -786,13 +1223,12 @@ async function executePositionOrder(
       throw new Error(lastErrMsg);
     }
 
-    // Transfer 1% commission from estimated sell proceeds (fire-and-forget on failure)
-    try {
-      const commissionUsdc = price * size * COMMISSION_RATE;
-      await transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionUsdc, user.id);
-    } catch (feeErr) {
-      logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);
-    }
+    // Transfer 1% commission from estimated sell proceeds (fire-and-forget)
+    const sellCommissionUsdc = price * size * COMMISSION_RATE;
+    transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, sellCommissionUsdc, user.id)
+      .catch((feeErr) => {
+        logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);
+      });
 
     return { orderID: sellOrderResponse.orderID };
   }
@@ -800,7 +1236,7 @@ async function executePositionOrder(
   // BUY: FAK market order — fills immediately up to worstPrice
   // Snap price to tick size first (same as GTC, needed for valid price)
   if (tickSize) {
-    const tick = parseFloat(tickSize);
+    const tick = Math.max(parseFloat(tickSize), 0.001);
     const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
     price = parseFloat((Math.round(price / tick) * tick).toFixed(decimals));
     price = Math.min(Math.max(price, tick), 0.99);
@@ -812,7 +1248,7 @@ async function executePositionOrder(
   logger.info(`[positionTrade] Creating FAK buy order: ~${size} shares at max ${(price * 100).toFixed(2)}¢ amount=$${buyAmount} negRisk=${negRisk} tickSize=${tickSize || 'default'}`);
 
   const buyOrderResponse = await clobClient.createAndPostMarketOrder(
-    { tokenID: assetId, side: Side.BUY, amount: buyAmount, price, feeRateBps: 0 } as any,
+    { tokenID: assetId, side: Side.BUY, amount: buyAmount, price, feeRateBps } as any,
     Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
     OrderType.FAK
   );
@@ -831,4 +1267,38 @@ async function executePositionOrder(
     });
 
   return { orderID: buyOrderResponse.orderID };
+}
+
+/**
+ * Closes all active positions by selling 100% at market price.
+ * Called from the "Close All Positions" bulk action.
+ */
+export async function executeCloseAllPositions(
+  user: any,
+  slippagePct: number = 1.0,
+): Promise<{ closed: number; failed: number; errors: string[] }> {
+  const positions = await getActivePositions(user.polymarketProxyAddress);
+  let closed = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const pos of positions) {
+    if (pos.size < MIN_ORDER_SIZE) {
+      failed++;
+      errors.push(`${pos.outcome}: too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
+      continue;
+    }
+    try {
+      const price = Math.max(pos.curPrice * (1 - slippagePct / 100), 0.01);
+      await executePositionOrder(user, pos.asset, pos.conditionId, pos.negativeRisk, 'sell', price, pos.size);
+      closed++;
+      logger.info(`[positionTrade] closeAll: closed ${pos.outcome} (${pos.size.toFixed(2)} sh)`);
+    } catch (err: any) {
+      failed++;
+      errors.push(`${pos.outcome}: ${(err.message ?? 'Unknown error').substring(0, 60)}`);
+      logger.warn(`[positionTrade] closeAll: failed to close ${pos.outcome}: ${err?.message ?? err}`);
+    }
+  }
+
+  return { closed, failed, errors };
 }
