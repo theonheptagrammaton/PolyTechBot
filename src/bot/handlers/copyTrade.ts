@@ -7,6 +7,7 @@ import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { config } from '../../config';
 import { RedisBackedState } from '../../utils/redisState';
+import { IMG_COPYTRADE } from './markets';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
@@ -230,6 +231,7 @@ export async function handleCopyList(ctx: Context): Promise<void> {
 
   await sendPage(ctx, lines.join('\n'), {
     parse_mode: 'HTML',
+    image_path: IMG_COPYTRADE,
     ...Markup.inlineKeyboard(buttons),
   });
 }

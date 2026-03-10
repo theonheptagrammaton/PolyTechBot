@@ -6,8 +6,8 @@ import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
 import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
 
-const IMG_WALLET    = path.join(__dirname, '../img/wallet.jpg');
-const IMG_PORTFOLIO = path.join(__dirname, '../img/portfolio.jpg');
+const IMG_WALLET    = path.join(__dirname, '../img/wallet.PNG');
+const IMG_PORTFOLIO = path.join(__dirname, '../img/portfolio.PNG');
 const IMG_POSITIONS = path.join(__dirname, '../img/positions.jpeg');
 import { config } from '../../config';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';

@@ -18,14 +18,20 @@ import { isBenignTelegramError, sendPage, getMenuPhotoMedia, cacheMenuPhotoFileI
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
 
-const IMG_BUSINESS     = path.join(__dirname, '../img/business.jpg');
-const IMG_SMARTWALLET  = path.join(__dirname, '../img/smartwallet.jpg');
+const IMG_BUSINESS     = path.join(__dirname, '../img/business.PNG');
+const IMG_SMARTWALLET  = path.join(__dirname, '../img/smartwallet.PNG');
 const IMG_ALLMARKETS   = path.join(__dirname, '../img/allmarkets.jpeg');
 const IMG_TRENDS       = path.join(__dirname, '../img/trends.jpeg');
 const IMG_POLITICS     = path.join(__dirname, '../img/politics.jpeg');
 const IMG_CRYPTO       = path.join(__dirname, '../img/crypto.jpeg');
 const IMG_SPORTS       = path.join(__dirname, '../img/sports.jpeg');
 const IMG_GEOPOLITICS  = path.join(__dirname, '../img/geopolitics.jpeg');
+const IMG_ELECTIONS    = path.join(__dirname, '../img/elections.PNG');
+const IMG_POPCULTURE   = path.join(__dirname, '../img/popculture.PNG');
+const IMG_SCIENCE      = path.join(__dirname, '../img/science.PNG');
+const IMG_TECH         = path.join(__dirname, '../img/techbets.PNG');
+const IMG_AI           = path.join(__dirname, '../img/ai.PNG');
+export const IMG_COPYTRADE = path.join(__dirname, '../img/copytrade.PNG');
 
 const CATEGORY_IMAGE: Record<string, string> = {
   'trending':    IMG_TRENDS,
@@ -35,6 +41,11 @@ const CATEGORY_IMAGE: Record<string, string> = {
   'business':    IMG_BUSINESS,
   'all':         IMG_ALLMARKETS,
   'geopolitics': IMG_GEOPOLITICS,
+  'elections':   IMG_ELECTIONS,
+  'pop-culture': IMG_POPCULTURE,
+  'science':     IMG_SCIENCE,
+  'tech':        IMG_TECH,
+  'ai':          IMG_AI,
 };
 
 // ─── OG Image helper ──────────────────────────────────────────────────────────
