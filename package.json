@@ -6,7 +6,7 @@
   "scripts": {
     "setup": "bash scripts/setup.sh",
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && cp -r src/bot/img dist/bot/img",
     "start": "node dist/index.js",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
