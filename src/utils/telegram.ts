@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { Context } from 'telegraf';
 import { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
+import { logger } from './logger';
 
 const MENU_IMAGE = path.join(__dirname, '../bot/img/opening.jpg');
 let _cachedPhotoFileId: string | null = null;
@@ -94,13 +95,27 @@ export async function sendPage(
         return;
       } catch (err: any) {
         if (isBenignTelegramError(err)) return;
-        // editMessageMedia failed — update caption only, keep whatever photo is there
+        logger.warn(`[sendPage] editMessageMedia failed for ${cacheKey}: ${err?.message}`);
+        // editMessageMedia failed — delete old message and send fresh photo
+        try { await ctx.deleteMessage(); } catch { /* ignore */ }
         try {
-          await (ctx as any).editMessageCaption(safeCaption, {
+          const freshMedia: any = imageUrl ? imageUrl : { source: fs.createReadStream(imagePath!) };
+          const result: any = await ctx.replyWithPhoto(freshMedia, {
+            caption: safeCaption,
             parse_mode: parseMode,
             ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
           });
-        } catch { /* ignore */ }
+          if (!cached && result?.photo?.length) {
+            _urlPhotoCache.set(cacheKey, result.photo[result.photo.length - 1].file_id);
+          }
+        } catch (err2: any) {
+          logger.warn(`[sendPage] replyWithPhoto fallback also failed for ${cacheKey}: ${err2?.message}`);
+          // Final fallback: send opening image with caption
+          const fallback: any = _cachedPhotoFileId ? _cachedPhotoFileId : { source: fs.createReadStream(MENU_IMAGE) };
+          try {
+            await ctx.replyWithPhoto(fallback, { caption: safeCaption, parse_mode: parseMode, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+          } catch { /* ignore */ }
+        }
         return;
       }
     }
