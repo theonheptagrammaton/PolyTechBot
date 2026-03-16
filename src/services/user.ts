@@ -310,7 +310,9 @@ export async function invalidateUserCache(user: User): Promise<void> {
  * Checks if user is admin
  */
 export function isUserAdmin(user: User): boolean {
-  return user.isAdmin;
+  if (user.isAdmin) return true;
+  const telegramIdNum = parseInt(user.telegramId, 10);
+  return config.telegram.adminUserIds.includes(telegramIdNum);
 }
 
 /**
