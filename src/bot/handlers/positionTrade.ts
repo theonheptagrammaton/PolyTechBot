@@ -1097,9 +1097,10 @@ async function executePositionOrder(
     // Check on-chain token balance
     const onChainBalance = await ctfOnChain.balanceOf(user.polymarketProxyAddress, assetId);
     const requiredUnits = Math.round(size * 1e6);
+    const ROUNDING_TOLERANCE = 100; // 0.0001 share tolerance for floating-point rounding
     logger.info(`[positionTrade] On-chain token balance: ${onChainBalance.toString()} units (need ${requiredUnits})`);
 
-    if (onChainBalance.lt(requiredUnits)) {
+    if (onChainBalance.add(ROUNDING_TOLERANCE).lt(requiredUnits)) {
       throw new Error(
         `Proxy wallet has insufficient conditional tokens on-chain: ` +
         `holds ${onChainBalance.toString()} units, order needs ${requiredUnits} units (${size} shares).`
