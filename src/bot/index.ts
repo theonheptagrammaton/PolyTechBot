@@ -971,6 +971,22 @@ export class TelegramBot {
       process.once('SIGINT', () => this.shutdown());
       process.once('SIGTERM', () => this.shutdown());
 
+      // Register bot commands (shows "/" menu in Telegram UI)
+      await this.bot.telegram.setMyCommands([
+        { command: 'start',       description: '🏠 Main menu' },
+        { command: 'portfolio',   description: '📊 Portfolio overview' },
+        { command: 'positions',   description: '📈 Active positions' },
+        { command: 'orders',      description: '📋 Open limit orders' },
+        { command: 'deposit',     description: '💰 Deposit funds' },
+        { command: 'markets',     description: '🌍 Browse markets' },
+        { command: 'traders',     description: '🧠 Smart traders leaderboard' },
+        { command: 'copytrade',   description: '⚡ Copy trading' },
+        { command: 'pnl',         description: '📉 PNL summary' },
+        { command: 'price',       description: '💲 Get market price' },
+        { command: 'settings',    description: '⚙️ Settings' },
+        { command: 'help',        description: '❓ Help' },
+      ]).catch((err: any) => logger.warn('setMyCommands failed:', err?.message));
+
       // Start bot (launch() resolves only when bot stops — do NOT await)
       this.bot.launch().catch((err: any) => {
         logger.error('Bot launch error:', err);
