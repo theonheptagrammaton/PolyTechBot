@@ -643,12 +643,30 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
   try {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
-    const state = await positionTradeState.get(telegramId);
-    const pos = getPos(telegramId, idx);
 
+    let state = await positionTradeState.get(telegramId);
+    let pos = getPos(telegramId, idx);
+
+    // If either is missing, rebuild from a fresh position fetch
     if (!state || !pos) {
-      await ctx.answerCbQuery('Session expired. Please try again.', { show_alert: true });
-      return;
+      pos = await getPosOrFetch(telegramId, idx);
+      if (!pos) {
+        await ctx.answerCbQuery('⚠️ Position not found. Please refresh.', { show_alert: true });
+        return;
+      }
+      state = {
+        action: 'sell',
+        assetId: pos.asset,
+        conditionId: pos.conditionId,
+        negRisk: pos.negativeRisk,
+        title: pos.title,
+        outcome: pos.outcome,
+        currentSize: pos.size,
+        curPrice: pos.curPrice,
+        step: 'awaiting_price_size',
+        timestamp: Date.now(),
+      };
+      positionTradeState.set(telegramId, state);
     }
 
     const shares = parseFloat(((pos.size * pct) / 100).toFixed(4));
