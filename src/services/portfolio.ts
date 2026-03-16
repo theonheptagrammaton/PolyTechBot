@@ -6,8 +6,8 @@ import { redisCache } from '../database/redis';
 
 const DATA_API = 'https://data-api.polymarket.com';
 
-const ACTIVE_POSITIONS_TTL  = 45;   // seconds — price moves slowly enough
-const CLOSED_POSITIONS_TTL  = 120;  // seconds — closed positions are immutable once settled
+const ACTIVE_POSITIONS_TTL  = 20;   // seconds
+const CLOSED_POSITIONS_TTL  = 60;   // seconds
 
 export interface OpenOrder {
   id: string;

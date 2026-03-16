@@ -1301,21 +1301,27 @@ export async function executeCloseAllPositions(
   let failed = 0;
   const errors: string[] = [];
 
-  for (const pos of positions) {
-    if (pos.size < MIN_ORDER_SIZE) {
-      failed++;
-      errors.push(`${pos.outcome}: too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
-      continue;
-    }
-    try {
+  const results = await Promise.allSettled(
+    positions.map(async (pos) => {
+      if (pos.size < MIN_ORDER_SIZE) {
+        throw new Error(`too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
+      }
       const price = Math.max(pos.curPrice * (1 - slippagePct / 100), 0.01);
       await executePositionOrder(user, pos.asset, pos.conditionId, pos.negativeRisk, 'sell', price, pos.size);
-      closed++;
       logger.info(`[positionTrade] closeAll: closed ${pos.outcome} (${pos.size.toFixed(2)} sh)`);
-    } catch (err: any) {
+      return pos.outcome;
+    })
+  );
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      closed++;
+    } else {
       failed++;
-      errors.push(`${pos.outcome}: ${(err.message ?? 'Unknown error').substring(0, 60)}`);
-      logger.warn(`[positionTrade] closeAll: failed to close ${pos.outcome}: ${err?.message ?? err}`);
+      const msg = (r.reason?.message ?? 'Unknown error').substring(0, 60);
+      errors.push(`${positions[i].outcome}: ${msg}`);
+      logger.warn(`[positionTrade] closeAll: failed to close ${positions[i].outcome}: ${msg}`);
     }
   }
 
