@@ -11,9 +11,8 @@ import {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const TEMPLATE_DIR         = path.join(__dirname, '../bot/img/pnl');
-const ALLTIME_TEMPLATE_DIR = path.join(__dirname, '../bot/img/pnl/alltime');
-const FONT_DIR             = path.join(__dirname, '../bot/img/fonts');
+const TEMPLATE_DIR = path.join(__dirname, '../bot/img/pnl');
+const FONT_DIR     = path.join(__dirname, '../bot/img/fonts');
 
 // ─── Font Installation ──────────────────────────────────────────────────────
 
@@ -107,46 +106,6 @@ function pickTemplate(pnlValue: number): Buffer | null {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-// ─── All-Time Template Pool ──────────────────────────────────────────────────
-
-const allTimeGreenPool: Buffer[] = [];
-const allTimeRedPool: Buffer[] = [];
-let allTimePoolLoaded = false;
-
-function loadAllTimeTemplatePools(): void {
-  if (allTimePoolLoaded && (allTimeGreenPool.length > 0 || allTimeRedPool.length > 0)) return;
-  allTimePoolLoaded = true;
-  allTimeGreenPool.length = 0;
-  allTimeRedPool.length = 0;
-
-  if (!fs.existsSync(ALLTIME_TEMPLATE_DIR)) {
-    logger.warn(`[pnlImage] All-time template directory not found: ${ALLTIME_TEMPLATE_DIR}`);
-    return;
-  }
-
-  const files = fs.readdirSync(ALLTIME_TEMPLATE_DIR).filter(f =>
-    f.toLowerCase().endsWith('.png') || f.toLowerCase().endsWith('.jpg')
-  );
-
-  for (const file of files) {
-    const lower = file.toLowerCase();
-    const buf = fs.readFileSync(path.join(ALLTIME_TEMPLATE_DIR, file));
-    if (lower.includes('green')) {
-      allTimeGreenPool.push(buf);
-    } else if (lower.includes('red')) {
-      allTimeRedPool.push(buf);
-    }
-  }
-
-  logger.info(`[pnlImage] All-time pool: ${allTimeGreenPool.length} green + ${allTimeRedPool.length} red templates`);
-}
-
-function pickAllTimeTemplate(pnlValue: number): Buffer | null {
-  loadAllTimeTemplatePools();
-  const pool = pnlValue >= 0 ? allTimeGreenPool : allTimeRedPool;
-  if (pool.length === 0) return null;
-  return pool[Math.floor(Math.random() * pool.length)];
-}
 
 // ─── Text Rendering (sharp text API + Pango) ────────────────────────────────
 
@@ -241,7 +200,7 @@ export interface PositionPnlData {
 
 export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buffer | null> {
   ensureFontInstalled();
-  const template = pickAllTimeTemplate(data.totalPnl);
+  const template = pickTemplate(data.totalPnl);
   if (!template) return null;
 
   const totalInvested = data.totalInvested;
@@ -251,6 +210,8 @@ export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buf
     : '0.0';
 
   const fieldData: Record<string, string | number> = {
+    title: 'Max Realized',
+    outcome: '',
     displayName: data.displayName || data.username || '',
     pnlAmount: Math.abs(data.totalPnl).toFixed(2),
     pnlPercent: Math.abs(data.percentPnl).toFixed(1),
@@ -260,7 +221,8 @@ export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buf
     username: data.username || '',
   };
 
-  return renderImage(template, ALL_TIME_LAYOUT, fieldData, data.profilePhotoBuffer);
+  // eventIconBuffer intentionally omitted — icon slot left empty for all-time card
+  return renderImage(template, POSITION_LAYOUT, fieldData, data.profilePhotoBuffer);
 }
 
 export async function generatePortfolioPnlImage(data: PortfolioPnlData): Promise<Buffer | null> {
