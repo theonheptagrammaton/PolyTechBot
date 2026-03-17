@@ -4,9 +4,9 @@ import fs from 'fs';
 import { logger } from '../utils/logger';
 import {
   TemplateLayoutConfig,
-  ALL_TIME_LAYOUT,
   PORTFOLIO_LAYOUT,
   POSITION_LAYOUT,
+  ALLTIME_CARD_LAYOUT,
 } from '../config/pnlTemplates';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buf
   };
 
   // eventIconBuffer intentionally omitted — icon slot left empty for all-time card
-  return renderImage(template, POSITION_LAYOUT, fieldData, data.profilePhotoBuffer);
+  return renderImage(template, ALLTIME_CARD_LAYOUT, fieldData, data.profilePhotoBuffer);
 }
 
 export async function generatePortfolioPnlImage(data: PortfolioPnlData): Promise<Buffer | null> {
