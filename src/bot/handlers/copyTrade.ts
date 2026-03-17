@@ -1595,15 +1595,15 @@ export async function handleCategoriesPage(ctx: Context, subId: string): Promise
     buttons.push(row);
   }
 
-  buttons.push([Markup.button.callback('🔄 Tümünü Sıfırla (Hepsi)', `cpm_cats_clear_${subId}`)]);
-  buttons.push([Markup.button.callback('← Geri', `copy_task_${subId}`)]);
+  buttons.push([Markup.button.callback('🔄 Reset (All Categories)', `cpm_cats_clear_${subId}`)]);
+  buttons.push([Markup.button.callback('← Back', `copy_task_${subId}`)]);
 
   const selectedText = selected.size > 0
     ? [...selected].map(k => CATEGORY_OPTIONS.find(c => c.key === k)?.label ?? k).join(', ')
-    : 'Tüm kategoriler';
+    : 'All';
 
   await sendPage(ctx,
-    `📁 <b>Kategori Filtresi</b>\n\nSeçili: <b>${selectedText}</b>\n\nKopyalanacak işlem kategorilerini seç. Hiçbirini seçmezsen tüm kategoriler dahil edilir.`,
+    `📁 <b>Category Filter</b>\n\nSelected: <b>${selectedText}</b>\n\nChoose which categories to copy trades from. Leave all unselected to include all categories.`,
     { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) },
   );
 }
