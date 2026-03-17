@@ -73,7 +73,7 @@ function validateConfig(): Config {
   return {
     telegram: {
       botToken: process.env.TELEGRAM_BOT_TOKEN!,
-      botUsername: process.env.BOT_USERNAME || '',
+      botUsername: (process.env.BOT_USERNAME || '').replace(/^@/, ''),
       adminUserIds: adminIds,
       groupBotToken: process.env.TELEGRAM_GROUP_BOT_TOKEN || undefined,
       requiredGroupId: process.env.TELEGRAM_REQUIRED_GROUP_ID
