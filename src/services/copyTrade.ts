@@ -21,9 +21,15 @@ export interface DetectedTrade {
   assetId: string;    // tokenId (YES/NO token)
   outcome: string;    // YES | NO
   side: string;       // BUY | SELL
-  sizeUsd: number;    // shares * price
+  size: number;       // shares
+  sizeUsd: number;    // shares * price (USDC)
   price: number;
   timestamp: number;
+}
+
+export interface NotificationExtra {
+  imagePath?: string;
+  buttons?: Array<Array<{ text: string; callback_data?: string; url?: string }>>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -183,6 +189,7 @@ async function fetchNewTradesForTrader(traderAddress: string): Promise<DetectedT
         assetId:  t.asset       ?? t.asset_id ?? '',
         outcome:  (t.outcome ?? '').toUpperCase() || 'YES',
         side:     (t.side    ?? '').toUpperCase() || 'BUY',
+        size,
         sizeUsd,
         price,
         timestamp: ts,
@@ -393,13 +400,39 @@ async function executeCopyOrder(
 
 // ─── Per-Trader Tick ──────────────────────────────────────────────────────────
 
+// ─── Market Info Cache (for notification titles) ──────────────────────────────
+
+async function fetchMarketInfo(conditionId: string): Promise<{ question: string; slug: string } | null> {
+  const cacheKey = `copy:mktinfo:${conditionId}`;
+  const cached = await redisCache.get<{ question: string; slug: string }>(cacheKey);
+  if (cached) return cached;
+  try {
+    const resp = await fetchWithRetry(
+      `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}&limit=1`
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const markets: any[] = Array.isArray(data) ? data : (data?.data ?? []);
+    if (!markets.length) return null;
+    const m = markets[0];
+    const result = {
+      question: m.question ?? m.title ?? conditionId.slice(0, 20),
+      slug: m.slug ?? m.event?.slug ?? '',
+    };
+    await redisCache.set(cacheKey, result, 3600);
+    return result;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Processes all new trades for one trader address and executes copies for each subscriber.
  * `sendNotification` is injected so the service stays decoupled from Telegraf.
  */
 async function tickForTrader(
   traderAddress: string,
-  sendNotification: (telegramId: string, message: string) => Promise<void>
+  sendNotification: (telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>
 ): Promise<void> {
   // Load active subscriptions first — needed for both new-trade processing and TP/SL checks
   const subs = await prisma.copySubscription.findMany({
@@ -713,22 +746,39 @@ async function tickForTrader(
           const alreadyNotified = notifiedThisTick.has(tradeKey);
 
           const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
-          const methodLabels: Record<string, string> = { fixed: 'Fixed', exact: 'Exact', percentage: '%', portfolio: 'Portfolio' };
-          const modeLabel = methodLabels[sub.buyMethod] || 'Fixed';
+          const traderName = sub.label || shortAddr;
           const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
           if (result.status === 'filled' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
-            await sendNotification(
-              user.telegramId,
-              `✅ <b>Trade Copied</b>\n\n` +
-              `Trader: <code>${shortAddr}</code>\n` +
-              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
-              `Side: ${effectiveSide} ${effectiveOutcome}\n` +
-              `Original: $${trade.sizeUsd.toFixed(2)}\n` +
-              `Copied: $${copySize.toFixed(2)} (${modeLabel})\n` +
-              `Order: <code>${result.orderID}</code>`
-            );
+            const mktInfo = await fetchMarketInfo(trade.marketId).catch(() => null);
+            const question = mktInfo?.question ?? trade.marketId.slice(0, 40);
+            const marketUrl = mktInfo?.slug
+              ? `https://polymarket.com/event/${mktInfo.slug}`
+              : `https://polymarket.com/profile/${traderAddress}`;
+            const shares = trade.size > 0 ? trade.size : (trade.price > 0 ? trade.sizeUsd / trade.price : 0);
+            const sideLabel = effectiveSide === 'BUY' ? 'BOUGHT' : 'SOLD';
+
+            const msg =
+              `⚡ <b>${escHtml(traderName)}</b> just <b>${sideLabel} ${effectiveOutcome}</b> for <b>${copySize.toFixed(2)} USDC</b>\n\n` +
+              `📊 Market: <b>${escHtml(question)}</b>\n` +
+              `🎯 Outcome: <b>${effectiveOutcome}</b>\n` +
+              `💰 Price: <b>$${trade.price.toFixed(3)}</b>\n` +
+              `📈 Shares: <b>${shares.toFixed(2)}</b>\n` +
+              `💵 USDC Amount: <b>${copySize.toFixed(2)} USDC</b>\n\n` +
+              `<a href="${marketUrl}">View Market</a>`;
+
+            const IMG_COPYTRADE = require('path').join(__dirname, '../bot/img/copytrade.jpg');
+            await sendNotification(user.telegramId, msg, {
+              imagePath: IMG_COPYTRADE,
+              buttons: [
+                [
+                  { text: '📊 View Market', url: marketUrl },
+                  { text: '🌸 View Portfolio', callback_data: 'portfolio' },
+                ],
+                [{ text: '× Close', callback_data: 'close_notif' }],
+              ],
+            });
           } else if (result.status === 'failed' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
             await sendNotification(
@@ -805,7 +855,7 @@ async function checkTpSlPositions(
     stopLossFixed: number | null;
     slippage?: number;
   },
-  sendNotification: (telegramId: string, msg: string) => Promise<void>
+  sendNotification: (telegramId: string, msg: string, extra?: NotificationExtra) => Promise<void>
 ): Promise<void> {
   if (sub.takeProfitPct == null && sub.stopLossPct == null && sub.takeProfitFixed == null && sub.stopLossFixed == null) return;
 
@@ -892,6 +942,7 @@ async function checkTpSlPositions(
       assetId: pos.assetId!,
       outcome: pos.outcome,
       side: 'SELL',
+      size: currentPrice > 0 ? pos.copiedSize / currentPrice : 0,
       sizeUsd: pos.copiedSize,
       price: currentPrice,
       timestamp: Date.now(),
@@ -950,7 +1001,7 @@ let monitorStopped = false;
  * @param intervalSeconds Polling interval (default: 30).
  */
 export function startCopyTradeMonitor(
-  sendNotification: (telegramId: string, message: string) => Promise<void>,
+  sendNotification: (telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>,
   intervalSeconds = 30
 ): void {
   if (monitorInterval) {

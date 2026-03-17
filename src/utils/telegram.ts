@@ -9,9 +9,10 @@ const TG_MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
 
 /**
  * Returns a Buffer ready for Telegram. If the file exceeds the 10 MB limit,
+ * @public exported for use outside sendPage (e.g. notification senders)
  * it is re-encoded as JPEG at decreasing quality until it fits.
  */
-async function prepareImageBuffer(filePath: string): Promise<Buffer> {
+export async function prepareImageBuffer(filePath: string): Promise<Buffer> {
   const raw = await fs.promises.readFile(filePath);
   if (raw.byteLength <= TG_MAX_PHOTO_BYTES) return raw;
 

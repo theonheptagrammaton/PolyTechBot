@@ -194,7 +194,8 @@ import {
   handleCopyDeleteAllConfirm,
   handleCopyDeleteAllExecute,
 } from './handlers/copyTrade';
-import { startCopyTradeMonitor } from '../services/copyTrade';
+import { startCopyTradeMonitor, NotificationExtra } from '../services/copyTrade';
+import { prepareImageBuffer } from '../utils/telegram';
 
 export class TelegramBot {
   private bot: Telegraf;
@@ -348,6 +349,10 @@ export class TelegramBot {
     this.bot.action('portfolio', handlePortfolio);
     this.bot.action('search_markets', handleSearchPrompt);
     this.bot.action('noop', (ctx) => ctx.answerCbQuery()); // No-op for page indicator
+    this.bot.action('close_notif', async (ctx) => {
+      await ctx.answerCbQuery().catch(() => {});
+      await ctx.deleteMessage().catch(() => {});
+    });
 
     // Crypto subcategory handlers
     this.bot.action('category_crypto_sub', handleCryptoCategory);
@@ -1004,9 +1009,26 @@ export class TelegramBot {
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       // Start copy trade monitor (polls every 30s)
-      startCopyTradeMonitor(async (telegramId: string, message: string) => {
+      startCopyTradeMonitor(async (telegramId: string, message: string, extra?: NotificationExtra) => {
         try {
-          await this.bot.telegram.sendMessage(telegramId, message, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+          if (extra?.imagePath) {
+            const buf = await prepareImageBuffer(extra.imagePath);
+            await this.bot.telegram.sendPhoto(
+              telegramId,
+              { source: buf },
+              {
+                caption: message,
+                parse_mode: 'HTML',
+                reply_markup: extra.buttons ? { inline_keyboard: extra.buttons } : undefined,
+              } as any,
+            );
+          } else {
+            await this.bot.telegram.sendMessage(telegramId, message, {
+              parse_mode: 'HTML',
+              link_preview_options: { is_disabled: true },
+              reply_markup: extra?.buttons ? { inline_keyboard: extra.buttons } : undefined,
+            } as any);
+          }
         } catch (err: any) {
           logger.warn(`[copy] Failed to send notification to ${telegramId}: ${err?.message}`);
         }
