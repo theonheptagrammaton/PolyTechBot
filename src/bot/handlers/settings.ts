@@ -1,9 +1,12 @@
+import path from 'path';
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { decrypt } from '../../utils/encryption';
 import { sendPage } from '../../utils/telegram';
+
+const IMG_SETTINGS = path.join(__dirname, '../img/settings.PNG');
 
 // Tracks users who are waiting to type a custom default trade amount
 export const settingsAmountState = new Map<string, { timestamp: number }>();
@@ -58,6 +61,7 @@ export async function handleSettingsMenu(ctx: Context): Promise<void> {
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
+      image_path: IMG_SETTINGS,
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🔑 Show Secret Key',       'settings_show_key')],
         [Markup.button.callback('💰 Change Default Amount', 'settings_change_amount')],

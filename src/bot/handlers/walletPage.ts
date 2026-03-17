@@ -6,9 +6,10 @@ import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
 import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
 
-const IMG_WALLET    = path.join(__dirname, '../img/wallet.PNG');
-const IMG_PORTFOLIO = path.join(__dirname, '../img/portfolio.PNG');
-const IMG_POSITIONS = path.join(__dirname, '../img/positions.jpeg');
+const IMG_WALLET      = path.join(__dirname, '../img/wallet.PNG');
+const IMG_PORTFOLIO   = path.join(__dirname, '../img/portfolio.PNG');
+const IMG_POSITIONS   = path.join(__dirname, '../img/positions.jpeg');
+const IMG_LIMITORDERS = path.join(__dirname, '../img/limitorders.PNG');
 import { config } from '../../config';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import {
@@ -428,6 +429,7 @@ export async function handleOpenOrders(ctx: Context, page: number = 1): Promise<
         '📋 *Open Orders*\n\n✅ No pending orders.\n\n_All your orders have been filled or cancelled._',
         {
           parse_mode: 'Markdown',
+          image_path: IMG_LIMITORDERS,
           ...Markup.inlineKeyboard([
             [Markup.button.callback('📊 Active Positions', 'portfolio_open_1')],
             [Markup.button.callback('« Portfolio', 'portfolio')],
@@ -504,6 +506,7 @@ export async function handleOpenOrders(ctx: Context, page: number = 1): Promise<
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
+      image_path: IMG_LIMITORDERS,
       ...Markup.inlineKeyboard(buttons),
     });
 

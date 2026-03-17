@@ -1,5 +1,8 @@
+import path from 'path';
 import { Context, Markup } from 'telegraf';
 import { sendPage } from '../../utils/telegram';
+
+const IMG_REFERRAL = path.join(__dirname, '../img/referral.PNG');
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { getUserByTelegramId } from '../../services/user';
 import {
@@ -65,6 +68,7 @@ export async function handleReferralHub(ctx: Context): Promise<void> {
 
     await sendPage(ctx, msg, {
       parse_mode: 'HTML',
+      image_path: IMG_REFERRAL,
       ...Markup.inlineKeyboard([
         [
           Markup.button.callback(
