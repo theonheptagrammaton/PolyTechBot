@@ -3,6 +3,26 @@ import path from 'path';
 import { Context } from 'telegraf';
 import { ExtraEditMessageText } from 'telegraf/typings/telegram-types';
 import { logger } from './logger';
+import sharp from 'sharp';
+
+const TG_MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Returns a Buffer ready for Telegram. If the file exceeds the 10 MB limit,
+ * it is re-encoded as JPEG at decreasing quality until it fits.
+ */
+async function prepareImageBuffer(filePath: string): Promise<Buffer> {
+  const raw = await fs.promises.readFile(filePath);
+  if (raw.byteLength <= TG_MAX_PHOTO_BYTES) return raw;
+
+  logger.info(`[sendPage] Compressing oversized image (${(raw.byteLength / 1024 / 1024).toFixed(1)} MB): ${path.basename(filePath)}`);
+  for (const quality of [85, 70, 55, 40]) {
+    const compressed = await sharp(raw).jpeg({ quality }).toBuffer();
+    if (compressed.byteLength <= TG_MAX_PHOTO_BYTES) return compressed;
+  }
+  // Last resort — resize to 1280px wide
+  return sharp(raw).resize({ width: 1280 }).jpeg({ quality: 60 }).toBuffer();
+}
 
 const MENU_IMAGE = path.join(__dirname, '../bot/img/opening.jpg');
 let _cachedPhotoFileId: string | null = null;
@@ -76,11 +96,12 @@ export async function sendPage(
   if (imageUrl || imagePath) {
     const cacheKey = imageUrl || imagePath!;
     const cached   = _urlPhotoCache.get(cacheKey);
+    const localBuf: Buffer | null = (!cached && imagePath) ? await prepareImageBuffer(imagePath) : null;
     const mediaId: any = cached
       ? cached
       : imageUrl
         ? imageUrl
-        : { source: fs.createReadStream(imagePath!) };
+        : { source: localBuf! };
 
     if (isPhoto) {
       // Try to swap photo in-place
@@ -99,7 +120,7 @@ export async function sendPage(
         // editMessageMedia failed — delete old message and send fresh photo
         try { await ctx.deleteMessage(); } catch { /* ignore */ }
         try {
-          const freshMedia: any = imageUrl ? imageUrl : { source: fs.createReadStream(imagePath!) };
+          const freshMedia: any = imageUrl ? imageUrl : { source: localBuf! };
           const result: any = await ctx.replyWithPhoto(freshMedia, {
             caption: safeCaption,
             parse_mode: parseMode,
