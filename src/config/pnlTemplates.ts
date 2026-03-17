@@ -139,7 +139,7 @@ export const ALLTIME_CARD_LAYOUT: TemplateLayoutConfig = {
   ...ALL_TIME_LAYOUT,
   fields: [
     // "Max Realized" title — pill içi, daha büyük font
-    { key: 'title', x: 1780, y: 255, fontSize: 120, fontWeight: 'bold', color: '#000000', anchor: 'middle', maxWidth: 1200 },
+    { key: 'title', x: 1780, y: 300, fontSize: 150, fontWeight: 'bold', color: '#000000', anchor: 'middle', maxWidth: 1200 },
     // outcome boş — alan gösterilmez ama layout tutarlılığı için tutulur
     { key: 'outcome', x: 1085, y: 430, fontSize: 70, fontWeight: 'bold', color: '#FFFFFF', anchor: 'middle', maxWidth: 800 },
     ...ALL_TIME_LAYOUT.fields,
