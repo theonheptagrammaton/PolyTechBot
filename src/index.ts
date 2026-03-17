@@ -1,9 +1,4 @@
 import http from 'http';
-// Bootstrap global proxy before any HTTP requests (for geoblock bypass)
-if (process.env.GLOBAL_AGENT_HTTP_PROXY || process.env.GLOBAL_AGENT_HTTPS_PROXY) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  require('global-agent/bootstrap');
-}
 import { config } from './config';
 import { logger } from './utils/logger';
 import { connectDatabase, disconnectDatabase } from './database/prisma';

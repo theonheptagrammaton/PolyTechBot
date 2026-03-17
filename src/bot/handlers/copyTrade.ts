@@ -63,8 +63,7 @@ interface CopyEditState {
       | 'awaiting_max_days' | 'awaiting_min_liq' | 'awaiting_min_vol'
       | 'awaiting_price_min' | 'awaiting_price_max'
       | 'awaiting_sl_pct' | 'awaiting_sl_fixed'
-      | 'awaiting_tp_pct' | 'awaiting_tp_fixed'
-      | 'awaiting_categories';
+      | 'awaiting_tp_pct' | 'awaiting_tp_fixed';
   subId: string;
   timestamp: number;
 }
@@ -1552,6 +1551,89 @@ export async function handleManageEditPrompt(ctx: Context, subId: string, editSt
   });
 }
 
+// ─── Categories Page (button-based selection) ────────────────────────────────────
+
+const CATEGORY_OPTIONS: { key: string; label: string }[] = [
+  { key: 'politics',    label: '🏛 Politics' },
+  { key: 'crypto',      label: '🪙 Crypto' },
+  { key: 'sports',      label: '⚽ Sports' },
+  { key: 'business',    label: '💼 Business' },
+  { key: 'pop-culture', label: '🎬 Pop Culture' },
+  { key: 'geopolitics', label: '🌍 Geopolitics' },
+  { key: 'tech',        label: '💻 Tech' },
+  { key: 'ai',          label: '🤖 AI' },
+  { key: 'science',     label: '🔬 Science' },
+  { key: 'elections',   label: '🗳 Elections' },
+  { key: 'middle-east', label: '🕌 Middle East' },
+];
+
+export async function handleCategoriesPage(ctx: Context, subId: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const sub = await prisma.copySubscription.findUnique({ where: { id: subId } });
+  if (!sub) return;
+
+  const selected = new Set((sub.categories || '').split(',').map(s => s.trim()).filter(Boolean));
+
+  const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+
+  // Two columns
+  for (let i = 0; i < CATEGORY_OPTIONS.length; i += 2) {
+    const row = [];
+    const a = CATEGORY_OPTIONS[i];
+    const b = CATEGORY_OPTIONS[i + 1];
+    row.push(Markup.button.callback(
+      `${selected.has(a.key) ? '✅' : '◻️'} ${a.label}`,
+      `cpm_cat_tog_${subId}_${a.key}`,
+    ));
+    if (b) {
+      row.push(Markup.button.callback(
+        `${selected.has(b.key) ? '✅' : '◻️'} ${b.label}`,
+        `cpm_cat_tog_${subId}_${b.key}`,
+      ));
+    }
+    buttons.push(row);
+  }
+
+  buttons.push([Markup.button.callback('🔄 Tümünü Sıfırla (Hepsi)', `cpm_cats_clear_${subId}`)]);
+  buttons.push([Markup.button.callback('← Geri', `copy_task_${subId}`)]);
+
+  const selectedText = selected.size > 0
+    ? [...selected].map(k => CATEGORY_OPTIONS.find(c => c.key === k)?.label ?? k).join(', ')
+    : 'Tüm kategoriler';
+
+  await sendPage(ctx,
+    `📁 <b>Kategori Filtresi</b>\n\nSeçili: <b>${selectedText}</b>\n\nKopyalanacak işlem kategorilerini seç. Hiçbirini seçmezsen tüm kategoriler dahil edilir.`,
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) },
+  );
+}
+
+export async function handleCategoryToggle(ctx: Context, subId: string, catKey: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const sub = await prisma.copySubscription.findUnique({ where: { id: subId } });
+  if (!sub) return;
+
+  const selected = new Set((sub.categories || '').split(',').map(s => s.trim()).filter(Boolean));
+  if (selected.has(catKey)) {
+    selected.delete(catKey);
+  } else {
+    selected.add(catKey);
+  }
+
+  const newValue = selected.size > 0 ? [...selected].join(',') : null;
+  await prisma.copySubscription.update({ where: { id: subId }, data: { categories: newValue } });
+
+  const updated = await prisma.copySubscription.findUnique({ where: { id: subId } });
+  if (updated) await handleCategoriesPage(ctx, subId);
+}
+
+export async function handleCategoriesClear(ctx: Context, subId: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  await prisma.copySubscription.update({ where: { id: subId }, data: { categories: null } });
+  await handleCategoriesPage(ctx, subId);
+}
+
 // Clear a numeric field
 export async function handleManageClear(ctx: Context, subId: string, editStep: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
@@ -1571,11 +1653,11 @@ export async function handleManageClear(ctx: Context, subId: string, editStep: s
     awaiting_min_vol: 'minVolume',
     awaiting_price_min: 'priceMin',
     awaiting_price_max: 'priceMax',
+    awaiting_categories: 'categories',
     awaiting_sl_pct: 'stopLossPct',
     awaiting_sl_fixed: 'stopLossFixed',
     awaiting_tp_pct: 'takeProfitPct',
     awaiting_tp_fixed: 'takeProfitFixed',
-    awaiting_categories: 'categories',
   };
 
   const dbField = fieldMap[editStep];
@@ -1824,12 +1906,6 @@ export async function handleCopyEditInput(ctx: Context, text: string): Promise<b
     case 'awaiting_tp_fixed': {
       if (isNaN(val) || val <= 0 || val > 99) { await ctx.reply('❌ Enter 1–99.'); return true; }
       await prisma.copySubscription.update({ where: { id: subId }, data: { takeProfitFixed: val, takeProfitPct: null } });
-      break;
-    }
-
-    case 'awaiting_categories': {
-      const cats = text.trim();
-      await prisma.copySubscription.update({ where: { id: subId }, data: { categories: cats || null } });
       break;
     }
 

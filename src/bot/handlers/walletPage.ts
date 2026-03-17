@@ -310,7 +310,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       return;
     }
 
-    const ITEMS_PER_PAGE = 2;
+    const ITEMS_PER_PAGE = 1;
     const totalPages = Math.ceil(positions.length / ITEMS_PER_PAGE);
     const currentPage = Math.min(Math.max(1, page), totalPages);
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -328,8 +328,6 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     let message = `📊 <b>Active Positions</b> (${positions.length} total · page ${currentPage}/${totalPages})\n`;
     message += `${summaryEmoji} Total Value: $${totalValue.toFixed(2)} · P&amp;L: ${summarySign}$${totalPnl.toFixed(2)}\n\n`;
 
-    // 900-char budget for position blocks (leaves 124-char header already in message)
-    const MSG_LIMIT = 980;
     for (let i = 0; i < pagePositions.length; i++) {
       const pos = pagePositions[i];
       const idx = startIndex + i;
@@ -360,8 +358,6 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       entry += `   ├ 📅 Ends: ${endDate}${redeemLine}\n`;
       entry += `   └ <a href="${viewLink}">👁 View</a> · <a href="${buyLink}">📈 Buy</a> · <a href="${sellLink}">📉 Sell</a> · <a href="${pnlLink}">📊 P&amp;L</a>\n\n`;
 
-      // Stop adding positions if we'd exceed the safe caption limit
-      if (message.length + entry.length > MSG_LIMIT) break;
       message += entry;
     }
 

@@ -1136,14 +1136,12 @@ async function executePositionOrder(
     let smartFloor = tick; // fallback: accept any price
 
     const refreshBalance = async () => {
-      // Broad CONDITIONAL refresh (no token_id) — covers NegRisk allowance tracking
-      await clobClient.updateBalanceAllowance({ asset_type: 'CONDITIONAL' as any }).catch(() => {});
-      // Token-specific refresh
+      // Token-specific CONDITIONAL refresh (broad call without token_id is rejected by CLOB API)
       await clobClient.updateBalanceAllowance({
         asset_type: 'CONDITIONAL' as any,
         token_id: assetId,
       }).catch(() => {});
-      logger.info(`[positionTrade] CLOB balance cache refreshed (broad + token) for ${assetId.substring(0, 16)}...`);
+      logger.info(`[positionTrade] CLOB balance cache refreshed for ${assetId.substring(0, 16)}...`);
     };
 
     const [, bookResult] = await Promise.allSettled([

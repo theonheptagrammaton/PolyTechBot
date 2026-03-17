@@ -176,6 +176,9 @@ import {
   handleManageCopySide,
   handleManageEditPrompt,
   handleManageClear,
+  handleCategoriesPage,
+  handleCategoryToggle,
+  handleCategoriesClear,
   handleManageDelete,
   handleManageDeleteExecute,
   handleManageRename,
@@ -744,8 +747,13 @@ export class TelegramBot {
         `⬆️ <b>Max Price Filter</b>\n\nSkip trades priced above X¢. Enter cents (0–100):`);
     });
     this.bot.action(/^cpm_cats_(.+)$/, async (ctx) => {
-      await handleManageEditPrompt(ctx, ctx.match[1], 'awaiting_categories',
-        `📁 <b>Categories</b>\n\nEnter comma-separated category names, or type "all" for all:`);
+      await handleCategoriesPage(ctx, ctx.match[1]);
+    });
+    this.bot.action(/^cpm_cat_tog_([a-z0-9]+)_(.+)$/, async (ctx) => {
+      await handleCategoryToggle(ctx, ctx.match[1], ctx.match[2]);
+    });
+    this.bot.action(/^cpm_cats_clear_(.+)$/, async (ctx) => {
+      await handleCategoriesClear(ctx, ctx.match[1]);
     });
 
     // Manage page: Rename / Delete

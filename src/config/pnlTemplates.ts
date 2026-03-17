@@ -119,7 +119,7 @@ export const POSITION_LAYOUT: TemplateLayoutConfig = {
   ...ALL_TIME_LAYOUT,
   fields: [
     // Event/market title — pill içi
-    { key: 'title', x: 1780, y: 315, fontSize: 70, fontWeight: 'bold', color: '#000000', anchor: 'middle', maxWidth: 1200 },
+    { key: 'title', x: 1780, y: 270, fontSize: 70, fontWeight: 'bold', color: '#000000', anchor: 'middle', maxWidth: 1200 },
     // Outcome (YES/NO) — pill ile yeşil bar arası karanlık alan (y≈480-560)
     { key: 'outcome', x: 1085, y: 430, fontSize: 70, fontWeight: 'bold', color: '#FFFFFF', anchor: 'middle', maxWidth: 800 },
     ...ALL_TIME_LAYOUT.fields,
