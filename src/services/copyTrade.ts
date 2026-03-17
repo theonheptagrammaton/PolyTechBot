@@ -781,13 +781,19 @@ async function tickForTrader(
             });
           } else if (result.status === 'failed' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
-            await sendNotification(
-              user.telegramId,
-              `❌ <b>Copy Failed</b>\n\n` +
-              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
-              `Error: ${escHtml(result.errorMsg ?? 'unknown error')}\n` +
-              `Copy size: $${copySize.toFixed(2)}`
-            );
+            // Suppress duplicate failure notifications for the same sub+market within 1 hour
+            const failNotifKey = `copy:failnotif:${sub.id}:${trade.marketId}`;
+            const alreadyFailNotified = await redisCache.get<number>(failNotifKey);
+            if (!alreadyFailNotified) {
+              await redisCache.set(failNotifKey, 1, 3600);
+              await sendNotification(
+                user.telegramId,
+                `❌ <b>Copy Failed</b>\n\n` +
+                `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
+                `Error: ${escHtml(result.errorMsg ?? 'unknown error')}\n` +
+                `Copy size: $${copySize.toFixed(2)}`
+              );
+            }
           } else if (result.status === 'skipped' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
             await sendNotification(
