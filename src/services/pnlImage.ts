@@ -66,15 +66,21 @@ function ensureFontInstalled(): void {
 
 // ─── Template Pool ──────────────────────────────────────────────────────────
 
+// Position/portfolio numbered templates (green-1, red-3, etc.)
 const greenPool: Buffer[] = [];
 const redPool: Buffer[] = [];
+// All-time specific templates (green-alltime, red-alltime)
+const greenAlltimePool: Buffer[] = [];
+const redAlltimePool: Buffer[] = [];
 let poolLoaded = false;
 
 function loadTemplatePools(): void {
-  if (poolLoaded && (greenPool.length > 0 || redPool.length > 0)) return;
+  if (poolLoaded && (greenPool.length > 0 || redPool.length > 0 || greenAlltimePool.length > 0)) return;
   poolLoaded = true;
   greenPool.length = 0;
   redPool.length = 0;
+  greenAlltimePool.length = 0;
+  redAlltimePool.length = 0;
 
   if (!fs.existsSync(TEMPLATE_DIR)) {
     logger.warn(`[pnlImage] Template directory not found: ${TEMPLATE_DIR}`);
@@ -87,21 +93,36 @@ function loadTemplatePools(): void {
 
   for (const file of files) {
     const lower = file.toLowerCase();
+    const isAlltime = lower.includes('alltime');
     const buf = fs.readFileSync(path.join(TEMPLATE_DIR, file));
 
     if (lower.includes('green')) {
-      greenPool.push(buf);
+      if (isAlltime) greenAlltimePool.push(buf);
+      else greenPool.push(buf);
     } else if (lower.includes('red')) {
-      redPool.push(buf);
+      if (isAlltime) redAlltimePool.push(buf);
+      else redPool.push(buf);
     }
   }
 
-  logger.info(`[pnlImage] Loaded ${greenPool.length} green + ${redPool.length} red templates`);
+  logger.info(
+    `[pnlImage] Loaded ${greenPool.length} green + ${redPool.length} red position templates, ` +
+    `${greenAlltimePool.length} green-alltime + ${redAlltimePool.length} red-alltime templates`
+  );
 }
 
+/** Pick a template from the numbered position/portfolio pool */
 function pickTemplate(pnlValue: number): Buffer | null {
   loadTemplatePools();
   const pool = pnlValue >= 0 ? greenPool : redPool;
+  if (pool.length === 0) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/** Pick a template from the alltime-specific pool */
+function pickAlltimeTemplate(pnlValue: number): Buffer | null {
+  loadTemplatePools();
+  const pool = pnlValue >= 0 ? greenAlltimePool : redAlltimePool;
   if (pool.length === 0) return null;
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -199,7 +220,7 @@ export interface PositionPnlData {
 
 export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buffer | null> {
   ensureFontInstalled();
-  const template = pickTemplate(data.totalPnl);
+  const template = pickAlltimeTemplate(data.totalPnl);
   if (!template) return null;
 
   const totalInvested = data.totalInvested;
