@@ -391,6 +391,12 @@ export async function handleStart(ctx: Context): Promise<void> {
         const walletPromise = createUserWithWallet(telegramId, username, firstName, lastName);
         _pendingWalletCreations.set(telegramId, { promise: walletPromise, referralCode });
 
+        // If wallet creation fails in background, clear all locks so user can retry /start
+        walletPromise.catch(() => {
+          _creatingWallet.delete(telegramId);
+          _pendingWalletCreations.delete(telegramId);
+        });
+
         const joinCaption =
           `${ce(EMOJI.cherry, '🏆')} <b>Welcome to PolyTech!</b>\n\n` +
           `${ce(EMOJI.loading, '⏳')} <b>Your Polymarket wallet is being created...</b>\n\n` +
@@ -545,8 +551,12 @@ export async function handleCheckMembership(ctx: Context): Promise<void> {
     await sendWalletSuccess(ctx, result);
   } catch (error: any) {
     _pendingWalletCreations.delete(telegramId);
+    _creatingWallet.delete(telegramId);
     logger.error(`[checkMembership] Wallet creation failed for ${telegramId}:`, error);
-    await ctx.reply('❌ Wallet creation failed. Please try /start again.');
+    await ctx.reply(
+      '❌ <b>Wallet creation failed.</b>\n\nThis is usually a temporary issue. Please tap /start to try again.',
+      { parse_mode: 'HTML' }
+    );
   } finally {
     _creatingWallet.delete(telegramId);
   }
