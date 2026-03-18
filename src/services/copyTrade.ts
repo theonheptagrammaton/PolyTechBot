@@ -692,8 +692,8 @@ async function tickForTrader(
         // Execute the copy
         const result = await executeCopyOrder(user, effectiveTrade, copySize, sub.slippage);
 
-        // Brief delay to avoid Cloudflare 429 rate limiting on CLOB
-        await new Promise(r => setTimeout(r, 600));
+        // Delay between orders to avoid Cloudflare 1015 rate limiting on CLOB
+        await new Promise(r => setTimeout(r, 1200));
 
         // Save to DB
         await prisma.copiedTrade.create({
@@ -787,7 +787,7 @@ async function tickForTrader(
                 user.telegramId,
                 `❌ <b>Copy Failed</b>\n\n` +
                 `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
-                `Error: ${escHtml(result.errorMsg ?? 'unknown error')}\n` +
+                `Error: ${escHtml((result.errorMsg ?? 'unknown error').slice(0, 120))}\n` +
                 `Copy size: $${copySize.toFixed(2)}`
               );
             }

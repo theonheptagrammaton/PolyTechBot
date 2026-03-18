@@ -905,9 +905,14 @@ async function executeTrade(
   } catch (error: any) {
     logger.error('Error executing trade:', error);
 
-    const rawErr = error.message ?? 'Unknown error';
+    const rawErr: string = error.message ?? 'Unknown error';
+    // Detect Cloudflare HTML / oversized error pages — show friendly message instead
+    const isHtml = rawErr.includes('<!DOCTYPE') || rawErr.includes('Access denied') || rawErr.includes('Cloudflare');
     const safeMd = (s: string) => s.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
-    const errorMessage = `❌ *Trade Failed*\n\n${safeMd(rawErr)}`;
+    const friendlyErr = isHtml
+      ? 'Service temporarily unavailable. Please try again in a few seconds.'
+      : rawErr.slice(0, 200);
+    const errorMessage = `❌ *Trade Failed*\n\n${safeMd(friendlyErr)}`;
 
     try {
       if (progressMsg && ctx.chat) {
