@@ -8,6 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc && cp -r src/bot/img dist/bot/img",
     "start": "node dist/index.js",
+    "start:worker": "node dist/worker.js",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio"
@@ -34,6 +35,7 @@
     "@types/speakeasy": "^2.0.10",
     "axios": "^1.13.5",
     "bs58": "^6.0.0",
+    "bullmq": "^5.71.0",
     "dotenv": "^16.4.7",
     "ethers": "^5.7.2",
     "ioredis": "^5.4.2",

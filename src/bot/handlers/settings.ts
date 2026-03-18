@@ -5,21 +5,15 @@ import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { decrypt } from '../../utils/encryption';
 import { sendPage } from '../../utils/telegram';
+import { RedisBackedState } from '../../utils/redisState';
 
 const IMG_SETTINGS = path.join(__dirname, '../img/settings.PNG');
 
-// Tracks users who are waiting to type a custom default trade amount
-export const settingsAmountState = new Map<string, { timestamp: number }>();
+// Tracks users who are waiting to type a custom default trade amount (TTL: 10 min)
+export const settingsAmountState = new RedisBackedState<{ timestamp: number }>('settingsAmount', 600);
 
-// Tracks users who are waiting to type a custom slippage tolerance value
-export const settingsSlippageState = new Map<string, { timestamp: number }>();
-
-// R6: Periodic cleanup for both state maps (every 30 min, remove entries > 10 min old)
-setInterval(() => {
-  const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [key, s] of settingsAmountState.entries())   if (s.timestamp < cutoff) settingsAmountState.delete(key);
-  for (const [key, s] of settingsSlippageState.entries()) if (s.timestamp < cutoff) settingsSlippageState.delete(key);
-}, 30 * 60 * 1000);
+// Tracks users who are waiting to type a custom slippage tolerance value (TTL: 10 min)
+export const settingsSlippageState = new RedisBackedState<{ timestamp: number }>('settingsSlippage', 600);
 
 /**
  * Shows settings menu

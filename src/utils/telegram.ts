@@ -28,8 +28,17 @@ export async function prepareImageBuffer(filePath: string): Promise<Buffer> {
 const MENU_IMAGE = path.join(__dirname, '../bot/img/opening.jpg');
 let _cachedPhotoFileId: string | null = null;
 
-/** Per-URL file_id cache — avoids re-uploading the same event image */
+/** Per-URL file_id cache — avoids re-uploading the same event image (LRU capped at 200) */
+const URL_PHOTO_CACHE_MAX = 200;
 const _urlPhotoCache = new Map<string, string>();
+
+function urlPhotoCacheSet(key: string, fileId: string): void {
+  if (_urlPhotoCache.size >= URL_PHOTO_CACHE_MAX) {
+    const firstKey = _urlPhotoCache.keys().next().value;
+    if (firstKey !== undefined) _urlPhotoCache.delete(firstKey);
+  }
+  _urlPhotoCache.set(key, fileId);
+}
 
 /**
  * Returns the media object for the static menu image.
@@ -112,7 +121,7 @@ export async function sendPage(
           replyMarkup ? { reply_markup: replyMarkup } : undefined,
         );
         if (!cached && typeof result === 'object' && result?.photo?.length) {
-          _urlPhotoCache.set(cacheKey, result.photo[result.photo.length - 1].file_id);
+          urlPhotoCacheSet(cacheKey, result.photo[result.photo.length - 1].file_id);
         }
         return;
       } catch (err: any) {
@@ -128,7 +137,7 @@ export async function sendPage(
             ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
           });
           if (!cached && result?.photo?.length) {
-            _urlPhotoCache.set(cacheKey, result.photo[result.photo.length - 1].file_id);
+            urlPhotoCacheSet(cacheKey, result.photo[result.photo.length - 1].file_id);
           }
         } catch (err2: any) {
           logger.warn(`[sendPage] replyWithPhoto fallback also failed for ${cacheKey}: ${err2?.message}`);
@@ -150,7 +159,7 @@ export async function sendPage(
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       });
       if (!cached && result?.photo?.length) {
-        _urlPhotoCache.set(cacheKey, result.photo[result.photo.length - 1].file_id);
+        urlPhotoCacheSet(cacheKey, result.photo[result.photo.length - 1].file_id);
       }
     } catch {
       // URL/file failed — fall back to static menu image

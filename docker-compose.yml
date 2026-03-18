@@ -47,9 +47,35 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://polytech:polytech_password@postgres:5432/polytech_db
+      DATABASE_URL: postgresql://polytech:polytech_password@postgres:5432/polytech_db?connection_limit=40&pool_timeout=20&connect_timeout=10
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      WEBHOOK_PORT: 8443
+      COPY_TRADE_WORKER: external
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./logs:/app/logs
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polytech-worker
+    restart: unless-stopped
+    command: node dist/worker.js
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://polytech:polytech_password@postgres:5432/polytech_db?connection_limit=40&pool_timeout=20&connect_timeout=10
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      HEALTH_PORT: 3001
     volumes:
       - ./logs:/app/logs
 

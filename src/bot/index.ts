@@ -196,6 +196,7 @@ import {
 } from './handlers/copyTrade';
 import { startCopyTradeMonitor, NotificationExtra } from '../services/copyTrade';
 import { prepareImageBuffer } from '../utils/telegram';
+import { enqueueNotification, startNotificationWorker, closeNotificationWorker } from '../utils/notificationQueue';
 
 export class TelegramBot {
   private bot: Telegraf;
@@ -867,29 +868,21 @@ export class TelegramBot {
       }
 
       // Check if user is typing a custom default trade amount (lower priority than active flows)
-      const amountStateData = settingsAmountState.get(telegramId);
+      const amountStateData = await settingsAmountState.get(telegramId);
       if (amountStateData) {
-        if (Date.now() - amountStateData.timestamp > 10 * 60 * 1000) {
-          settingsAmountState.delete(telegramId);
-        } else {
-          await handleCustomAmountInput(ctx, text);
-          return;
-        }
+        await handleCustomAmountInput(ctx, text);
+        return;
       }
 
       // Check if user is typing a custom slippage tolerance value
-      const slippageStateData = settingsSlippageState.get(telegramId);
+      const slippageStateData = await settingsSlippageState.get(telegramId);
       if (slippageStateData) {
-        if (Date.now() - slippageStateData.timestamp > 10 * 60 * 1000) {
-          settingsSlippageState.delete(telegramId);
-        } else {
-          await handleCustomSlippageInput(ctx, text);
-          return;
-        }
+        await handleCustomSlippageInput(ctx, text);
+        return;
       }
 
       // Check if user is in a 2FA flow
-      const state = userState.get(telegramId);
+      const state = await userState.get(telegramId);
 
       if (state) {
         // Check if state expired (10 minutes)
@@ -924,9 +917,9 @@ export class TelegramBot {
         withdrawState.has(telegramId) ||
         copyAddState.has(telegramId) ||
         copyEditState.has(telegramId) ||
-        settingsAmountState.has(telegramId) ||
-        settingsSlippageState.has(telegramId) ||
-        userState.has(telegramId);
+        await settingsAmountState.hasAsync(telegramId) ||
+        await settingsSlippageState.hasAsync(telegramId) ||
+        await userState.hasAsync(telegramId);
       if (!text.startsWith('/') && !hasActiveFlow) {
         await handleKeywordSearch(ctx, text);
         return;
@@ -1000,16 +993,29 @@ export class TelegramBot {
         { command: 'help',        description: '❓ Help' },
       ]).catch((err: any) => logger.warn('setMyCommands failed:', err?.message));
 
-      // Start bot (launch() resolves only when bot stops — do NOT await)
-      this.bot.launch().catch((err: any) => {
-        logger.error('Bot launch error:', err);
-      });
+      // Start bot — webhook if WEBHOOK_DOMAIN is set, else long polling (local dev)
+      const webhookDomain = config.telegram.webhookDomain;
+      if (webhookDomain) {
+        const webhookPath = `/webhook/${config.telegram.botToken}`;
+        this.bot.launch({
+          webhook: {
+            domain: webhookDomain,
+            port: config.telegram.webhookPort ?? 8443,
+            path: webhookPath,
+            hookPath: webhookPath,
+          },
+        }).catch((err: any) => logger.error('Bot webhook error:', err));
+        logger.info(`[bot] Webhook mode: ${webhookDomain}${webhookPath}`);
+      } else {
+        this.bot.launch().catch((err: any) => logger.error('Bot launch error (polling):', err));
+        logger.info('[bot] Long polling mode (set WEBHOOK_DOMAIN for webhook)');
+      }
 
-      // Wait briefly for Telegraf to initialize its polling loop
+      // Wait briefly for bot to initialize
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      // Start copy trade monitor (polls every 30s)
-      startCopyTradeMonitor(async (telegramId: string, message: string, extra?: NotificationExtra) => {
+      // Start rate-limited notification worker (25 msg/s, retries on failure)
+      const directSend = async (telegramId: string, message: string, extra?: NotificationExtra) => {
         try {
           if (extra?.imagePath) {
             const buf = await prepareImageBuffer(extra.imagePath);
@@ -1031,8 +1037,17 @@ export class TelegramBot {
           }
         } catch (err: any) {
           logger.warn(`[copy] Failed to send notification to ${telegramId}: ${err?.message}`);
+          throw err; // re-throw so BullMQ can retry
         }
-      });
+      };
+      startNotificationWorker(directSend);
+
+      // Start copy trade monitor — skip if running as separate worker container
+      if (process.env.COPY_TRADE_WORKER !== 'external') {
+        startCopyTradeMonitor(enqueueNotification);
+      } else {
+        logger.info('[bot] Copy trade monitor delegated to external worker container');
+      }
 
       logger.info('Telegram bot started successfully');
     } catch (error) {
@@ -1045,8 +1060,11 @@ export class TelegramBot {
     logger.info('Shutting down Telegram bot...');
 
     try {
-      const { stopCopyTradeMonitor } = await import('../services/copyTrade');
-      stopCopyTradeMonitor();
+      if (process.env.COPY_TRADE_WORKER !== 'external') {
+        const { stopCopyTradeMonitor } = await import('../services/copyTrade');
+        stopCopyTradeMonitor();
+      }
+      await closeNotificationWorker();
       this.bot.stop('SIGINT');
       logger.info('Telegram bot stopped');
     } catch (error) {

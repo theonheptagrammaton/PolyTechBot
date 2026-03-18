@@ -11,16 +11,13 @@ import {
   verifyUserTwoFactorToken,
   getRemainingBackupCodes,
 } from '../../services/twoFactor';
+import { RedisBackedState } from '../../utils/redisState';
 
-// Temporary storage for 2FA setup (in production, use Redis)
-const twoFactorSetupCache = new Map<
-  string,
-  { secret: string; backupCodes: string[]; timestamp: number }
->();
+// 2FA setup temporary state — TTL 10 min (matches setup window)
+const twoFactorSetupCache = new RedisBackedState<{ secret: string; backupCodes: string[]; timestamp: number }>('twoFactorSetup', 600);
 
-// User state for text input flows (shared with bot/index.ts)
-// In production, this should be in Redis
-export const userState = new Map<string, { action: string; timestamp: number }>();
+// User state for text input flows — TTL 10 min
+export const userState = new RedisBackedState<{ action: string; timestamp: number }>('userAction', 600);
 
 /**
  * Shows 2FA settings menu
@@ -174,7 +171,7 @@ export async function handleVerifyTwoFactorSetup(
     }
 
     // Get from cache
-    const setupData = twoFactorSetupCache.get(telegramId);
+    const setupData = await twoFactorSetupCache.get(telegramId);
     if (!setupData) {
       await ctx.reply(
         '❌ *Setup Expired*\n\n' +
@@ -265,7 +262,7 @@ export async function handleShowManualKey(ctx: Context): Promise<void> {
       return;
     }
 
-    const setupData = twoFactorSetupCache.get(telegramId);
+    const setupData = await twoFactorSetupCache.get(telegramId);
     if (!setupData || Date.now() - setupData.timestamp > 10 * 60 * 1000) {
       twoFactorSetupCache.delete(telegramId!);
       await ctx.reply(

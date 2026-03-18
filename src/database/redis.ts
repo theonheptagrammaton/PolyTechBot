@@ -117,3 +117,20 @@ export class RedisCache {
 }
 
 export const redisCache = new RedisCache();
+
+/**
+ * Creates a dedicated ioredis connection for BullMQ.
+ * BullMQ requires maxRetriesPerRequest: null (uses blocking commands).
+ * Each call returns a new connection — BullMQ manages its own lifecycle.
+ */
+export function createBullMQConnection(): Redis {
+  return new Redis({
+    host: config.redis.host,
+    port: config.redis.port,
+    password: config.redis.password,
+    maxRetriesPerRequest: null,
+    retryStrategy(times) {
+      return Math.min(times * 50, 2000);
+    },
+  });
+}

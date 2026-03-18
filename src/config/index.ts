@@ -11,6 +11,8 @@ interface Config {
     groupBotToken?: string;
     requiredGroupId?: number;
     requiredGroupLink?: string;
+    webhookDomain?: string;
+    webhookPort?: number;
   };
   polymarket: {
     host: string;
@@ -80,6 +82,8 @@ function validateConfig(): Config {
         ? parseInt(process.env.TELEGRAM_REQUIRED_GROUP_ID, 10)
         : undefined,
       requiredGroupLink: process.env.TELEGRAM_GROUP_LINK || undefined,
+      webhookDomain: process.env.WEBHOOK_DOMAIN || undefined,
+      webhookPort: parseInt(process.env.WEBHOOK_PORT || '8443', 10),
     },
     polymarket: {
       host: process.env.POLYMARKET_HOST || 'https://clob.polymarket.com',
