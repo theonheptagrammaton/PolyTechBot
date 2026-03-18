@@ -1,7 +1,7 @@
 import { Telegraf, Context } from 'telegraf';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { handleStart, handleCheckMembership } from './handlers/start';
+import { handleStart, handleCheckMembership, _pendingWalletCreations } from './handlers/start';
 import { handleHelp } from './handlers/help';
 import { handleWallet } from './handlers/wallet';
 import {
@@ -224,6 +224,42 @@ export class TelegramBot {
         logger.error(`Error processing request from @${username} (${userId}) after ${duration}ms:`, error);
         throw error;
       }
+    });
+
+    // Onboarding guard — block all interactions for unverified users
+    this.bot.use(async (ctx, next) => {
+      const telegramId = ctx.from?.id?.toString();
+      if (!telegramId) return next();
+
+      // Always allow /start command and membership check
+      const isStart = 'message' in ctx.update &&
+        'text' in (ctx.update as any).message &&
+        (ctx.update as any).message.text?.startsWith('/start');
+      const isMembershipCheck = 'callback_query' in ctx.update &&
+        (ctx.update as any).callback_query?.data === 'check_membership';
+
+      if (isStart || isMembershipCheck) return next();
+
+      // Block if wallet creation is pending (user hasn't joined the group yet)
+      if (_pendingWalletCreations.has(telegramId)) {
+        if ('callback_query' in ctx.update) await ctx.answerCbQuery().catch(() => {});
+        await ctx.reply(
+          "⏳ Please join the community first, then press <b>✅ I've Joined, Check</b> to activate your account.",
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      // Block if user has no wallet (never completed onboarding)
+      const { getUserByTelegramId } = await import('../services/user');
+      const user = await getUserByTelegramId(telegramId).catch(() => null);
+      if (!user) {
+        if ('callback_query' in ctx.update) await ctx.answerCbQuery().catch(() => {});
+        await ctx.reply('👋 Please use /start to create your account first.');
+        return;
+      }
+
+      return next();
     });
 
     // Rate limiting could be added here in the future
