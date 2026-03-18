@@ -60,10 +60,9 @@ services:
   worker:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.worker
     container_name: polytech-worker
     restart: unless-stopped
-    command: node dist/worker.js
     depends_on:
       postgres:
         condition: service_healthy
