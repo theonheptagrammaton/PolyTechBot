@@ -306,16 +306,10 @@ async function executeCopyOrder(
         return { status: 'skipped', errorMsg: 'no matching position to sell' };
       }
 
-      // Sell the same number of shares the trader sold, capped by the user's position.
-      // If the trader sold MORE shares than the user holds, skip — we cannot proportionally
-      // replicate the trade without knowing the trader's full position size.
+      // Sell the same number of shares the trader sold.
+      // If the trader sold MORE shares than the user holds, sell all of the user's shares.
       const traderShares = parseFloat((trade.sizeUsd / trade.price).toFixed(4));
-
-      if (traderShares > pos.size) {
-        return { status: 'skipped', errorMsg: `trader sold ${traderShares.toFixed(4)} shares but user only holds ${pos.size.toFixed(4)}` };
-      }
-
-      size = traderShares;
+      size = Math.min(traderShares, pos.size);
 
       if (size < 1) {
         return { status: 'skipped', errorMsg: 'sell size too small' };
@@ -697,6 +691,9 @@ async function tickForTrader(
 
         // Execute the copy
         const result = await executeCopyOrder(user, effectiveTrade, copySize, sub.slippage);
+
+        // Brief delay to avoid Cloudflare 429 rate limiting on CLOB
+        await new Promise(r => setTimeout(r, 600));
 
         // Save to DB
         await prisma.copiedTrade.create({

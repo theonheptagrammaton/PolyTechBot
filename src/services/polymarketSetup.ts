@@ -11,7 +11,7 @@ import { logger } from '../utils/logger';
 import { maskSensitiveData } from '../utils/encryption';
 
 // Polygon RPC — public endpoints, no API key required
-const POLYGON_RPC = process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com';
+const POLYGON_RPC = process.env.POLYGON_RPC_URL || 'https://rpc.polygon.technology';
 
 // Polymarket Builder Relayer URL (v2) - MUST USE THIS
 const RELAYER_URL = 'https://relayer-v2.polymarket.com';
