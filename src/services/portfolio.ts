@@ -8,6 +8,7 @@ const DATA_API = 'https://data-api.polymarket.com';
 
 const ACTIVE_POSITIONS_TTL  = 20;   // seconds
 const CLOSED_POSITIONS_TTL  = 60;   // seconds
+const FETCH_TIMEOUT_MS      = 8_000; // abort Data API / CLOB fetches after 8s
 
 export interface OpenOrder {
   id: string;
@@ -144,7 +145,9 @@ export async function getActivePositions(proxyAddress: string, forceRefresh = fa
 
   try {
     logger.info(`Fetching active positions from Data API for ${proxyAddress}`);
-    const response = await fetch(`${DATA_API}/positions?user=${proxyAddress}`);
+    const response = await fetch(`${DATA_API}/positions?user=${proxyAddress}`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
 
     if (!response.ok) {
       logger.warn(`Data API /positions returned ${response.status}`);
@@ -179,7 +182,9 @@ export async function getClosedPositions(proxyAddress: string, forceRefresh = fa
 
   try {
     logger.info(`Fetching closed positions from Data API for ${proxyAddress}`);
-    const response = await fetch(`${DATA_API}/closed-positions?user=${proxyAddress}`);
+    const response = await fetch(`${DATA_API}/closed-positions?user=${proxyAddress}`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
 
     if (!response.ok) {
       logger.warn(`Data API /closed-positions returned ${response.status}`);
@@ -351,7 +356,8 @@ export async function getPortfolioData(
 /**
  * Gets user's USDC balance from CLOB API
  */
-const BALANCE_CACHE_TTL = 30; // seconds — short enough to stay accurate, long enough to help rapid trades
+const BALANCE_CACHE_TTL       = 30;  // seconds — fresh cache
+const BALANCE_STALE_CACHE_TTL = 300; // 5 minutes — shown as fallback when CLOB is unreachable
 
 export async function getBalance(
   privateKey: string,
@@ -359,26 +365,46 @@ export async function getBalance(
   apiSecret: string,
   passphrase: string
 ): Promise<string> {
+  // Use last 8 chars of encrypted key as a per-user identifier (no sensitive data in key)
+  const keyHash   = privateKey.slice(-8);
+  const cacheKey  = `balance:${keyHash}`;
+  const staleKey  = `balance:stale:${keyHash}`;
+
   try {
-    // Use a hash of the API key as cache key (unique per user, no sensitive data)
-    const keyHash = privateKey.slice(-8); // last 8 chars of encrypted key as identifier
-    const cacheKey = `balance:${keyHash}`;
     const cached = await redisCache.get<string>(cacheKey);
     if (cached !== null && cached !== undefined) return cached;
 
     const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-    const balanceData = await client.getBalanceAllowance({ asset_type: 'COLLATERAL' as any });
+
+    // Race CLOB call against a hard timeout — the CLOB axios client has timeout:0 (no timeout)
+    const balanceData = await Promise.race([
+      client.getBalanceAllowance({ asset_type: 'COLLATERAL' as any }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('CLOB balance timeout')), FETCH_TIMEOUT_MS)
+      ),
+    ]);
 
     let balance = '0.00';
-    if (balanceData?.balance) {
-      balance = (parseFloat(balanceData.balance) / 1_000_000).toFixed(2);
+    if ((balanceData as any)?.balance) {
+      balance = (parseFloat((balanceData as any).balance) / 1_000_000).toFixed(2);
     }
 
-    await redisCache.set(cacheKey, balance, BALANCE_CACHE_TTL);
+    // Store fresh cache + update stale fallback
+    await Promise.all([
+      redisCache.set(cacheKey, balance, BALANCE_CACHE_TTL),
+      redisCache.set(staleKey,  balance, BALANCE_STALE_CACHE_TTL),
+    ]).catch(() => {});
+
     logger.info(`Balance: $${balance}`);
     return balance;
   } catch (error) {
-    logger.warn('Error fetching balance:', error);
+    logger.warn('Error fetching balance:', (error as any)?.message ?? String(error));
+    // Return last known balance instead of $0.00
+    const stale = await redisCache.get<string>(staleKey).catch(() => null);
+    if (stale !== null && stale !== undefined) {
+      logger.info(`Balance (stale): $${stale}`);
+      return stale;
+    }
     return '0.00';
   }
 }
