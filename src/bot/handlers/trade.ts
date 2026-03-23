@@ -818,7 +818,7 @@ async function executeTrade(
       `<b>Invested:</b> $${amount.toFixed(2)}\n` +
       `<b>Shares:</b> ~${estimatedSize}\n` +
       `<b>Entry Price:</b> ${entryPriceCents}¢\n\n` +
-      `<b>TX:</b> <code>${orderResponse.orderID}</code>\n\n` +
+      `<b>Order ID:</b> <code>${orderResponse.orderID}</code>\n\n` +
       `${ce(EMOJI.marketsTitle, '🤑')} <a href="${polymarketLink}">View this market on Polymarket</a>`;
 
     await ctx.telegram.editMessageText(

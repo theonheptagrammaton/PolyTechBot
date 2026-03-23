@@ -251,9 +251,16 @@ export class TelegramBot {
       }
 
       // Block if user has no wallet (never completed onboarding)
+      // Fail open on DB errors — a transient DB outage must not lock out all users
       const { getUserByTelegramId } = await import('../services/user');
-      const user = await getUserByTelegramId(telegramId).catch(() => null);
-      if (!user) {
+      let user: Awaited<ReturnType<typeof getUserByTelegramId>> | null = null;
+      let dbError = false;
+      try {
+        user = await getUserByTelegramId(telegramId);
+      } catch {
+        dbError = true;
+      }
+      if (!dbError && !user) {
         if ('callback_query' in ctx.update) await ctx.answerCbQuery().catch(() => {});
         await ctx.reply('👋 Please use /start to create your account first.');
         return;
