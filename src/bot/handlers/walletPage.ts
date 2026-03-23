@@ -4,7 +4,7 @@ import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
-import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
+import { generateAllTimePnlImage } from '../../services/pnlImage';
 
 const IMG_WALLET      = path.join(__dirname, '../img/wallet.PNG');
 const IMG_PORTFOLIO   = path.join(__dirname, '../img/portfolio.PNG');
@@ -191,6 +191,7 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
     const totalCurrentValue = activePositions.reduce((s, p) => s + p.currentValue, 0);
     const totalUnrealizedPnl = activePositions.reduce((s, p) => s + p.cashPnl, 0);
     const totalRealizedPnl  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
+    const totalClosedInvested = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
 
     const unPnlSign  = totalUnrealizedPnl >= 0 ? '+' : '';
     const unPnlEmoji = totalUnrealizedPnl >= 0 ? '🟢' : '🔴';
@@ -211,6 +212,7 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
 
     if (closedPositions.length > 0) {
       message += `📜 *${closedPositions.length} Closed Position${closedPositions.length !== 1 ? 's' : ''}*\n`;
+      message += `├ Invested: $${totalClosedInvested.toFixed(2)} → Received: $${(totalClosedInvested + totalRealizedPnl).toFixed(2)}\n`;
       message += `└ ${rePnlEmoji} Total Realized P&L: ${rePnlSign}$${totalRealizedPnl.toFixed(2)}\n\n`;
     } else {
       message += `📜 *No Closed Positions*\n\n`;
@@ -571,7 +573,7 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
 
     // Summary header
     const totalRealizedPnl = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
-    const totalInvested    = closedPositions.reduce((s, p) => s + p.totalBought, 0);
+    const totalInvested    = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
     const rePnlSign  = totalRealizedPnl >= 0 ? '+' : '';
     const rePnlEmoji = totalRealizedPnl >= 0 ? '🟢' : '🔴';
 
@@ -584,18 +586,23 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
       const truncTitle = esc(rawTitle.length > 46 ? rawTitle.substring(0, 46) + '...' : rawTitle);
       const pnlSign  = pos.realizedPnl >= 0 ? '+' : '';
       const pnlEmoji = pos.realizedPnl >= 0 ? '🟢' : '🔴';
-      const roi      = pos.totalBought > 0 ? (pos.realizedPnl / pos.totalBought) * 100 : 0;
-      const roiSign  = roi >= 0 ? '+' : '';
-      const closedAt = pos.timestamp
+      const invested   = pos.totalBought * pos.avgPrice;
+      const roi        = invested > 0 ? (pos.realizedPnl / invested) * 100 : 0;
+      const roiSign    = roi >= 0 ? '+' : '';
+      const closedAt   = pos.timestamp
         ? new Date(pos.timestamp * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
         : 'N/A';
       const endDate = pos.endDate
         ? new Date(pos.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
         : 'N/A';
 
+      const received       = invested + pos.realizedPnl;
+      const exitPriceCents = pos.totalBought > 0 ? ((received / pos.totalBought) * 100).toFixed(1) : '—';
+
       message += `*${number}) ${esc(pos.outcome || 'Unknown')}*\n`;
       message += `   ├ 📌 ${truncTitle}\n`;
-      message += `   ├ 💰 Invested: $${pos.totalBought.toFixed(2)} @ avg ${(pos.avgPrice * 100).toFixed(1)}¢\n`;
+      message += `   ├ 📊 ${pos.totalBought.toFixed(2)} shares · Buy: ${(pos.avgPrice * 100).toFixed(1)}¢ → Exit: ${exitPriceCents}¢\n`;
+      message += `   ├ 💰 Invested: $${invested.toFixed(2)} · Received: $${received.toFixed(2)}\n`;
       message += `   ├ ${pnlEmoji} Realized P&L: ${pnlSign}$${pos.realizedPnl.toFixed(2)} (ROI: ${roiSign}${roi.toFixed(1)}%)\n`;
       message += `   ├ 📅 Closed: ${closedAt}\n`;
       message += `   └ ⏰ Market End: ${endDate}\n\n`;
@@ -1294,7 +1301,6 @@ export async function handlePortfolioPnl(ctx: Context): Promise<void> {
     }
 
     const unrealizedPnl = activePositions.reduce((s, p) => s + p.cashPnl, 0);
-    // Use initialValue from API — the authoritative cost basis for active positions
     const totalInvested = activePositions.reduce((s, p) => s + (p.initialValue), 0);
     const percentPnl    = totalInvested > 0 ? (unrealizedPnl / totalInvested) * 100 : 0;
 
@@ -1324,8 +1330,8 @@ export async function handlePortfolioPnl(ctx: Context): Promise<void> {
 
     // Try image generation
     try {
-      const imageBuffer = await generatePortfolioPnlImage({
-        unrealizedPnl,
+      const imageBuffer = await generateAllTimePnlImage({
+        totalPnl: unrealizedPnl,
         percentPnl,
         totalInvested,
         balance,
@@ -1388,7 +1394,7 @@ export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'
       const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
       const totalPnl        = totalUnrealized + totalRealized;
       const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
-      const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
+      const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
       const totalInvested   = activeInvested + closedInvested;
       const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
 
@@ -1404,8 +1410,8 @@ export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'
       const totalInvested = activePositions.reduce((s, p) => s + (p.initialValue), 0);
       const percentPnl    = totalInvested > 0 ? (unrealizedPnl / totalInvested) * 100 : 0;
 
-      imageBuffer = await generatePortfolioPnlImage({
-        unrealizedPnl, percentPnl, totalInvested, balance,
+      imageBuffer = await generateAllTimePnlImage({
+        totalPnl: unrealizedPnl, percentPnl, totalInvested, balance,
         positionCount: activePositions.length,
         username: ctx.from?.username,
         displayName,

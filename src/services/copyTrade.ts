@@ -444,9 +444,9 @@ async function executeCopyOrder(
 
 // ─── Market Info Cache (for notification titles) ──────────────────────────────
 
-async function fetchMarketInfo(conditionId: string): Promise<{ question: string; slug: string } | null> {
+async function fetchMarketInfo(conditionId: string): Promise<{ question: string; slug: string; eventSlug: string } | null> {
   const cacheKey = `copy:mktinfo:${conditionId}`;
-  const cached = await redisCache.get<{ question: string; slug: string }>(cacheKey);
+  const cached = await redisCache.get<{ question: string; slug: string; eventSlug: string }>(cacheKey);
   if (cached) return cached;
   try {
     const resp = await fetchWithRetry(
@@ -459,7 +459,8 @@ async function fetchMarketInfo(conditionId: string): Promise<{ question: string;
     const m = markets[0];
     const result = {
       question: m.question ?? m.title ?? conditionId.slice(0, 20),
-      slug: m.slug ?? m.event?.slug ?? '',
+      slug: m.slug ?? '',
+      eventSlug: m.event?.slug ?? m.slug ?? '',
     };
     await redisCache.set(cacheKey, result, 3600);
     return result;
@@ -798,8 +799,8 @@ async function tickForTrader(
             notifiedThisTick.add(tradeKey);
             const mktInfo = await fetchMarketInfo(trade.marketId).catch(() => null);
             const question = mktInfo?.question ?? trade.marketId.slice(0, 40);
-            const marketUrl = mktInfo?.slug
-              ? `https://polymarket.com/event/${mktInfo.slug}`
+            const marketUrl = (mktInfo?.eventSlug || mktInfo?.slug)
+              ? `https://polymarket.com/event/${mktInfo!.eventSlug || mktInfo!.slug}`
               : `https://polymarket.com/profile/${traderAddress}`;
             const shares = trade.size > 0 ? trade.size : (trade.price > 0 ? trade.sizeUsd / trade.price : 0);
             const sideLabel = effectiveSide === 'BUY' ? 'BOUGHT' : 'SOLD';
