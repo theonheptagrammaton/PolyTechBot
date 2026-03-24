@@ -18,6 +18,9 @@ export interface AdminStats {
   commissionWeek: number;
   commissionMonth: number;
   estimatedVolumeTotal: number;
+  estimatedVolumeToday: number;
+  estimatedVolumeWeek: number;
+  estimatedVolumeMonth: number;
 
   // Cashback
   cashbackTotal: number;
@@ -153,6 +156,9 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
     commissionWeek:   commissionWeek._sum.amount   ?? 0,
     commissionMonth:  commissionMonth._sum.amount  ?? 0,
     estimatedVolumeTotal: COMMISSION_RATE > 0 ? commissionTotal / COMMISSION_RATE : 0,
+    estimatedVolumeToday: COMMISSION_RATE > 0 ? (commissionToday._sum.amount ?? 0) / COMMISSION_RATE : 0,
+    estimatedVolumeWeek:  COMMISSION_RATE > 0 ? (commissionWeek._sum.amount  ?? 0) / COMMISSION_RATE : 0,
+    estimatedVolumeMonth: COMMISSION_RATE > 0 ? (commissionMonth._sum.amount ?? 0) / COMMISSION_RATE : 0,
 
     cashbackTotal: cashbackAgg._sum.cashbackEarnedTotal ?? 0,
 
@@ -190,12 +196,17 @@ export function formatStatsMessage(s: AdminStats): string {
   m += `├ New Today: *${s.newUsersToday}* · Week: *${s.newUsersWeek}* · Month: *${s.newUsersMonth}*\n`;
   m += `└ Copy Trade Users: *${s.copyTradeActiveUsers}*\n\n`;
 
+  m += '📈 *TRADING VOLUME* _(estimated from commission)_\n';
+  m += `├ Today: *${formatVolume(s.estimatedVolumeToday)}*\n`;
+  m += `├ This Week: *${formatVolume(s.estimatedVolumeWeek)}*\n`;
+  m += `├ This Month: *${formatVolume(s.estimatedVolumeMonth)}*\n`;
+  m += `└ All Time: *${formatVolume(s.estimatedVolumeTotal)}*\n\n`;
+
   m += '💰 *COMMISSION (REVENUE)*\n';
-  m += `├ All Time: *${formatVolume(s.commissionTotal)}*\n`;
   m += `├ Today: *${formatVolume(s.commissionToday)}*\n`;
   m += `├ This Week: *${formatVolume(s.commissionWeek)}*\n`;
   m += `├ This Month: *${formatVolume(s.commissionMonth)}*\n`;
-  m += `├ Est. Total Volume: *${formatVolume(s.estimatedVolumeTotal)}*\n`;
+  m += `├ All Time: *${formatVolume(s.commissionTotal)}*\n`;
   m += `└ Cashback Paid: *${formatVolume(s.cashbackTotal)}*\n\n`;
 
   m += '🔗 *REFERRAL*\n';
