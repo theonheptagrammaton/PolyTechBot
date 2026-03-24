@@ -1,7 +1,9 @@
 import { prisma } from '../database/prisma';
 import { logger } from '../utils/logger';
 import { redisCache } from '../database/redis';
-import { getTrades } from './portfolio';
+
+const DATA_API = 'https://data-api.polymarket.com';
+const FETCH_TIMEOUT_MS = 8_000;
 
 export interface AdminStats {
   // Users
@@ -65,52 +67,54 @@ async function fetchClobVolume(forceRefresh: boolean, dayAgo: Date, weekAgo: Dat
     if (cached) return cached;
   }
 
+  // Use proxy wallet addresses — Data API is public, no auth needed
   const users = await prisma.user.findMany({
-    where: { isActive: true, encryptedPrivateKey: { not: '' }, encryptedApiKey: { not: '' } },
-    select: {
-      encryptedPrivateKey: true, encryptedApiKey: true,
-      encryptedApiSecret: true, encryptedPassphrase: true,
-    },
+    where: { isActive: true, polymarketProxyAddress: { not: null } },
+    select: { polymarketProxyAddress: true },
   });
 
-  logger.info(`[adminStats] Fetching trades for ${users.length} users (batches of 3)...`);
+  logger.info(`[adminStats] Fetching activity for ${users.length} proxy wallets from Data API...`);
 
-  const BATCH_SIZE = 3;
-  const PER_USER_TIMEOUT_MS = 10_000;
+  const dayAgoTs   = dayAgo.getTime()   / 1000;
+  const weekAgoTs  = weekAgo.getTime()  / 1000;
+  const monthAgoTs = monthAgo.getTime() / 1000;
 
-  const allResults: PromiseSettledResult<Awaited<ReturnType<typeof getTrades>>>[] = [];
-  for (let i = 0; i < users.length; i += BATCH_SIZE) {
-    const batch = users.slice(i, i + BATCH_SIZE);
-    const batchResults = await Promise.allSettled(
-      batch.map(u =>
-        Promise.race([
-          getTrades(u.encryptedPrivateKey, u.encryptedApiKey, u.encryptedApiSecret, u.encryptedPassphrase),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('getTrades timeout')), PER_USER_TIMEOUT_MS)
-          ),
-        ])
-      )
-    );
-    allResults.push(...batchResults);
-  }
-  const results = allResults;
+  const fetchUserActivity = async (proxyAddress: string): Promise<{ usd: number; ts: number }[]> => {
+    try {
+      const resp = await fetch(
+        `${DATA_API}/activity?user=${proxyAddress}&limit=500`,
+        { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }
+      );
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      const items: any[] = Array.isArray(data) ? data : [];
+      return items
+        .map(t => ({
+          usd: t.usdcSize ? parseFloat(t.usdcSize) : (parseFloat(t.size ?? '0') * parseFloat(t.price ?? '0')),
+          ts:  typeof t.timestamp === 'number' ? t.timestamp : parseInt(t.timestamp ?? '0', 10),
+        }))
+        .filter(t => t.usd > 0 && t.ts > 0);
+    } catch {
+      return [];
+    }
+  };
+
+  // Fetch all in parallel — Data API is public and handles concurrent requests fine
+  const allResults = await Promise.allSettled(
+    users.map(u => fetchUserActivity(u.polymarketProxyAddress!))
+  );
 
   let volumeTotal = 0, volumeToday = 0, volumeWeek = 0, volumeMonth = 0;
   let totalTrades = 0, tradesToday = 0, tradesWeek = 0, tradesMonth = 0;
 
-  for (const res of results) {
+  for (const res of allResults) {
     if (res.status !== 'fulfilled') continue;
-    for (const trade of res.value) {
-      const val = parseFloat(trade.size) * parseFloat(trade.price);
-      const d = new Date(trade.match_time);
-      if (isNaN(d.getTime())) continue;
-
-      volumeTotal += val;
+    for (const { usd, ts } of res.value) {
+      volumeTotal += usd;
       totalTrades += 1;
-
-      if (d >= dayAgo)   { volumeToday += val; tradesToday += 1; }
-      if (d >= weekAgo)  { volumeWeek  += val; tradesWeek  += 1; }
-      if (d >= monthAgo) { volumeMonth += val; tradesMonth += 1; }
+      if (ts >= dayAgoTs)   { volumeToday += usd; tradesToday += 1; }
+      if (ts >= weekAgoTs)  { volumeWeek  += usd; tradesWeek  += 1; }
+      if (ts >= monthAgoTs) { volumeMonth += usd; tradesMonth += 1; }
     }
   }
 
