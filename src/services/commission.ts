@@ -3,6 +3,7 @@ import { decrypt } from '../utils/encryption';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { creditReferralCommission } from './referral';
+import { prisma } from '../database/prisma';
 
 // Per-proxy serialization: prevents two concurrent execTransactions from racing on the same Safe nonce
 const proxyQueue = new Map<string, Promise<unknown>>();
@@ -218,6 +219,10 @@ async function _transferCommission(
         logger.warn(`[commission] Fee tx wait failed: ${waitErr?.message || waitErr}`);
       }
     }
+
+    // Log commission to DB for admin stats
+    prisma.commissionLog.create({ data: { userId: traderId ?? null, amount: commissionUsdc } })
+      .catch((err) => logger.warn('[commission] Failed to log commission:', err?.message || err));
 
     // Credit referral earnings + cashback (fire-and-forget — don't block trade)
     if (traderId) {

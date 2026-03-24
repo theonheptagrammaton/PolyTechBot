@@ -140,6 +140,17 @@ model CopySubscription {
   @@map("copy_subscriptions")
 }
 
+model CommissionLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  amount    Float                      // USDC commission charged
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
+  @@map("commission_logs")
+}
+
 model CopiedTrade {
   id             String   @id @default(cuid())
   userId         String
