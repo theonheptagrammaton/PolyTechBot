@@ -1,6 +1,7 @@
 import { prisma } from '../database/prisma';
 import { logger } from '../utils/logger';
 import { redisCache } from '../database/redis';
+import { getTrades } from './portfolio';
 
 export interface AdminStats {
   // Users
@@ -12,15 +13,21 @@ export interface AdminStats {
   newUsersMonth: number;
   copyTradeActiveUsers: number;
 
-  // Commission / Revenue
+  // Trading Volume (from CLOB API, parallel fetch)
+  volumeTotal: number;
+  volumeToday: number;
+  volumeWeek: number;
+  volumeMonth: number;
+  totalTrades: number;
+  tradesToday: number;
+  tradesWeek: number;
+  tradesMonth: number;
+
+  // Commission / Revenue (from DB — accurate going forward)
   commissionTotal: number;
   commissionToday: number;
   commissionWeek: number;
   commissionMonth: number;
-  estimatedVolumeTotal: number;
-  estimatedVolumeToday: number;
-  estimatedVolumeWeek: number;
-  estimatedVolumeMonth: number;
 
   // Cashback
   cashbackTotal: number;
@@ -42,10 +49,71 @@ export interface AdminStats {
   generatedAt: string;
 }
 
-const COMMISSION_RATE = 0.01; // 1%
+const VOLUME_CACHE_KEY = 'admin:stats:volume';
+const VOLUME_CACHE_TTL = 15 * 60; // 15 min — CLOB fetch is slow
+
+/**
+ * Fetches trading volume from CLOB API for all credentialed users in parallel.
+ * Cached separately for 15 minutes.
+ */
+async function fetchClobVolume(forceRefresh: boolean, dayAgo: Date, weekAgo: Date, monthAgo: Date) {
+  if (!forceRefresh) {
+    const cached = await redisCache.get<{
+      volumeTotal: number; volumeToday: number; volumeWeek: number; volumeMonth: number;
+      totalTrades: number; tradesToday: number; tradesWeek: number; tradesMonth: number;
+    }>(VOLUME_CACHE_KEY).catch(() => null);
+    if (cached) return cached;
+  }
+
+  const users = await prisma.user.findMany({
+    where: { isActive: true, encryptedPrivateKey: { not: '' }, encryptedApiKey: { not: '' } },
+    select: {
+      encryptedPrivateKey: true, encryptedApiKey: true,
+      encryptedApiSecret: true, encryptedPassphrase: true,
+    },
+  });
+
+  logger.info(`[adminStats] Fetching trades for ${users.length} users in parallel...`);
+
+  // Fetch all users in parallel, 8s timeout each via getTrades (already uses CLOB with retry)
+  const results = await Promise.allSettled(
+    users.map(u => getTrades(u.encryptedPrivateKey, u.encryptedApiKey, u.encryptedApiSecret, u.encryptedPassphrase))
+  );
+
+  let volumeTotal = 0, volumeToday = 0, volumeWeek = 0, volumeMonth = 0;
+  let totalTrades = 0, tradesToday = 0, tradesWeek = 0, tradesMonth = 0;
+
+  for (const res of results) {
+    if (res.status !== 'fulfilled') continue;
+    for (const trade of res.value) {
+      const val = parseFloat(trade.size) * parseFloat(trade.price);
+      const d = new Date(trade.match_time);
+      if (isNaN(d.getTime())) continue;
+
+      volumeTotal += val;
+      totalTrades += 1;
+
+      if (d >= dayAgo)   { volumeToday += val; tradesToday += 1; }
+      if (d >= weekAgo)  { volumeWeek  += val; tradesWeek  += 1; }
+      if (d >= monthAgo) { volumeMonth += val; tradesMonth += 1; }
+    }
+  }
+
+  const result = {
+    volumeTotal: parseFloat(volumeTotal.toFixed(2)),
+    volumeToday: parseFloat(volumeToday.toFixed(2)),
+    volumeWeek:  parseFloat(volumeWeek.toFixed(2)),
+    volumeMonth: parseFloat(volumeMonth.toFixed(2)),
+    totalTrades, tradesToday, tradesWeek, tradesMonth,
+  };
+
+  await redisCache.set(VOLUME_CACHE_KEY, result, VOLUME_CACHE_TTL).catch(() => {});
+  logger.info(`[adminStats] Volume: $${volumeTotal.toFixed(2)} across ${totalTrades} trades`);
+  return result;
+}
 
 export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
-  const cacheKey = 'admin:stats:v2';
+  const cacheKey = 'admin:stats:v3';
   if (!forceRefresh) {
     const cached = await redisCache.get<AdminStats>(cacheKey).catch(() => null);
     if (cached) return cached;
@@ -58,72 +126,52 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
   const weekAgo  = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000);
   const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
+  // DB queries + CLOB volume in parallel
   const [
-    totalUsers,
-    activeUsers,
-    walletUsers,
-    newUsersToday,
-    newUsersWeek,
-    newUsersMonth,
-    copyTradeActiveUsers,
-    commissionAgg,
-    commissionToday,
-    commissionWeek,
-    commissionMonth,
-    cashbackAgg,
-    totalReferrals,
-    referralAgg,
-    topReferrerRows,
-    totalSubscriptions,
-    activeSubscriptions,
-    copiedStatusGroups,
-    copiedToday,
-    copiedWeek,
+    dbResults,
+    volumeData,
   ] = await Promise.all([
-    prisma.user.count(),
-    prisma.user.count({ where: { isActive: true } }),
-    prisma.user.count({ where: { polymarketProxyAddress: { not: null } } }),
-    prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
-    prisma.user.count({ where: { createdAt: { gte: weekAgo } } }),
-    prisma.user.count({ where: { createdAt: { gte: monthAgo } } }),
-    // Users with at least 1 active non-paused subscription
-    prisma.user.count({
-      where: { copySubscriptions: { some: { isActive: true, isPaused: false } } },
-    }),
-
-    // Commission totals
-    prisma.commissionLog.aggregate({ _sum: { amount: true } }),
-    prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: dayAgo } } }),
-    prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: weekAgo } } }),
-    prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: monthAgo } } }),
-
-    // Cashback
-    prisma.user.aggregate({ _sum: { cashbackEarnedTotal: true } }),
-
-    // Referrals
-    prisma.user.count({ where: { referredById: { not: null } } }),
-    prisma.user.aggregate({ _sum: { referralEarnedTotal: true } }),
-
-    // Top 3 referrers — count of users they referred
-    prisma.user.groupBy({
-      by: ['referredById'],
-      where: { referredById: { not: null } },
-      _count: { id: true },
-      orderBy: { _count: { id: 'desc' } },
-      take: 3,
-    }),
-
-    // Copy trade subscriptions
-    prisma.copySubscription.count(),
-    prisma.copySubscription.count({ where: { isActive: true, isPaused: false } }),
-
-    // Copied trade status breakdown
-    prisma.copiedTrade.groupBy({ by: ['status'], _count: { id: true } }),
-
-    // Copied trades today / this week
-    prisma.copiedTrade.count({ where: { createdAt: { gte: dayAgo }, status: 'filled' } }),
-    prisma.copiedTrade.count({ where: { createdAt: { gte: weekAgo }, status: 'filled' } }),
+    Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { isActive: true } }),
+      prisma.user.count({ where: { polymarketProxyAddress: { not: null } } }),
+      prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: weekAgo } } }),
+      prisma.user.count({ where: { createdAt: { gte: monthAgo } } }),
+      prisma.user.count({ where: { copySubscriptions: { some: { isActive: true, isPaused: false } } } }),
+      prisma.commissionLog.aggregate({ _sum: { amount: true } }),
+      prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: dayAgo } } }),
+      prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: weekAgo } } }),
+      prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: monthAgo } } }),
+      prisma.user.aggregate({ _sum: { cashbackEarnedTotal: true } }),
+      prisma.user.count({ where: { referredById: { not: null } } }),
+      prisma.user.aggregate({ _sum: { referralEarnedTotal: true } }),
+      prisma.user.groupBy({
+        by: ['referredById'],
+        where: { referredById: { not: null } },
+        _count: { id: true },
+        orderBy: { _count: { id: 'desc' } },
+        take: 3,
+      }),
+      prisma.copySubscription.count(),
+      prisma.copySubscription.count({ where: { isActive: true, isPaused: false } }),
+      prisma.copiedTrade.groupBy({ by: ['status'], _count: { id: true } }),
+      prisma.copiedTrade.count({ where: { createdAt: { gte: dayAgo  }, status: 'filled' } }),
+      prisma.copiedTrade.count({ where: { createdAt: { gte: weekAgo }, status: 'filled' } }),
+    ]),
+    fetchClobVolume(forceRefresh, dayAgo, weekAgo, monthAgo),
   ]);
+
+  const [
+    totalUsers, activeUsers, walletUsers,
+    newUsersToday, newUsersWeek, newUsersMonth,
+    copyTradeActiveUsers,
+    commissionAgg, commissionTodayAgg, commissionWeekAgg, commissionMonthAgg,
+    cashbackAgg,
+    totalReferrals, referralAgg, topReferrerRows,
+    totalSubscriptions, activeSubscriptions,
+    copiedStatusGroups, copiedToday, copiedWeek,
+  ] = dbResults;
 
   // Resolve top referrer names
   const topReferrers: { name: string; count: number; earned: number }[] = [];
@@ -137,28 +185,19 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
     topReferrers.push({ name, count: row._count.id, earned: u?.referralEarnedTotal ?? 0 });
   }
 
-  // Flatten copied trade status counts
   const statusMap = Object.fromEntries(copiedStatusGroups.map(g => [g.status, g._count.id]));
 
-  const commissionTotal = commissionAgg._sum.amount ?? 0;
-
   const stats: AdminStats = {
-    totalUsers,
-    activeUsers,
-    walletUsers,
-    newUsersToday,
-    newUsersWeek,
-    newUsersMonth,
+    totalUsers, activeUsers, walletUsers,
+    newUsersToday, newUsersWeek, newUsersMonth,
     copyTradeActiveUsers,
 
-    commissionTotal,
-    commissionToday:  commissionToday._sum.amount  ?? 0,
-    commissionWeek:   commissionWeek._sum.amount   ?? 0,
-    commissionMonth:  commissionMonth._sum.amount  ?? 0,
-    estimatedVolumeTotal: COMMISSION_RATE > 0 ? commissionTotal / COMMISSION_RATE : 0,
-    estimatedVolumeToday: COMMISSION_RATE > 0 ? (commissionToday._sum.amount ?? 0) / COMMISSION_RATE : 0,
-    estimatedVolumeWeek:  COMMISSION_RATE > 0 ? (commissionWeek._sum.amount  ?? 0) / COMMISSION_RATE : 0,
-    estimatedVolumeMonth: COMMISSION_RATE > 0 ? (commissionMonth._sum.amount ?? 0) / COMMISSION_RATE : 0,
+    ...volumeData,
+
+    commissionTotal:  commissionAgg._sum.amount       ?? 0,
+    commissionToday:  commissionTodayAgg._sum.amount  ?? 0,
+    commissionWeek:   commissionWeekAgg._sum.amount   ?? 0,
+    commissionMonth:  commissionMonthAgg._sum.amount  ?? 0,
 
     cashbackTotal: cashbackAgg._sum.cashbackEarnedTotal ?? 0,
 
@@ -166,13 +205,11 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
     referralEarnedTotal: referralAgg._sum.referralEarnedTotal ?? 0,
     topReferrers,
 
-    totalSubscriptions,
-    activeSubscriptions,
+    totalSubscriptions, activeSubscriptions,
     copiedFilled:  statusMap['filled']  ?? 0,
     copiedFailed:  statusMap['failed']  ?? 0,
     copiedSkipped: statusMap['skipped'] ?? 0,
-    copiedToday,
-    copiedWeek,
+    copiedToday, copiedWeek,
 
     generatedAt: now.toISOString(),
   };
@@ -196,11 +233,11 @@ export function formatStatsMessage(s: AdminStats): string {
   m += `├ New Today: *${s.newUsersToday}* · Week: *${s.newUsersWeek}* · Month: *${s.newUsersMonth}*\n`;
   m += `└ Copy Trade Users: *${s.copyTradeActiveUsers}*\n\n`;
 
-  m += '📈 *TRADING VOLUME* _(estimated from commission)_\n';
-  m += `├ Today: *${formatVolume(s.estimatedVolumeToday)}*\n`;
-  m += `├ This Week: *${formatVolume(s.estimatedVolumeWeek)}*\n`;
-  m += `├ This Month: *${formatVolume(s.estimatedVolumeMonth)}*\n`;
-  m += `└ All Time: *${formatVolume(s.estimatedVolumeTotal)}*\n\n`;
+  m += '📈 *TRADING VOLUME*\n';
+  m += `├ Today: *${formatVolume(s.volumeToday)}* (${s.tradesToday} trades)\n`;
+  m += `├ This Week: *${formatVolume(s.volumeWeek)}* (${s.tradesWeek} trades)\n`;
+  m += `├ This Month: *${formatVolume(s.volumeMonth)}* (${s.tradesMonth} trades)\n`;
+  m += `└ All Time: *${formatVolume(s.volumeTotal)}* (${s.totalTrades} trades)\n\n`;
 
   m += '💰 *COMMISSION (REVENUE)*\n';
   m += `├ Today: *${formatVolume(s.commissionToday)}*\n`;
@@ -229,7 +266,7 @@ export function formatStatsMessage(s: AdminStats): string {
   m += `└ Copied Today: *${s.copiedToday}* · This Week: *${s.copiedWeek}*\n\n`;
 
   m += `🕒 _Generated: ${new Date(s.generatedAt).toLocaleString()}_\n`;
-  m += `_Cached 5 min · Commission tracked from DB_`;
+  m += `_Volume cached 15 min · Commission from DB_`;
 
   return m;
 }
