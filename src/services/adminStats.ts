@@ -73,12 +73,27 @@ async function fetchClobVolume(forceRefresh: boolean, dayAgo: Date, weekAgo: Dat
     },
   });
 
-  logger.info(`[adminStats] Fetching trades for ${users.length} users in parallel...`);
+  logger.info(`[adminStats] Fetching trades for ${users.length} users (batches of 3)...`);
 
-  // Fetch all users in parallel, 8s timeout each via getTrades (already uses CLOB with retry)
-  const results = await Promise.allSettled(
-    users.map(u => getTrades(u.encryptedPrivateKey, u.encryptedApiKey, u.encryptedApiSecret, u.encryptedPassphrase))
-  );
+  const BATCH_SIZE = 3;
+  const PER_USER_TIMEOUT_MS = 10_000;
+
+  const allResults: PromiseSettledResult<Awaited<ReturnType<typeof getTrades>>>[] = [];
+  for (let i = 0; i < users.length; i += BATCH_SIZE) {
+    const batch = users.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.allSettled(
+      batch.map(u =>
+        Promise.race([
+          getTrades(u.encryptedPrivateKey, u.encryptedApiKey, u.encryptedApiSecret, u.encryptedPassphrase),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('getTrades timeout')), PER_USER_TIMEOUT_MS)
+          ),
+        ])
+      )
+    );
+    allResults.push(...batchResults);
+  }
+  const results = allResults;
 
   let volumeTotal = 0, volumeToday = 0, volumeWeek = 0, volumeMonth = 0;
   let totalTrades = 0, tradesToday = 0, tradesWeek = 0, tradesMonth = 0;
