@@ -20,8 +20,7 @@ RUN npm run db:generate
 COPY src ./src
 
 # Build TypeScript
-RUN npx tsc > /tmp/tsc.log 2>&1; TSC_EXIT=$?; cat /tmp/tsc.log; exit $TSC_EXIT
-RUN cp -r src/bot/img dist/bot/img
+RUN npm run build
 
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:20-alpine
