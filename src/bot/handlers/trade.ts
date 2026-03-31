@@ -709,11 +709,6 @@ async function executeTrade(
     // Estimated shares (for display only — FAK fills whatever is available at the price)
     const estimatedSize = worstPrice > 0 ? parseFloat((tradeAmount / worstPrice).toFixed(4)) : 0;
 
-    // Build order options
-    const orderOptions: any = {};
-    if (tickSize)   orderOptions.tickSize = tickSize as any;
-    if (isNegRisk)  orderOptions.negRisk  = isNegRisk;
-
     // FAK market order — executes immediately against best available asks up to worstPrice
     // amount = USD to spend (tradeAmount after commission deduction)
 
