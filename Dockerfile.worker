@@ -12,7 +12,8 @@ RUN npm ci
 RUN npm run db:generate
 
 COPY src ./src
-RUN npm run build
+RUN npx tsc 2>&1 || (echo "=== TSC ERRORS ABOVE ===" && exit 1)
+RUN cp -r src/bot/img dist/bot/img
 
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:20-alpine
