@@ -20,7 +20,7 @@ RUN npm run db:generate
 COPY src ./src
 
 # Build TypeScript
-RUN npx tsc 2>&1 || (echo "=== TSC ERRORS ABOVE ===" && exit 1)
+RUN npx tsc > /tmp/tsc.log 2>&1; TSC_EXIT=$?; cat /tmp/tsc.log; exit $TSC_EXIT
 RUN cp -r src/bot/img dist/bot/img
 
 # ── Production ──────────────────────────────────────────────────────────────
