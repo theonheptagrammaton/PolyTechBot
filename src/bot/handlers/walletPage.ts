@@ -184,6 +184,7 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
           const sent = await ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => null);
           if (sent) setTimeout(() => ctx.telegram.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 5000);
         },
+        user.predexonUserId ?? undefined,
       ).then(claimed => {
         if (claimed > 0) invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
       }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
@@ -277,6 +278,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
           const sent = await ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => null);
           if (sent) setTimeout(() => ctx.telegram.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 5000);
         },
+        user.predexonUserId ?? undefined,
       ).then(claimed => {
         if (claimed > 0) {
           // Invalidate cache so refreshed positions page shows updated balances

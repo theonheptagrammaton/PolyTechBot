@@ -1,3 +1,4 @@
+import { ethers } from 'ethers';
 import { prisma } from '../database/prisma';
 import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
@@ -6,6 +7,7 @@ import { getActivePositions, ActivePosition } from './portfolio';
 import { transferCommission, COMMISSION_RATE } from './commission';
 import { placeOrder as predexonPlaceOrder } from './predexon';
 import { ensurePredexonUser } from './user';
+import { createManagedWsProvider, ManagedWsProvider } from '../utils/wsProvider';
 
 const CLOB_BASE = 'https://clob.polymarket.com';
 const DATA_API_BASE = 'https://data-api.polymarket.com';
@@ -405,7 +407,8 @@ async function fetchMarketInfo(conditionId: string): Promise<{ question: string;
  */
 async function tickForTrader(
   traderAddress: string,
-  sendNotification: (telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>
+  sendNotification: (telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>,
+  preloadedTrades?: DetectedTrade[],
 ): Promise<void> {
   // Load active subscriptions first — needed for both new-trade processing and TP/SL checks
   const subs = await prisma.copySubscription.findMany({
@@ -428,7 +431,7 @@ async function tickForTrader(
 
   if (subs.length === 0) return;
 
-  const newTrades = await fetchNewTradesForTrader(traderAddress);
+  const newTrades = preloadedTrades ?? await fetchNewTradesForTrader(traderAddress);
 
   if (newTrades.length > 0) {
   // Y5: Fetch balance once per user at tick start (not once per trade×subscription)
@@ -981,7 +984,7 @@ let monitorStopped = false;
  */
 export function startCopyTradeMonitor(
   sendNotification: (telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>,
-  intervalSeconds = 30
+  intervalSeconds = 60
 ): void {
   if (monitorInterval) {
     logger.warn('[copy] Monitor already running — skipping duplicate start');
@@ -991,9 +994,17 @@ export function startCopyTradeMonitor(
   monitorStopped = false;
   logger.info(`[copy] Starting copy trade monitor (interval: ${intervalSeconds}s)`);
 
+  // Start on-chain WebSocket listener if WSS URL is configured
+  startOnChainListener(sendNotification).catch((err) =>
+    logger.warn(`[copy] On-chain listener failed to start: ${err?.message}`)
+  );
+
   const tick = async () => {
     if (monitorStopped) return;
     try {
+      // Refresh in-memory trader set so newly added subscriptions are picked up
+      await refreshOnChainFilters();
+
       // Find all unique trader addresses with at least one active subscription
       const rows = await prisma.copySubscription.findMany({
         where: { isActive: true },
@@ -1006,7 +1017,10 @@ export function startCopyTradeMonitor(
       await Promise.allSettled(
         rows.map((r) => {
           if (monitorStopped) return Promise.resolve();
-          return tickForTrader(r.traderAddress, sendNotification);
+          // When on-chain listener is active, polling only handles TP/SL checks.
+          // Pass [] as preloadedTrades to skip fetching new trades from the API.
+          const trades = onChainListenerActive ? [] : undefined;
+          return tickForTrader(r.traderAddress, sendNotification, trades);
         })
       );
     } catch (err: any) {
@@ -1027,4 +1041,217 @@ export function stopCopyTradeMonitor(): void {
     monitorInterval = null;
     logger.info('[copy] Copy trade monitor stopped');
   }
+  stopOnChainListener();
+}
+
+// ─── On-Chain WebSocket Listener ──────────────────────────────────────────────
+
+const CTF_EXCHANGE_ADDRESS    = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+const NEG_RISK_CTF_EXCHANGE   = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+
+const ORDER_FILLED_ABI = [
+  'event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)',
+];
+
+// In-memory set of tracked trader addresses (lowercase). Refreshed periodically.
+let activeTraderSet = new Set<string>();
+let onChainListenerActive = false;
+let managedWsProvider: ManagedWsProvider | null = null;
+// Injected sendNotification from startCopyTradeMonitor — reused by on-chain handlers
+let _sendNotification: ((telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>) | null = null;
+
+/**
+ * Resolves a conditional token ID to its market conditionId and outcome.
+ * Results are cached in Redis for 7 days (token↔market mapping is immutable).
+ */
+async function resolveToken(tokenId: string): Promise<{ conditionId: string; outcome: 'YES' | 'NO' } | null> {
+  if (!tokenId || tokenId === '0') return null;
+  const cacheKey = `ctf:token:${tokenId}`;
+  const cached = await redisCache.get<{ conditionId: string; outcome: 'YES' | 'NO' }>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const resp = await fetchWithRetry(
+      `${CLOB_BASE}/markets?clob_token_ids=${tokenId}`,
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const markets: any[] = Array.isArray(data) ? data : (data?.data ?? []);
+    if (!markets.length) return null;
+
+    const market = markets[0];
+    const conditionId: string = market.condition_id ?? market.conditionId ?? '';
+    if (!conditionId) return null;
+
+    const tokens: any[] = market.tokens ?? [];
+    const tokenEntry = tokens.find((t: any) => t.token_id === tokenId);
+    const outcome = (tokenEntry?.outcome ?? tokens[0]?.outcome ?? 'YES').toUpperCase() as 'YES' | 'NO';
+
+    const result = { conditionId, outcome };
+    await redisCache.set(cacheKey, result, 7 * 24 * 3600);
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parses an OrderFilled event into a DetectedTrade for the given leader address.
+ * Returns null if the leader is not the maker or taker of this fill.
+ */
+async function parseOrderFilledEvent(
+  args: {
+    maker: string;
+    taker: string;
+    makerAssetId: ethers.BigNumber;
+    takerAssetId: ethers.BigNumber;
+    makerAmountFilled: ethers.BigNumber;
+    takerAmountFilled: ethers.BigNumber;
+  },
+  leaderAddress: string,
+): Promise<DetectedTrade | null> {
+  const maker = args.maker.toLowerCase();
+  const taker = args.taker.toLowerCase();
+  const leader = leaderAddress.toLowerCase();
+
+  const isLeaderMaker = maker === leader;
+  const isLeaderTaker = taker === leader;
+  if (!isLeaderMaker && !isLeaderTaker) return null;
+
+  const makerBuys = args.makerAssetId.eq(0); // makerAssetId == 0 means maker provides USDC (buying shares)
+
+  // Determine leader's side
+  let side: 'BUY' | 'SELL';
+  if (isLeaderMaker) {
+    side = makerBuys ? 'BUY' : 'SELL';
+  } else {
+    // leader is taker: if maker buys, taker sells (provides shares); if maker sells, taker buys
+    side = makerBuys ? 'SELL' : 'BUY';
+  }
+
+  // Resolve USDC and share amounts (all amounts in 1e6 units on Polymarket)
+  const usdcAmtRaw  = makerBuys ? args.makerAmountFilled : args.takerAmountFilled;
+  const shareAmtRaw = makerBuys ? args.takerAmountFilled : args.makerAmountFilled;
+  const shareTokenId = (makerBuys ? args.takerAssetId : args.makerAssetId).toString();
+
+  const size    = usdcAmtRaw.gt(0) && shareAmtRaw.gt(0) ? shareAmtRaw.toNumber() / 1e6 : 0;
+  const sizeUsd = usdcAmtRaw.toNumber() / 1e6;
+  const price   = size > 0 ? sizeUsd / size : 0;
+
+  if (size <= 0 || !shareTokenId || shareTokenId === '0') return null;
+
+  const resolved = await resolveToken(shareTokenId);
+  if (!resolved) {
+    logger.debug(`[copy:onchain] Could not resolve tokenId ${shareTokenId.slice(0, 20)}...`);
+    return null;
+  }
+
+  return {
+    traderAddress: leader,
+    marketId:  resolved.conditionId,
+    assetId:   shareTokenId,
+    outcome:   resolved.outcome,
+    side,
+    size,
+    sizeUsd,
+    price,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Refreshes the in-memory set of active trader addresses from the DB.
+ */
+export async function refreshOnChainFilters(): Promise<void> {
+  const rows = await prisma.copySubscription.findMany({
+    where: { isActive: true },
+    select: { traderAddress: true },
+    distinct: ['traderAddress'],
+  });
+  activeTraderSet = new Set(rows.map((r) => r.traderAddress.toLowerCase()));
+  logger.debug(`[copy:onchain] Tracking ${activeTraderSet.size} trader address(es)`);
+}
+
+/**
+ * Starts the on-chain WebSocket listener for CTFExchange OrderFilled events.
+ * Only starts if config.polygonWssRpcUrl is set. Silently no-ops otherwise.
+ */
+export async function startOnChainListener(
+  sendNotification: (telegramId: string, message: string, extra?: NotificationExtra) => Promise<void>,
+): Promise<void> {
+  if (!config.polygonWssRpcUrl) {
+    logger.warn('[copy:onchain] POLYGON_WSS_RPC_URL not set — on-chain listener disabled, using polling only');
+    return;
+  }
+  if (onChainListenerActive) return;
+
+  _sendNotification = sendNotification;
+  await refreshOnChainFilters();
+
+  const wsm = createManagedWsProvider(config.polygonWssRpcUrl);
+  managedWsProvider = wsm;
+
+  wsm.onConnected((provider) => {
+    onChainListenerActive = true;
+    logger.info(`[copy:onchain] Listener active for ${activeTraderSet.size} trader(s)`);
+
+    const attachListeners = (address: string, label: string) => {
+      const contract = new ethers.Contract(address, ORDER_FILLED_ABI, provider);
+      contract.on('OrderFilled', async (
+        _orderHash: string,
+        maker: string,
+        taker: string,
+        makerAssetId: ethers.BigNumber,
+        takerAssetId: ethers.BigNumber,
+        makerAmountFilled: ethers.BigNumber,
+        takerAmountFilled: ethers.BigNumber,
+        _fee: ethers.BigNumber,
+      ) => {
+        const makerLc = maker.toLowerCase();
+        const takerLc = taker.toLowerCase();
+        if (!activeTraderSet.has(makerLc) && !activeTraderSet.has(takerLc)) return;
+
+        const leaders = new Set<string>();
+        if (activeTraderSet.has(makerLc)) leaders.add(makerLc);
+        if (activeTraderSet.has(takerLc)) leaders.add(takerLc);
+
+        for (const leaderAddress of leaders) {
+          try {
+            const trade = await parseOrderFilledEvent(
+              { maker, taker, makerAssetId, takerAssetId, makerAmountFilled, takerAmountFilled },
+              leaderAddress,
+            );
+            if (!trade) continue;
+
+            logger.info(`[copy:onchain] ${label} trade detected: ${trade.side} ${trade.outcome} $${trade.sizeUsd.toFixed(2)} for ${leaderAddress.slice(0, 8)}...`);
+
+            if (_sendNotification) {
+              tickForTrader(leaderAddress, _sendNotification, [trade]).catch((err) =>
+                logger.error(`[copy:onchain] tickForTrader error: ${err?.message}`)
+              );
+            }
+          } catch (err: any) {
+            logger.warn(`[copy:onchain] Event parse error: ${err?.message}`);
+          }
+        }
+      });
+    };
+
+    attachListeners(CTF_EXCHANGE_ADDRESS, 'CTF');
+    attachListeners(NEG_RISK_CTF_EXCHANGE, 'NegRisk');
+  });
+
+  wsm.onDisconnected(() => {
+    onChainListenerActive = false;
+    logger.warn('[copy:onchain] Disconnected — polling fallback active until reconnect');
+  });
+}
+
+export function stopOnChainListener(): void {
+  if (managedWsProvider) {
+    managedWsProvider.destroy();
+    managedWsProvider = null;
+  }
+  onChainListenerActive = false;
+  _sendNotification = null;
 }

@@ -48,6 +48,7 @@ interface Config {
   referral: {
     treasuryKey: string;
   };
+  polygonWssRpcUrl?: string;
 }
 
 function validateConfig(): Config {
@@ -122,6 +123,7 @@ function validateConfig(): Config {
     referral: {
       treasuryKey: process.env.REFERRAL_TREASURY_KEY || '',
     },
+    polygonWssRpcUrl: process.env.POLYGON_WSS_RPC_URL || undefined,
   };
 }
 

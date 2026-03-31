@@ -4,6 +4,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { ActivePosition } from './portfolio';
 import { redisCache } from '../database/redis';
+import { getPositions, redeemPosition as redeemPositionPredexon } from './predexon';
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client';
 import { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -145,6 +146,38 @@ async function redeemPosition(params: {
 }
 
 /**
+ * Attempts redemption via Predexon API first (no relayer quota), falls back to Builder Relayer.
+ */
+async function redeemSingle(params: {
+  encryptedPrivateKey: string;
+  proxyAddress: string;
+  position: ActivePosition;
+  predexonUserId?: string;
+}): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  if (params.predexonUserId) {
+    try {
+      const predexonPositions = await getPositions(params.predexonUserId, 'polymarket');
+      const match = predexonPositions.find(
+        p => p.status === 'redeemable' &&
+             (p.tokenId === params.position.asset || p.positionId === params.position.conditionId)
+      );
+      if (match?.positionId) {
+        logger.info(`[redeem] Using Predexon API for positionId=${match.positionId}`);
+        const result = await redeemPositionPredexon(params.predexonUserId, match.positionId);
+        if (result.status === 'success' || result.transactionHash) {
+          return { success: true, txHash: result.transactionHash };
+        }
+      } else {
+        logger.debug(`[redeem] No matching redeemable position found in Predexon, falling back`);
+      }
+    } catch (err: any) {
+      logger.warn(`[redeem] Predexon redeem failed, falling back to relayer: ${err?.message}`);
+    }
+  }
+  return redeemPosition(params);
+}
+
+/**
  * Auto-claims all redeemable positions for a user (fire-and-forget).
  * Uses a global in-memory lock per proxy to prevent parallel sessions, and
  * Redis dedup keys to prevent re-claiming across page reloads.
@@ -155,6 +188,7 @@ export async function autoRedeemPositions(
   proxyAddress: string,
   positions: ActivePosition[],
   notifyFn?: (msg: string) => Promise<void>,
+  predexonUserId?: string,
 ): Promise<number> {
   const redeemable = positions.filter(p => p.redeemable);
   if (redeemable.length === 0) return 0;
@@ -168,7 +202,7 @@ export async function autoRedeemPositions(
 
   _redeemLocks.add(lockKey);
   try {
-    return await _doRedeem(encryptedPrivateKey, proxyAddress, redeemable, notifyFn);
+    return await _doRedeem(encryptedPrivateKey, proxyAddress, redeemable, notifyFn, predexonUserId);
   } finally {
     _redeemLocks.delete(lockKey);
   }
@@ -179,6 +213,7 @@ async function _doRedeem(
   proxyAddress: string,
   redeemable: ActivePosition[],
   notifyFn?: (msg: string) => Promise<void>,
+  predexonUserId?: string,
 ): Promise<number> {
   const pending: ActivePosition[] = [];
   for (const pos of redeemable) {
@@ -201,7 +236,7 @@ async function _doRedeem(
       const key = claimedKey(proxyAddress, pos.conditionId);
       await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
 
-      const result = await redeemPosition({ encryptedPrivateKey, proxyAddress, position: pos });
+      const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position: pos, predexonUserId });
       if (result.success) {
         claimed++;
         logger.info(`[redeem] Claimed: ${pos.outcome} / ${pos.title.slice(0, 40)}`);

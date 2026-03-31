@@ -26,6 +26,7 @@ import {
   handleSmartWallets,
   handleSwCategoryFilter,
   handleSwSortFilter,
+  handleSwTimePeriodFilter,
   handleRefreshCategory,
   handleSportsCategory,
   handleLiveSports,
@@ -377,17 +378,21 @@ export class TelegramBot {
     this.bot.action('back_to_menu', handleBackToMenu);
     this.bot.action('show_wallet', async (ctx) => await handleSmartWallets(ctx));
 
-    // Discover Traders paginated list: sw_{page}_{cat}_{sort}
-    this.bot.action(/^sw_(\d+)_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSmartWallets(ctx, ctx.match[2], ctx.match[3], parseInt(ctx.match[1], 10));
+    // Discover Traders paginated list: sw_{page}_{cat}_{sort}_{period}
+    this.bot.action(/^sw_(\d+)_(\w+)_(\w+)_?(\w*)$/, async (ctx) => {
+      await handleSmartWallets(ctx, ctx.match[2], ctx.match[3], parseInt(ctx.match[1], 10), ctx.match[4] || 'month');
     });
-    // Category filter: sw_fc_{cat}_{sort}
-    this.bot.action(/^sw_fc_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSwCategoryFilter(ctx, ctx.match[1], ctx.match[2]);
+    // Category filter: sw_fc_{cat}_{sort}_{period}
+    this.bot.action(/^sw_fc_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwCategoryFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
     });
-    // Sort filter: sw_fs_{cat}_{sort}
-    this.bot.action(/^sw_fs_(\w+)_(\w+)$/, async (ctx) => {
-      await handleSwSortFilter(ctx, ctx.match[1], ctx.match[2]);
+    // Sort filter: sw_fs_{cat}_{sort}_{period}
+    this.bot.action(/^sw_fs_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwSortFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
+    });
+    // Time period filter: sw_ft_{cat}_{sort}_{period}
+    this.bot.action(/^sw_ft_(\w+)_(\w+)_(\w+)$/, async (ctx) => {
+      await handleSwTimePeriodFilter(ctx, ctx.match[1], ctx.match[2], ctx.match[3]);
     });
     this.bot.action('wallet_page', handleWalletPage);
     this.bot.action('portfolio', handlePortfolio);

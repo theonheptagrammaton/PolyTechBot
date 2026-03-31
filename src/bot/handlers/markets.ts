@@ -849,20 +849,28 @@ const SW_SORT_META: Record<string, { label: string; api: 'PNL' | 'VOL' }> = {
   'vol': { label: 'by Volume', api: 'VOL' },
 };
 
+const SW_PERIOD_META: Record<string, { label: string; api: 'DAY' | 'WEEK' | 'MONTH' | 'ALL' }> = {
+  'month': { label: 'Last Month', api: 'MONTH' },
+  'week':  { label: 'Last Week',  api: 'WEEK'  },
+  'all':   { label: 'All Time',   api: 'ALL'   },
+};
+
 export async function handleSmartWallets(
   ctx: Context,
   category = 'all',
   sort = 'pnl',
   page = 1,
+  period = 'month',
 ): Promise<void> {
   try {
     if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
     const { getTopSmartWallets, fmtUsd } = await import('../../services/smartWallets');
-    const sortMeta = SW_SORT_META[sort] ?? SW_SORT_META['pnl'];
-    const catMeta  = SW_CAT_META[category] ?? SW_CAT_META['all'];
+    const sortMeta   = SW_SORT_META[sort]     ?? SW_SORT_META['pnl'];
+    const catMeta    = SW_CAT_META[category]  ?? SW_CAT_META['all'];
+    const periodMeta = SW_PERIOD_META[period] ?? SW_PERIOD_META['month'];
 
-    const allWallets = await getTopSmartWallets(50, 'ALL', sortMeta.api);
+    const allWallets = await getTopSmartWallets(50, periodMeta.api, sortMeta.api);
 
     // Post-filter by specialties for specific categories
     let filtered = allWallets;
@@ -883,7 +891,7 @@ export async function handleSmartWallets(
     const botUsername = config.telegram.botUsername;
 
     let msg = `🏆 <b>Discover Traders</b>\n\n`;
-    msg += `${catMeta.emoji} ${esc(catMeta.label)} · ${sortMeta.label}\n\n`;
+    msg += `${catMeta.emoji} ${esc(catMeta.label)} · ${sortMeta.label} · ${periodMeta.label}\n\n`;
 
     if (pageWallets.length === 0) {
       msg += 'No traders found for this filter.';
@@ -901,8 +909,8 @@ export async function handleSmartWallets(
       }
     }
 
-    const prevCb = currentPage > 1        ? `sw_${currentPage - 1}_${category}_${sort}` : 'noop';
-    const nextCb = currentPage < totalPages ? `sw_${currentPage + 1}_${category}_${sort}` : 'noop';
+    const prevCb = currentPage > 1        ? `sw_${currentPage - 1}_${category}_${sort}_${period}` : 'noop';
+    const nextCb = currentPage < totalPages ? `sw_${currentPage + 1}_${category}_${sort}_${period}` : 'noop';
 
     await sendPage(ctx, msg, {
       parse_mode: 'HTML',
@@ -914,8 +922,9 @@ export async function handleSmartWallets(
           Markup.button.callback('Next ▶️', nextCb),
         ],
         [
-          Markup.button.callback('📁 Category', `sw_fc_${category}_${sort}`),
-          Markup.button.callback('📊 Sort',      `sw_fs_${category}_${sort}`),
+          Markup.button.callback('📁 Category', `sw_fc_${category}_${sort}_${period}`),
+          Markup.button.callback('📊 Sort',      `sw_fs_${category}_${sort}_${period}`),
+          Markup.button.callback('🕐 Period',    `sw_ft_${category}_${sort}_${period}`),
         ],
         [
           Markup.button.url('📈 Polymarket Analytics', 'https://polymarketanalytics.com/traders'),
@@ -925,7 +934,7 @@ export async function handleSmartWallets(
       ]),
     });
 
-    logger.info(`[smartWallets] Page ${currentPage}/${totalPages} cat=${category} sort=${sort}`);
+    logger.info(`[smartWallets] Page ${currentPage}/${totalPages} cat=${category} sort=${sort} period=${period}`);
   } catch (err) {
     logger.error('[smartWallets] handleSmartWallets error:', err);
     await ctx.reply('❌ An error occurred loading Smart Wallets. Please try again.');
@@ -936,6 +945,7 @@ export async function handleSwCategoryFilter(
   ctx: Context,
   cat: string,
   sort: string,
+  period = 'month',
 ): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -951,12 +961,12 @@ export async function handleSwCategoryFilter(
     row.map(c => {
       const meta  = SW_CAT_META[c] ?? { label: c, emoji: '' };
       const label = c === cat ? `✓ ${meta.emoji} ${meta.label}` : `${meta.emoji} ${meta.label}`;
-      const cb    = c === cat ? 'noop' : `sw_1_${c}_${sort}`;
+      const cb    = c === cat ? 'noop' : `sw_1_${c}_${sort}_${period}`;
       return Markup.button.callback(label, cb);
     })
   );
   buttons.push([
-    Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}`),
+    Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}_${period}`),
     Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
   ]);
 
@@ -970,13 +980,14 @@ export async function handleSwSortFilter(
   ctx: Context,
   cat: string,
   sort: string,
+  period = 'month',
 ): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
 
   const sortRow = (['pnl', 'vol'] as const).map(s => {
     const meta  = SW_SORT_META[s];
     const label = s === sort ? `✓ ${meta.label}` : meta.label;
-    const cb    = s === sort ? 'noop' : `sw_1_${cat}_${s}`;
+    const cb    = s === sort ? 'noop' : `sw_1_${cat}_${s}_${period}`;
     return Markup.button.callback(label, cb);
   });
 
@@ -987,11 +998,36 @@ export async function handleSwSortFilter(
       ...Markup.inlineKeyboard([
         sortRow,
         [
-          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}`),
+          Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}_${period}`),
           Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
         ],
       ]),
     }
+  );
+}
+
+export async function handleSwTimePeriodFilter(
+  ctx: Context,
+  cat: string,
+  sort: string,
+  period: string,
+): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const periodRows = Object.entries(SW_PERIOD_META).map(([key, meta]) => [
+    Markup.button.callback(
+      key === period ? `✓ ${meta.label}` : meta.label,
+      key === period ? 'noop' : `sw_1_${cat}_${sort}_${key}`,
+    ),
+  ]);
+  periodRows.push([
+    Markup.button.callback('⬅️ Back', `sw_1_${cat}_${sort}_${period}`),
+    Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+  ]);
+
+  await sendPage(ctx,
+    `🕐 <b>Time Period</b>\n\nSelect the leaderboard time window:`,
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard(periodRows) }
   );
 }
 

@@ -28,7 +28,7 @@ async function fetchImageBuffer(url?: string): Promise<Buffer | undefined> {
 // ─── Constants ─────────────────────────────────────────────────────────────
 
 /** Polymarket CLOB minimum order size in shares/tokens */
-const MIN_ORDER_SIZE = 5;
+const MIN_ORDER_SIZE = 1;
 
 // ─── Caches ────────────────────────────────────────────────────────────────
 
