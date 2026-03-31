@@ -168,7 +168,8 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
       getClosedPositions(user.polymarketProxyAddress || '').catch(() => [] as ClosedPosition[]),
       getBalance(
         user.encryptedPrivateKey, user.encryptedApiKey,
-        user.encryptedApiSecret, user.encryptedPassphrase
+        user.encryptedApiSecret, user.encryptedPassphrase,
+        user.predexonUserId ?? undefined
       ).catch(() => '0.00'),
     ]);
 
@@ -1195,7 +1196,8 @@ export async function handlePnl(ctx: Context): Promise<void> {
       getClosedPositions(user.polymarketProxyAddress || '', forceRefresh).catch(() => [] as ClosedPosition[]),
       getBalance(
         user.encryptedPrivateKey, user.encryptedApiKey,
-        user.encryptedApiSecret, user.encryptedPassphrase
+        user.encryptedApiSecret, user.encryptedPassphrase,
+        user.predexonUserId ?? undefined
       ).catch(() => '0.00'),
       fetchProfilePhoto(ctx),
     ]);
@@ -1298,7 +1300,8 @@ export async function handlePortfolioPnl(ctx: Context): Promise<void> {
       getActivePositions(user.polymarketProxyAddress || '', true).catch(() => [] as ActivePosition[]),
       getBalance(
         user.encryptedPrivateKey, user.encryptedApiKey,
-        user.encryptedApiSecret, user.encryptedPassphrase
+        user.encryptedApiSecret, user.encryptedPassphrase,
+        user.predexonUserId ?? undefined
       ).catch(() => '0.00'),
       fetchProfilePhoto(ctx),
     ]);
@@ -1390,7 +1393,8 @@ export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'
       getClosedPositions(user.polymarketProxyAddress || '').catch(() => [] as ClosedPosition[]),
       getBalance(
         user.encryptedPrivateKey, user.encryptedApiKey,
-        user.encryptedApiSecret, user.encryptedPassphrase
+        user.encryptedApiSecret, user.encryptedPassphrase,
+        user.predexonUserId ?? undefined
       ).catch(() => '0.00'),
       fetchProfilePhoto(ctx),
     ]);
