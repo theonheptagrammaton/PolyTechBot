@@ -1,8 +1,12 @@
-import { ClobClient } from '@polymarket/clob-client';
-import { Wallet } from 'ethers';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
+import {
+  getOrders as predexonGetOrders,
+  getBalance as predexonGetBalance,
+  cancelOrder as predexonCancelOrder,
+  cancelAllOrders as predexonCancelAllOrders,
+} from './predexon';
 
 const DATA_API = 'https://data-api.polymarket.com';
 
@@ -107,27 +111,16 @@ export interface PortfolioData {
 }
 
 /**
- * Creates CLOB client for user (authenticated)
+ * @deprecated — ClobClient no longer used. Use Predexon API directly.
+ * Kept as a stub for any remaining callers during migration.
  */
 export async function createClobClientForUser(
-  privateKey: string,
-  apiKey: string,
-  apiSecret: string,
-  passphrase: string
-): Promise<ClobClient> {
-  const decryptedPrivateKey = decrypt(privateKey);
-  const wallet = new Wallet(decryptedPrivateKey);
-  return new ClobClient(
-    'https://clob.polymarket.com',
-    137,
-    wallet,
-    {
-      key: decrypt(apiKey),
-      secret: decrypt(apiSecret),
-      passphrase: decrypt(passphrase),
-    },
-    2
-  );
+  _privateKey: string,
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string
+): Promise<any> {
+  throw new Error('createClobClientForUser is deprecated — use Predexon API');
 }
 
 /**
@@ -205,20 +198,41 @@ export async function getClosedPositions(proxyAddress: string, forceRefresh = fa
 }
 
 /**
- * Gets user's open orders from CLOB API (authenticated)
+ * Gets user's open orders from Predexon API
  */
 export async function getOpenOrders(
-  privateKey: string,
-  apiKey: string,
-  apiSecret: string,
-  passphrase: string
+  _privateKey: string,
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string,
+  predexonUserId?: string
 ): Promise<OpenOrder[]> {
+  if (!predexonUserId) {
+    logger.warn('getOpenOrders called without predexonUserId');
+    return [];
+  }
   try {
-    // No cache — open orders must always be fresh so users see their new GTC orders immediately
-    logger.info('Fetching open orders from CLOB API');
-    const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-    const openOrders = await client.getOpenOrders();
-    const liveOrders = (openOrders as OpenOrder[]).filter((o) => o.status === 'LIVE');
+    logger.info('Fetching open orders from Predexon API');
+    const orders = await predexonGetOrders(predexonUserId, 'polymarket');
+    const liveOrders = orders
+      .filter((o) => o.status === 'open')
+      .map((o) => ({
+        id: o.orderId,
+        status: 'LIVE',
+        owner: '',
+        maker_address: '',
+        market: '',
+        asset_id: o.tokenId,
+        side: o.side?.toUpperCase() ?? '',
+        original_size: o.size ?? '0',
+        size_matched: o.sizeMatched ?? '0',
+        price: o.price ?? '0',
+        associate_trades: [],
+        outcome: '',
+        created_at: 0,
+        expiration: '',
+        order_type: o.type ?? '',
+      })) as OpenOrder[];
 
     logger.info(`Fetched ${liveOrders.length} open orders`);
     return liveOrders;
@@ -241,26 +255,18 @@ export async function invalidatePortfolioCache(proxyAddress: string): Promise<vo
  * Returns { success, cancelledId, errorReason }
  */
 export async function cancelOrderById(
-  privateKey: string,
-  apiKey: string,
-  apiSecret: string,
-  passphrase: string,
-  orderId: string
+  _privateKey: string,
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string,
+  orderId: string,
+  predexonUserId?: string
 ): Promise<{ success: boolean; errorReason?: string }> {
+  if (!predexonUserId) return { success: false, errorReason: 'no predexonUserId' };
   try {
-    const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-    const result: any = await client.cancelOrder({ orderID: orderId });
-
-    // SDK returns { canceled: [orderId], not_canceled: {} }
-    const canceledList: string[] = result?.canceled ?? [];
-    if (canceledList.includes(orderId)) {
-      logger.info(`[portfolio] Cancelled order ${orderId.substring(0, 16)}...`);
-      return { success: true };
-    }
-
-    const reason = result?.not_canceled?.[orderId] ?? 'unknown reason';
-    logger.warn(`[portfolio] Order not cancelled: ${reason}`);
-    return { success: false, errorReason: String(reason) };
+    await predexonCancelOrder(predexonUserId, orderId);
+    logger.info(`[portfolio] Cancelled order ${orderId.substring(0, 16)}...`);
+    return { success: true };
   } catch (error: any) {
     logger.error('Error cancelling order:', error);
     return { success: false, errorReason: error?.message ?? 'API error' };
@@ -268,23 +274,20 @@ export async function cancelOrderById(
 }
 
 /**
- * Cancels ALL open orders for the user.
- * Returns { cancelled, failed }
+ * Cancels ALL open orders for the user via Predexon.
  */
 export async function cancelAllOrders(
-  privateKey: string,
-  apiKey: string,
-  apiSecret: string,
-  passphrase: string
+  _privateKey: string,
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string,
+  predexonUserId?: string
 ): Promise<{ cancelled: number; failed: number }> {
+  if (!predexonUserId) return { cancelled: 0, failed: -1 };
   try {
-    const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-    const result: any = await client.cancelAll();
-
-    const cancelled = (result?.canceled ?? []).length as number;
-    const failed = Object.keys(result?.not_canceled ?? {}).length;
-    logger.info(`[portfolio] Cancel all: ${cancelled} cancelled, ${failed} failed`);
-    return { cancelled, failed };
+    await predexonCancelAllOrders(predexonUserId, 'polymarket');
+    logger.info(`[portfolio] Cancel all orders sent via Predexon`);
+    return { cancelled: -1, failed: 0 }; // Predexon doesn't return count
   } catch (error: any) {
     logger.error('Error cancelling all orders:', error);
     return { cancelled: 0, failed: -1 };
@@ -292,28 +295,19 @@ export async function cancelAllOrders(
 }
 
 /**
- * Gets user's trade history from CLOB API (authenticated)
+ * Gets user's trade history.
+ * Note: Predexon doesn't have a dedicated trades endpoint — returns empty for now.
+ * Trade history is visible via positions and orders.
  */
 export async function getTrades(
-  privateKey: string,
-  apiKey: string,
-  apiSecret: string,
-  passphrase: string
+  _privateKey: string,
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string
 ): Promise<Trade[]> {
-  try {
-    logger.info('Fetching trades from CLOB API');
-    const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-    const trades = await client.getTrades();
-    const sorted = (trades as Trade[]).sort(
-      (a, b) => new Date(b.match_time).getTime() - new Date(a.match_time).getTime()
-    );
-
-    logger.info(`Fetched ${sorted.length} trades`);
-    return sorted;
-  } catch (error) {
-    logger.warn('Error fetching trades:', error);
-    return [];
-  }
+  // Trade history via Predexon is available through orders endpoint
+  // For now return empty — positions provide the key data users need
+  return [];
 }
 
 /**
@@ -324,23 +318,27 @@ export async function getPortfolioData(
   apiKey: string,
   apiSecret: string,
   passphrase: string,
-  proxyAddress: string
+  proxyAddress: string,
+  predexonUserId?: string
 ): Promise<PortfolioData> {
   logger.info('Fetching complete portfolio data');
 
   const [openOrders, trades, activePositions, closedPositions] = await Promise.all([
-    getOpenOrders(privateKey, apiKey, apiSecret, passphrase),
+    getOpenOrders(privateKey, apiKey, apiSecret, passphrase, predexonUserId),
     getTrades(privateKey, apiKey, apiSecret, passphrase),
     getActivePositions(proxyAddress),
     getClosedPositions(proxyAddress),
   ]);
 
   let balance = '0.00';
+  // Balance is now fetched via Predexon in getBalance() — use placeholder here
+  // The wallet page handler calls getBalance() directly with predexonUserId
   try {
-    const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-    const balanceData = await client.getBalanceAllowance({ asset_type: 'COLLATERAL' as any });
-    if (balanceData?.balance) {
-      balance = (parseFloat(balanceData.balance) / 1_000_000).toFixed(2);
+    if (predexonUserId) {
+      const balances = await predexonGetBalance(predexonUserId, 'polymarket');
+      if (balances.length > 0) {
+        balance = parseFloat(balances[0].available).toFixed(2);
+      }
     }
   } catch (err) {
     logger.warn('Error fetching balance:', err);
@@ -354,18 +352,19 @@ export async function getPortfolioData(
 }
 
 /**
- * Gets user's USDC balance from CLOB API
+ * Gets user's USDC balance from Predexon API.
+ * Legacy signature kept for callers; new code should pass predexonUserId.
  */
 const BALANCE_CACHE_TTL       = 30;  // seconds — fresh cache
-const BALANCE_STALE_CACHE_TTL = 300; // 5 minutes — shown as fallback when CLOB is unreachable
+const BALANCE_STALE_CACHE_TTL = 300; // 5 minutes — shown as fallback
 
 export async function getBalance(
   privateKey: string,
-  apiKey: string,
-  apiSecret: string,
-  passphrase: string
+  _apiKey: string,
+  _apiSecret: string,
+  _passphrase: string,
+  predexonUserId?: string
 ): Promise<string> {
-  // Use last 8 chars of encrypted key as a per-user identifier (no sensitive data in key)
   const keyHash   = privateKey.slice(-8);
   const cacheKey  = `balance:${keyHash}`;
   const staleKey  = `balance:stale:${keyHash}`;
@@ -374,32 +373,26 @@ export async function getBalance(
     const cached = await redisCache.get<string>(cacheKey);
     if (cached !== null && cached !== undefined) return cached;
 
-    const client = await createClobClientForUser(privateKey, apiKey, apiSecret, passphrase);
-
-    // Race CLOB call against a hard timeout — the CLOB axios client has timeout:0 (no timeout)
-    const balanceData = await Promise.race([
-      client.getBalanceAllowance({ asset_type: 'COLLATERAL' as any }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('CLOB balance timeout')), FETCH_TIMEOUT_MS)
-      ),
-    ]);
-
-    let balance = '0.00';
-    if ((balanceData as any)?.balance) {
-      balance = (parseFloat((balanceData as any).balance) / 1_000_000).toFixed(2);
+    if (!predexonUserId) {
+      logger.warn('getBalance called without predexonUserId');
+      return '0.00';
     }
 
-    // Store fresh cache + update stale fallback
+    const balances = await predexonGetBalance(predexonUserId, 'polymarket');
+    let balance = '0.00';
+    if (balances.length > 0) {
+      balance = parseFloat(balances[0].available).toFixed(2);
+    }
+
     await Promise.all([
       redisCache.set(cacheKey, balance, BALANCE_CACHE_TTL),
-      redisCache.set(staleKey,  balance, BALANCE_STALE_CACHE_TTL),
+      redisCache.set(staleKey, balance, BALANCE_STALE_CACHE_TTL),
     ]).catch(() => {});
 
     logger.info(`Balance: $${balance}`);
     return balance;
   } catch (error) {
     logger.warn('Error fetching balance:', (error as any)?.message ?? String(error));
-    // Return last known balance instead of $0.00
     const stale = await redisCache.get<string>(staleKey).catch(() => null);
     if (stale !== null && stale !== undefined) {
       logger.info(`Balance (stale): $${stale}`);
@@ -425,12 +418,13 @@ export async function getMainMenuStats(
   apiKey: string,
   apiSecret: string,
   passphrase: string,
-  proxyAddress: string | null
+  proxyAddress: string | null,
+  predexonUserId?: string
 ): Promise<MainMenuStats> {
   const [balanceResult, positionsResult, ordersResult] = await Promise.allSettled([
-    getBalance(privateKey, apiKey, apiSecret, passphrase),
+    getBalance(privateKey, apiKey, apiSecret, passphrase, predexonUserId),
     proxyAddress ? getActivePositions(proxyAddress) : Promise.resolve([]),
-    getOpenOrders(privateKey, apiKey, apiSecret, passphrase),
+    getOpenOrders(privateKey, apiKey, apiSecret, passphrase, predexonUserId),
   ]);
 
   const balance       = balanceResult.status === 'fulfilled' ? parseFloat(balanceResult.value) : 0;

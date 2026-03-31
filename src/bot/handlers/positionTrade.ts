@@ -569,41 +569,32 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
       return;
     }
 
-    const { ClobClient, Side } = await import('@polymarket/clob-client');
-    const { Wallet } = await import('@ethersproject/wallet');
-    const { decrypt: dec } = await import('../../utils/encryption');
-    const { config: cfg } = await import('../../config');
+    const { ensurePredexonUser } = await import('../../services/user');
+    const { placeOrder: predexonPlaceOrder } = await import('../../services/predexon');
 
-    const wallet     = new Wallet(dec(user.encryptedPrivateKey));
-    const clobClient = new ClobClient(
-      cfg.polymarket.host,
-      cfg.polymarket.chainId,
-      wallet,
-      { key: dec(user.encryptedApiKey), secret: dec(user.encryptedApiSecret), passphrase: dec(user.encryptedPassphrase) },
-      2,
-      user.polymarketProxyAddress,
-    );
+    const predexonUserId = await ensurePredexonUser(user);
 
     // Snap price to 0.01 tick
     const tick       = 0.01;
     const snappedPrice = parseFloat(Math.max(Math.round(state.price / tick) * tick, 0.01).toFixed(2));
     const shares     = parseFloat(state.currentSize.toFixed(4));
 
-    let slFeeRateBps = 0;
-    try { slFeeRateBps = await clobClient.getFeeRateBps(state.assetId); } catch { /* proceed with 0 */ }
-
     logger.info(
       `[stopLoss] Placing GTC SELL: ${shares} shares of ${state.outcome} ` +
       `assetId=${state.assetId.substring(0, 16)}... price=${snappedPrice}`
     );
 
-    const orderResp = await clobClient.createAndPostOrder(
-      { tokenID: state.assetId, side: Side.SELL, price: snappedPrice, size: shares, feeRateBps: slFeeRateBps },
-      state.negRisk ? { negRisk: true } : undefined,
-    );
+    const orderResp = await predexonPlaceOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId: state.assetId,
+      side: 'sell',
+      type: 'limit',
+      size: String(shares),
+      price: String(snappedPrice),
+    });
 
-    if (!orderResp.success || !orderResp.orderID) {
-      const errMsg = orderResp.errorMsg || (orderResp as any).error || 'Order rejected by exchange';
+    if (!orderResp.orderId) {
+      const errMsg = (orderResp as any).error || (orderResp as any).message || 'Order rejected by exchange';
       throw new Error(errMsg);
     }
 
@@ -613,7 +604,7 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
       `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
       `🛑 Trigger price: *${slCents}¢*\n` +
       `📦 Shares: *${shares}*\n` +
-      `🆔 Order ID: \`${orderResp.orderID}\`\n\n` +
+      `🆔 Order ID: \`${orderResp.orderId}\`\n\n` +
       `_GTC limit sell order resting on the book. Cancel it from Open Orders if needed._`,
       {
         parse_mode: 'Markdown',
@@ -1027,217 +1018,34 @@ async function executePositionOrder(
   price: number,
   size: number
 ): Promise<{ orderID: string }> {
-  // Ensure CTF approvals are set on proxy wallet before placing any order
-  const { enableTrading } = await import('../../services/deposit');
-  const enableResult = await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress);
-  if (!enableResult.success) {
-    throw new Error('Failed to set trading approvals on proxy wallet');
-  }
-  logger.info(`[positionTrade] Approvals ready (${enableResult.alreadyEnabled ? 'already set' : 'just set'})`);
+  // Predexon handles approvals, balance refresh, and order signing automatically
+  const { ensurePredexonUser } = await import('../../services/user');
+  const { placeOrder: predexonPlaceOrder } = await import('../../services/predexon');
 
-  const { ClobClient, Side, OrderType } = await import('@polymarket/clob-client');
-  const { Wallet } = await import('@ethersproject/wallet');
-  const { config } = await import('../../config');
+  const predexonUserId = await ensurePredexonUser(user);
 
-  const privateKey = decrypt(user.encryptedPrivateKey);
-  const apiKey = decrypt(user.encryptedApiKey);
-  const apiSecret = decrypt(user.encryptedApiSecret);
-  const passphrase = decrypt(user.encryptedPassphrase);
-
-  const wallet = new Wallet(privateKey);
-
-  const clobClient = new ClobClient(
-    config.polymarket.host,
-    config.polymarket.chainId,
-    wallet,
-    { key: apiKey, secret: apiSecret, passphrase: passphrase },
-    2,
-    user.polymarketProxyAddress
-  );
-
-  // Fetch tick size from CLOB for accurate order signing
-  let tickSize: string | undefined;
-  try {
-    const market = await clobClient.getMarket(conditionId);
-    if (market && (market as any).minimum_tick_size) {
-      tickSize = String((market as any).minimum_tick_size);
-    }
-  } catch (e) {
-    logger.warn('[positionTrade] Could not fetch tick size, using SDK default');
-  }
-
-  const orderOptions: any = {};
-  if (tickSize) orderOptions.tickSize = tickSize;
-  if (negRisk) orderOptions.negRisk = true;
-
-  // Fetch fee rate dynamically — do not hardcode 0 (some markets require non-zero)
-  let feeRateBps = 0;
-  try {
-    feeRateBps = await clobClient.getFeeRateBps(assetId);
-  } catch { /* proceed with 0 */ }
-
-  // For SELL orders: verify on-chain that the proxy actually holds the tokens,
-  // then refresh the CLOB's cached view. The previous approach using
-  // updateBalanceAllowance(CONDITIONAL) may refresh the EOA balance (0) instead
-  // of the proxy's balance when the API key has not been explicitly linked to the
-  // proxy via a prior GNOSIS_SAFE order. We call it AFTER verifying on-chain so
-  // we know the tokens really exist before asking the CLOB to re-read.
   if (action === 'sell') {
-    const { Contract } = await import('ethers');
-    const { getPolygonProvider } = await import('../../utils/provider');
-    const CTF_CONTRACT_ADDR = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-    const NEG_RISK_EXCHANGE_ADDR = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
-    const CTF_ABI_MIN = [
-      'function balanceOf(address account, uint256 id) view returns (uint256)',
-      'function isApprovedForAll(address owner, address operator) view returns (bool)',
-    ];
-    const rpcProvider = await getPolygonProvider();
-    const ctfOnChain = new Contract(CTF_CONTRACT_ADDR, CTF_ABI_MIN, rpcProvider);
+    logger.info(
+      `[positionTrade] Predexon market SELL: ${size} shares assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
+    );
 
-    // Check on-chain token balance
-    const onChainBalance = await ctfOnChain.balanceOf(user.polymarketProxyAddress, assetId);
-    const requiredUnits = Math.round(size * 1e6);
-    const ROUNDING_TOLERANCE = 100; // 0.0001 share tolerance for floating-point rounding
-    logger.info(`[positionTrade] On-chain token balance: ${onChainBalance.toString()} units (need ${requiredUnits})`);
+    const sellOrderResponse = await predexonPlaceOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId: assetId,
+      side: 'sell',
+      type: 'market',
+      size: String(size),
+    });
 
-    if (onChainBalance.add(ROUNDING_TOLERANCE).lt(requiredUnits)) {
-      throw new Error(
-        `Proxy wallet has insufficient conditional tokens on-chain: ` +
-        `holds ${onChainBalance.toString()} units, order needs ${requiredUnits} units (${size} shares).`
-      );
-    }
-
-    // Check NegRisk approvals on-chain (exchange + adapter — both required for CLOB NegRisk sells)
-    const NEG_RISK_ADAPTER_ADDR = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
-    const [isNegRiskApproved, isNegRiskAdapterApproved] = await Promise.all([
-      ctfOnChain.isApprovedForAll(user.polymarketProxyAddress, NEG_RISK_EXCHANGE_ADDR),
-      ctfOnChain.isApprovedForAll(user.polymarketProxyAddress, NEG_RISK_ADAPTER_ADDR),
-    ]);
-    logger.info(`[positionTrade] On-chain NegRisk approval: exchange=${isNegRiskApproved} adapter=${isNegRiskAdapterApproved}`);
-
-    if (!isNegRiskApproved || !isNegRiskAdapterApproved) {
-      logger.warn('[positionTrade] NegRisk approval(s) missing — setting now...');
-      const { enableTrading } = await import('../../services/deposit');
-      const approvalResult = await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress);
-      if (!approvalResult.success) {
-        throw new Error('Failed to set NegRisk approvals on proxy wallet');
-      }
-      logger.info('[positionTrade] NegRisk approvals set successfully');
-    }
-
-    const tick = tickSize ? parseFloat(tickSize) : 0.01;
-    const decimals = tickSize?.includes('.') ? tickSize.split('.')[1].length : 2;
-
-    // Run balance refresh and order book fetch in parallel — they are independent:
-    // updateBalanceAllowance updates CLOB's internal view of the user's token balance.
-    // For NegRisk positions, call without token_id first (broad refresh) then with token_id
-    // because the token-scoped refresh alone doesn't update NegRisk allowance tracking.
-    // getOrderBook reads public market liquidity. Neither depends on the other.
-    let smartFloor = tick; // fallback: accept any price
-
-    const refreshBalance = async () => {
-      // Token-specific CONDITIONAL refresh (broad call without token_id is rejected by CLOB API)
-      await clobClient.updateBalanceAllowance({
-        asset_type: 'CONDITIONAL' as any,
-        token_id: assetId,
-      }).catch(() => {});
-      logger.info(`[positionTrade] CLOB balance cache refreshed for ${assetId.substring(0, 16)}...`);
-    };
-
-    const [, bookResult] = await Promise.allSettled([
-      refreshBalance(),
-      clobClient.getOrderBook(assetId),
-    ]);
-
-    const book = bookResult.status === 'fulfilled' ? bookResult.value : null;
-    if (book && book.bids && book.bids.length > 0) {
-      // bids are sorted best (highest) to worst (lowest)
-      let remaining = size;
-      let lastBidPrice = parseFloat(book.bids[0].price);
-
-      for (const bid of book.bids) {
-        const bidPrice = parseFloat(bid.price);
-        const bidSize  = parseFloat(bid.size);
-        remaining    -= bidSize;
-        lastBidPrice  = bidPrice;
-        if (remaining <= 0) break; // enough liquidity found at this level
-      }
-
-      // Snap to tick
-      const snapped = parseFloat((Math.floor(lastBidPrice / tick) * tick).toFixed(decimals));
-      smartFloor = Math.max(snapped, tick);
-
-      logger.info(
-        `[positionTrade] Order book — best_bid: ${(parseFloat(book.bids[0].price) * 100).toFixed(2)}¢` +
-        `, smart_floor: ${(smartFloor * 100).toFixed(2)}¢` +
-        ` (${book.bids.length} bid levels, need ${size} shares)`
-      );
-    } else if (bookResult.status === 'rejected') {
-      logger.warn('[positionTrade] Could not fetch order book (using 1-tick floor):', bookResult.reason);
-    } else {
-      logger.warn('[positionTrade] No bids in order book — using 1-tick floor');
-    }
-
-    // Step 2: Place FAK with smart floor. If market moved between fetch and placement,
-    // retry once with 1-tick floor (accept any available price).
-    // On balance/allowance errors, do a second broad refresh and retry once.
-    const floorsToTry = smartFloor > tick ? [smartFloor, tick] : [tick];
-
-    let sellOrderResponse: any;
-    let lastErrMsg = '';
-    let balanceRetried = false;
-
-    for (const floorPrice of floorsToTry) {
-      logger.info(
-        `[positionTrade] FAK sell: ${size} shares floor=${(floorPrice * 100).toFixed(2)}¢ negRisk=${negRisk}`
-      );
-
-      sellOrderResponse = await clobClient.createAndPostMarketOrder(
-        { tokenID: assetId, side: Side.SELL, amount: size, price: floorPrice, feeRateBps },
-        Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
-        OrderType.FAK
-      );
-
-      if (sellOrderResponse.success && sellOrderResponse.orderID) {
-        price = floorPrice; // update for commission calculation below
-        break;
-      }
-
-      lastErrMsg = sellOrderResponse.errorMsg || (sellOrderResponse as any).error || 'Sell order not filled';
-      logger.warn(`[positionTrade] FAK sell rejected at ${(floorPrice * 100).toFixed(2)}¢: ${lastErrMsg}`);
-
-      // On balance/allowance error: do a second forced refresh and retry at tick floor
-      if ((lastErrMsg.includes('balance') || lastErrMsg.includes('allowance')) && !balanceRetried) {
-        balanceRetried = true;
-        logger.info('[positionTrade] Balance error — forcing second broad CLOB refresh and retrying at tick floor');
-        await refreshBalance();
-        // Retry at minimum tick (most permissive price floor)
-        sellOrderResponse = await clobClient.createAndPostMarketOrder(
-          { tokenID: assetId, side: Side.SELL, amount: size, price: tick, feeRateBps },
-          Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
-          OrderType.FAK
-        );
-        if (sellOrderResponse.success && sellOrderResponse.orderID) {
-          price = tick;
-          break;
-        }
-        lastErrMsg = sellOrderResponse.errorMsg || (sellOrderResponse as any).error || 'Sell order not filled';
-        logger.warn(`[positionTrade] FAK sell retry rejected at tick floor: ${lastErrMsg}`);
-        break; // no more retries
-      }
-
-      // Only retry on liquidity errors
-      if (!lastErrMsg.includes('no orders found') && !lastErrMsg.includes('FAK') && !lastErrMsg.includes('FOK')) break;
-    }
-
-    if (!sellOrderResponse.success || !sellOrderResponse.orderID) {
-      if (lastErrMsg.includes('no orders found') || lastErrMsg.includes('FAK') || lastErrMsg.includes('FOK')) {
+    if (!sellOrderResponse.orderId) {
+      const errMsg = (sellOrderResponse as any).error || (sellOrderResponse as any).message || 'Sell order not filled';
+      if (errMsg.includes('no orders found') || errMsg.includes('liquidity')) {
         throw new Error('No buy orders in the order book. The market is currently illiquid — try again later.');
       }
-      if (lastErrMsg.includes('balance') || lastErrMsg.includes('allowance')) {
+      if (errMsg.includes('balance') || errMsg.includes('allowance')) {
         throw new Error('Insufficient token balance or allowance. Your on-chain balance may have changed.');
       }
-      throw new Error(lastErrMsg);
+      throw new Error(errMsg);
     }
 
     // Transfer 1% commission from estimated sell proceeds (fire-and-forget)
@@ -1247,32 +1055,25 @@ async function executePositionOrder(
         logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);
       });
 
-    return { orderID: sellOrderResponse.orderID };
+    return { orderID: sellOrderResponse.orderId };
   }
 
-  // BUY: FAK market order — fills immediately up to worstPrice
-  // Snap price to tick size first (same as GTC, needed for valid price)
-  if (tickSize) {
-    const tick = Math.max(parseFloat(tickSize), 0.001);
-    const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
-    price = parseFloat((Math.round(price / tick) * tick).toFixed(decimals));
-    price = Math.min(Math.max(price, tick), 0.99);
-  }
-
-  // amount = USD to spend = tradeAmount (size * price, after commission deduction)
+  // BUY: market order via Predexon
   const buyAmount = parseFloat((size * price).toFixed(6));
 
-  logger.info(`[positionTrade] Creating FAK buy order: ~${size} shares at max ${(price * 100).toFixed(2)}¢ amount=$${buyAmount} negRisk=${negRisk} tickSize=${tickSize || 'default'}`);
+  logger.info(`[positionTrade] Predexon market BUY: amount=$${buyAmount} negRisk=${negRisk}`);
 
-  const buyOrderResponse = await clobClient.createAndPostMarketOrder(
-    { tokenID: assetId, side: Side.BUY, amount: buyAmount, price, feeRateBps } as any,
-    Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
-    OrderType.FAK
-  );
+  const buyOrderResponse = await predexonPlaceOrder(predexonUserId, {
+    venue: 'polymarket',
+    tokenId: assetId,
+    side: 'buy',
+    type: 'market',
+    amount: String(buyAmount),
+  });
 
-  if (!buyOrderResponse.success || !buyOrderResponse.orderID) {
-    const errMsg = buyOrderResponse.errorMsg || (buyOrderResponse as any).error || 'Buy order placement failed';
-    logger.error(`[positionTrade] GTC buy rejected: ${errMsg}`);
+  if (!buyOrderResponse.orderId) {
+    const errMsg = (buyOrderResponse as any).error || (buyOrderResponse as any).message || 'Buy order placement failed';
+    logger.error(`[positionTrade] Predexon buy rejected: ${errMsg}`);
     throw new Error(errMsg);
   }
 
@@ -1283,7 +1084,7 @@ async function executePositionOrder(
       logger.warn('[positionTrade] Commission transfer after buy failed (non-fatal):', feeErr);
     });
 
-  return { orderID: buyOrderResponse.orderID };
+  return { orderID: buyOrderResponse.orderId };
 }
 
 /**

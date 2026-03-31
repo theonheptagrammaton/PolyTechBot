@@ -647,7 +647,8 @@ export async function handleBackToMenu(ctx: Context): Promise<void> {
           user.encryptedApiKey,
           user.encryptedApiSecret,
           user.encryptedPassphrase,
-          user.polymarketProxyAddress
+          user.polymarketProxyAddress,
+          user.predexonUserId ?? undefined
         ).catch(() => ZERO_STATS);
       }
     }

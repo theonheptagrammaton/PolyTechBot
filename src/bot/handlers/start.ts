@@ -350,7 +350,8 @@ export async function handleStart(ctx: Context): Promise<void> {
           existingUser.encryptedApiKey,
           existingUser.encryptedApiSecret,
           existingUser.encryptedPassphrase,
-          existingUser.polymarketProxyAddress
+          existingUser.polymarketProxyAddress,
+          existingUser.predexonUserId ?? undefined
         ).catch(() => undefined);
 
         try {

@@ -66,7 +66,8 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
         user.encryptedPrivateKey,
         user.encryptedApiKey,
         user.encryptedApiSecret,
-        user.encryptedPassphrase
+        user.encryptedPassphrase,
+        user.predexonUserId ?? undefined
       );
       logger.info(`Balance fetched for user ${telegramId}: $${balance}`);
     } catch (balanceError) {
@@ -289,7 +290,8 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       try {
         const openOrds = await getOpenOrders(
           user.encryptedPrivateKey, user.encryptedApiKey,
-          user.encryptedApiSecret, user.encryptedPassphrase
+          user.encryptedApiSecret, user.encryptedPassphrase,
+          user.predexonUserId ?? undefined
         );
         if (openOrds.length > 0) {
           openOrdersHint =
@@ -423,7 +425,8 @@ export async function handleOpenOrders(ctx: Context, page: number = 1): Promise<
 
     const openOrders = await getOpenOrders(
       user.encryptedPrivateKey, user.encryptedApiKey,
-      user.encryptedApiSecret, user.encryptedPassphrase
+      user.encryptedApiSecret, user.encryptedPassphrase,
+      user.predexonUserId ?? undefined
     );
 
     if (openOrders.length === 0) {
@@ -673,7 +676,8 @@ export async function handleAllTransactions(ctx: Context, page: number = 1): Pro
       user.encryptedApiKey,
       user.encryptedApiSecret,
       user.encryptedPassphrase,
-      user.polymarketProxyAddress || ''
+      user.polymarketProxyAddress || '',
+      user.predexonUserId ?? undefined
     );
 
     const openOrders = portfolioData.openOrders;
@@ -825,7 +829,8 @@ export async function handleCancelOrderConfirm(ctx: Context, page: number, idx: 
     // Re-fetch live orders to find the exact one
     const openOrders = await getOpenOrders(
       user.encryptedPrivateKey, user.encryptedApiKey,
-      user.encryptedApiSecret, user.encryptedPassphrase
+      user.encryptedApiSecret, user.encryptedPassphrase,
+      user.predexonUserId ?? undefined
     );
 
     const ITEMS_PER_PAGE = 4;
@@ -887,7 +892,8 @@ export async function handleCancelOrderExecute(ctx: Context, page: number, idx: 
     // Re-fetch live orders to find the exact order ID
     const openOrders = await getOpenOrders(
       user.encryptedPrivateKey, user.encryptedApiKey,
-      user.encryptedApiSecret, user.encryptedPassphrase
+      user.encryptedApiSecret, user.encryptedPassphrase,
+      user.predexonUserId ?? undefined
     );
 
     const ITEMS_PER_PAGE = 4;
@@ -908,7 +914,8 @@ export async function handleCancelOrderExecute(ctx: Context, page: number, idx: 
     const result = await cancelOrderById(
       user.encryptedPrivateKey, user.encryptedApiKey,
       user.encryptedApiSecret, user.encryptedPassphrase,
-      order.id
+      order.id,
+      user.predexonUserId ?? undefined
     );
 
     await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
@@ -962,7 +969,8 @@ export async function handleCancelAllConfirm(ctx: Context): Promise<void> {
     // Count current open orders for the confirmation message
     const openOrders = await getOpenOrders(
       user.encryptedPrivateKey, user.encryptedApiKey,
-      user.encryptedApiSecret, user.encryptedPassphrase
+      user.encryptedApiSecret, user.encryptedPassphrase,
+      user.predexonUserId ?? undefined
     );
 
     if (openOrders.length === 0) {
@@ -1013,7 +1021,8 @@ export async function handleCancelAllExecute(ctx: Context): Promise<void> {
 
     const result = await cancelAllOrders(
       user.encryptedPrivateKey, user.encryptedApiKey,
-      user.encryptedApiSecret, user.encryptedPassphrase
+      user.encryptedApiSecret, user.encryptedPassphrase,
+      user.predexonUserId ?? undefined
     );
 
     await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');

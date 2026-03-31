@@ -4,7 +4,6 @@ import { redisCache } from '../database/redis';
 import { encrypt, decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 import { createWallet } from './wallet';
-import { updatePolymarketProfile } from './polymarket';
 import { setupPolymarketAccount } from './polymarketSetup';
 import { config } from '../config';
 
@@ -45,37 +44,31 @@ export async function createUserWithWallet(
       return getCompleteUserInfo(existingUser);
     }
 
-    // Create new EVM wallet (for deposits: Polygon, Ethereum, BNB)
+    // Create new EVM wallet (for commission transfers & other chain ops)
     const walletInfo = await createWallet();
     logger.info(`EVM wallet created: ${walletInfo.address}`);
 
-    // Setup complete Polymarket account (API credentials + Proxy wallet)
-    logger.info('Setting up Polymarket account...');
-    const polymarketSetup = await setupPolymarketAccount(walletInfo.privateKey);
+    // Setup Polymarket account via Predexon (managed wallet, no Builder quota)
+    logger.info('Setting up Polymarket account via Predexon...');
+    const polymarketSetup = await setupPolymarketAccount(walletInfo.privateKey, walletInfo.address);
 
-    logger.info('✅ Complete Polymarket account setup:');
-    logger.info(`  - EOA: ${polymarketSetup.eoaAddress}`);
-    logger.info(`  - Proxy: ${polymarketSetup.proxyAddress}`);
-    logger.info(`  - API Key: ${polymarketSetup.apiKey.substring(0, 10)}...`);
-
-    const polymarketCreds = {
-      apiKey: polymarketSetup.apiKey,
-      apiSecret: polymarketSetup.apiSecret,
-      passphrase: polymarketSetup.passphrase,
-    };
+    logger.info('✅ Predexon account setup complete:');
+    logger.info(`  - Predexon userId: ${polymarketSetup.predexonUserId}`);
+    logger.info(`  - Polymarket wallet: ${polymarketSetup.proxyAddress}`);
 
     const polymarketProxyAddress = polymarketSetup.proxyAddress;
 
     // Encrypt sensitive data
     const encryptedPrivateKey = encrypt(walletInfo.privateKey);
-    const encryptedApiKey = encrypt(polymarketCreds.apiKey);
-    const encryptedApiSecret = encrypt(polymarketCreds.apiSecret);
-    const encryptedPassphrase = encrypt(polymarketCreds.passphrase);
+    // Legacy CLOB credentials — Predexon manages trading, store placeholder
+    const encryptedApiKey = encrypt(polymarketSetup.apiKey);
+    const encryptedApiSecret = encrypt(polymarketSetup.apiSecret);
+    const encryptedPassphrase = encrypt(polymarketSetup.passphrase);
 
     // Check if user should be admin
     const isAdmin = config.telegram.adminUserIds.includes(parseInt(telegramId, 10));
 
-    // Save user to database with deposit addresses
+    // Save user to database with deposit addresses and Predexon userId
     const user = await prisma.user.create({
       data: {
         telegramId,
@@ -84,6 +77,7 @@ export async function createUserWithWallet(
         lastName,
         walletAddress: walletInfo.address,
         encryptedPrivateKey,
+        predexonUserId: polymarketSetup.predexonUserId,
         polymarketProxyAddress,
         depositAddressEvm: polymarketSetup.depositAddresses.evm,
         depositAddressSvm: polymarketSetup.depositAddresses.svm,
@@ -92,45 +86,12 @@ export async function createUserWithWallet(
         encryptedApiKey,
         encryptedApiSecret,
         encryptedPassphrase,
+        tradingEnabled: true, // Predexon handles approvals automatically
         isAdmin,
       },
     });
 
     logger.info(`User created successfully: ${user.id}`);
-
-    // Enable trading automatically (one-time approval for CTF contract)
-    logger.info('[Setup] Enabling trading for new user...');
-    const { enableTrading } = await import('./deposit');
-    enableTrading(encryptedPrivateKey)
-      .then(async (result) => {
-        if (result.success) {
-          // Update user record to mark trading as enabled
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { tradingEnabled: true },
-          });
-          logger.info(`✅ Trading enabled successfully for user: ${user.id}`);
-        } else {
-          logger.warn(`⚠️ Could not enable trading for user: ${user.id} (can be done later)`);
-        }
-      })
-      .catch((error) => {
-        logger.error('[Setup] Enable trading failed (non-blocking):', error);
-      });
-
-    // Try to update Polymarket profile with bot name
-    // This runs in background and doesn't block user creation
-    updatePolymarketProfile(walletInfo.privateKey, 'PolyTech Bot')
-      .then((success) => {
-        if (success) {
-          logger.info(`Polymarket profile updated for user: ${user.id}`);
-        } else {
-          logger.warn(`Could not update Polymarket profile for user: ${user.id} (will show as "anon")`);
-        }
-      })
-      .catch((error) => {
-        logger.error('Profile update failed (non-blocking):', error);
-      });
 
     // Cache user data
     await cacheUser(user);
@@ -142,7 +103,11 @@ export async function createUserWithWallet(
         privateKey: walletInfo.privateKey,
         polymarketProxyAddress,
       },
-      polymarketCredentials: polymarketCreds,
+      polymarketCredentials: {
+        apiKey: polymarketSetup.apiKey,
+        apiSecret: polymarketSetup.apiSecret,
+        passphrase: polymarketSetup.passphrase,
+      },
     };
   } catch (error) {
     logger.error('Error creating user with wallet:', error);
@@ -159,6 +124,12 @@ export async function getCompleteUserInfo(user: User): Promise<UserWithCredentia
     const apiKey = decrypt(user.encryptedApiKey);
     const apiSecret = decrypt(user.encryptedApiSecret);
     const passphrase = decrypt(user.encryptedPassphrase);
+
+    // Lazy migration: if user has no predexonUserId, create one now
+    if (!user.predexonUserId) {
+      logger.warn(`User ${user.id} has no Predexon userId, migrating...`);
+      await ensurePredexonUser(user);
+    }
 
     // For backwards compatibility, if proxy address is null, we should create it
     let polymarketProxyAddress = user.polymarketProxyAddress;
@@ -196,6 +167,36 @@ export async function getCompleteUserInfo(user: User): Promise<UserWithCredentia
     logger.error('Error getting complete user info:', error);
     throw new Error('Failed to decrypt user credentials');
   }
+}
+
+/**
+ * Ensures a user has a Predexon userId. Creates one via lazy migration if missing.
+ * Updates the DB record and invalidates cache.
+ */
+export async function ensurePredexonUser(user: User): Promise<string> {
+  if (user.predexonUserId) return user.predexonUserId;
+
+  const { createAndWaitForUser } = await import('./predexon');
+  const predexonUser = await createAndWaitForUser();
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      predexonUserId: predexonUser.userId,
+      polymarketProxyAddress: predexonUser.polymarketWalletAddress,
+      tradingEnabled: true,
+    },
+  });
+
+  // Update the in-memory object too
+  user.predexonUserId = predexonUser.userId;
+  user.polymarketProxyAddress = predexonUser.polymarketWalletAddress;
+  user.tradingEnabled = true;
+
+  await invalidateUserCache(user);
+
+  logger.info(`[lazyMigration] Predexon user created for ${user.id}: ${predexonUser.userId}`);
+  return predexonUser.userId;
 }
 
 /**
@@ -349,9 +350,9 @@ export async function replaceUserWallet(
     throw new Error('This wallet address is already in use by another account.');
   }
 
-  logger.info(`[importWallet] Setting up Polymarket account for EOA: ${eoaAddress}`);
-  const setup = await setupPolymarketAccount(privateKey);
-  logger.info(`[importWallet] Proxy: ${setup.proxyAddress}, API key: ${setup.apiKey.substring(0, 10)}...`);
+  logger.info(`[importWallet] Setting up Polymarket account via Predexon for EOA: ${eoaAddress}`);
+  const setup = await setupPolymarketAccount(privateKey, eoaAddress);
+  logger.info(`[importWallet] Predexon userId: ${setup.predexonUserId}, Proxy: ${setup.proxyAddress}`);
 
   const encryptedPrivateKey  = encrypt(privateKey);
   const encryptedApiKey      = encrypt(setup.apiKey);
@@ -366,6 +367,7 @@ export async function replaceUserWallet(
     data: {
       walletAddress:         eoaAddress,
       encryptedPrivateKey,
+      predexonUserId:        setup.predexonUserId,
       polymarketProxyAddress: setup.proxyAddress,
       depositAddressEvm:     setup.depositAddresses.evm,
       depositAddressSvm:     setup.depositAddresses.svm,
@@ -374,7 +376,7 @@ export async function replaceUserWallet(
       encryptedApiKey,
       encryptedApiSecret,
       encryptedPassphrase,
-      tradingEnabled:        false, // will be re-enabled by background job
+      tradingEnabled:        true, // Predexon handles approvals automatically
     },
   });
 
@@ -387,20 +389,6 @@ export async function replaceUserWallet(
     redisCache.set(`user:wallet:${updatedUser.walletAddress}`, updatedUser, 3600),
     redisCache.set(`user:id:${updatedUser.id}`, updatedUser, 3600),
   ]);
-
-  // Re-enable trading in the background (ERC-20 approval)
-  const { enableTrading } = await import('./deposit');
-  enableTrading(encryptedPrivateKey)
-    .then(async (result) => {
-      if (result.success) {
-        await prisma.user.update({ where: { id: userId }, data: { tradingEnabled: true } });
-        await invalidateUserCache(updatedUser);
-        logger.info(`[importWallet] Trading re-enabled for user ${userId}`);
-      } else {
-        logger.warn(`[importWallet] Could not re-enable trading for user ${userId}`);
-      }
-    })
-    .catch((err) => logger.error('[importWallet] enableTrading failed (non-blocking):', err));
 
   return { walletAddress: eoaAddress, polymarketProxyAddress: setup.proxyAddress };
 }

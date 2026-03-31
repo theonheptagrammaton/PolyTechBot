@@ -1,8 +1,6 @@
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import axios from 'axios';
-import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
-import { Wallet } from '@ethersproject/wallet';
 import { logger } from '../../utils/logger';
 import { COMMISSION_RATE, transferCommission } from '../../services/commission';
 import { config } from '../../config';
@@ -11,10 +9,11 @@ import { RedisBackedState } from '../../utils/redisState';
 import { generatePositionPnlImage } from '../../services/pnlImage';
 import { getActivePositions, getBalance, invalidatePortfolioCache } from '../../services/portfolio';
 import { fetchProfilePhoto } from '../../utils/telegram';
-import { getUserByTelegramId } from '../../services/user';
+import { getUserByTelegramId, ensurePredexonUser } from '../../services/user';
 import { decrypt } from '../../utils/encryption';
 import { enableTrading } from '../../services/deposit';
 import { prisma } from '../../database/prisma';
+import { placeOrder } from '../../services/predexon';
 
 /**
  * Returns a "Trade Again" URL button that re-opens the custom trade flow via deep link.
@@ -486,7 +485,8 @@ async function executeTrade(
       user.encryptedPrivateKey,
       user.encryptedApiKey,
       user.encryptedApiSecret,
-      user.encryptedPassphrase
+      user.encryptedPassphrase,
+      user.predexonUserId ?? undefined
     ).catch(() => '0');
 
     const enablePromise = !user.tradingEnabled
@@ -617,15 +617,8 @@ async function executeTrade(
     );
 
 
-    const wallet = new Wallet(privateKey);
-    const clobClient = new ClobClient(
-      config.polymarket.host,
-      config.polymarket.chainId,
-      wallet,
-      { key: apiKey, secret: apiSecret, passphrase },
-      2, // signatureType=2 GNOSIS_SAFE — proxy wallet
-      user.polymarketProxyAddress
-    );
+    // Ensure user has a Predexon userId (lazy migration for existing users)
+    const predexonUserId = await ensurePredexonUser(user);
 
     // Step 5: Resolve token ID, tick size, and negRisk from market data
     await ctx.telegram.editMessageText(
@@ -734,15 +727,17 @@ async function executeTrade(
 
     logger.info(`[trade] Placing FAK BUY: ~${estimatedSize} shares of ${outcome.toUpperCase()} tokenId=${tokenId.substring(0,16)}... maxPrice=${worstPrice} slippage=${slippagePct}% tickSize=${tickSize} negRisk=${isNegRisk}`);
 
-    const orderResponse = await clobClient.createAndPostMarketOrder(
-      { tokenID: tokenId, side: Side.BUY, amount: tradeAmount, price: worstPrice } as any,
-      Object.keys(orderOptions).length > 0 ? orderOptions : undefined,
-      OrderType.FAK
-    );
+    const orderResponse = await placeOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId,
+      side: 'buy',
+      type: 'market',
+      amount: String(tradeAmount),
+    });
 
-    if (!orderResponse.success || !orderResponse.orderID) {
-      const errMsg = orderResponse.errorMsg || (orderResponse as any).error || 'Order placement failed';
-      logger.error(`[trade] CLOB rejected order for user ${telegramId}: ${errMsg}`);
+    if (!orderResponse.orderId) {
+      const errMsg = (orderResponse as any).error || (orderResponse as any).message || 'Order placement failed';
+      logger.error(`[trade] Predexon rejected order for user ${telegramId}: ${errMsg}`);
 
       // User-friendly messages for known CLOB errors
       if (errMsg.includes('balance') || errMsg.includes('allowance')) {
@@ -819,7 +814,7 @@ async function executeTrade(
       `<b>Invested:</b> $${amount.toFixed(2)}\n` +
       `<b>Shares:</b> ~${estimatedSize}\n` +
       `<b>Entry Price:</b> ${entryPriceCents}¢\n\n` +
-      `<b>Order ID:</b> <code>${orderResponse.orderID}</code>\n\n` +
+      `<b>Order ID:</b> <code>${orderResponse.orderId}</code>\n\n` +
       `${ce(EMOJI.marketsTitle, '🤑')} <a href="${polymarketLink}">View this market on Polymarket</a>`;
 
     await ctx.telegram.editMessageText(
@@ -836,7 +831,7 @@ async function executeTrade(
       }
     );
 
-    logger.info(`[trade] Order placed: user=${telegramId} market=${marketId} outcome=${outcome.toUpperCase()} amount=$${amount} orderID=${orderResponse.orderID}`);
+    logger.info(`[trade] Order placed: user=${telegramId} market=${marketId} outcome=${outcome.toUpperCase()} amount=$${amount} orderID=${orderResponse.orderId}`);
 
     // ── Auto-send PNL image for the just-traded position (fire-and-forget) ────
     (async () => {
@@ -1510,37 +1505,25 @@ async function executeLimitTrade(
     }
 
 
-    const wallet = new Wallet(privateKey);
-    const clobClient = new ClobClient(
-      config.polymarket.host,
-      config.polymarket.chainId,
-      wallet,
-      { key: apiKey, secret: apiSecret, passphrase },
-      2, // GNOSIS_SAFE signature type
-      user.polymarketProxyAddress
-    );
-
-    const orderOptions: any = {};
-    if (tickSize) orderOptions.tickSize = tickSize as any;
-    if (isNegRisk) orderOptions.negRisk = isNegRisk;
+    // Ensure user has Predexon userId
+    const predexonUserId = await ensurePredexonUser(user);
 
     logger.info(
       `[limit] Placing GTC BUY: ${sharesToBuy} shares of ${outcome.toUpperCase()} ` +
       `tokenId=${tokenId.substring(0, 16)}... price=${snappedPrice} tickSize=${tickSize} negRisk=${isNegRisk}`
     );
 
-    let feeRateBps = 0;
-    try {
-      feeRateBps = await clobClient.getFeeRateBps(tokenId);
-    } catch { /* proceed with 0 */ }
+    const orderResp = await placeOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId,
+      side: 'buy',
+      type: 'limit',
+      size: String(sharesToBuy),
+      price: String(snappedPrice),
+    });
 
-    const orderResp = await clobClient.createAndPostOrder(
-      { tokenID: tokenId, side: Side.BUY, price: snappedPrice, size: sharesToBuy, feeRateBps },
-      Object.keys(orderOptions).length > 0 ? orderOptions : undefined
-    );
-
-    if (!orderResp.success || !orderResp.orderID) {
-      const errMsg = orderResp.errorMsg || (orderResp as any).error || 'Order rejected by exchange';
+    if (!orderResp.orderId) {
+      const errMsg = (orderResp as any).error || (orderResp as any).message || 'Order rejected by exchange';
       throw new Error(errMsg);
     }
 
@@ -1560,7 +1543,7 @@ async function executeLimitTrade(
       `├ Platform fee: -$${commissionAmt.toFixed(2)}\n` +
       `└ Trade amount: $${tradeAmount.toFixed(2)}\n` +
       `📦 Shares: ~${sharesToBuy}\n` +
-      `🆔 Order ID: \`${orderResp.orderID}\`\n\n` +
+      `🆔 Order ID: \`${orderResp.orderId}\`\n\n` +
       `_GTC order — rests on the book until filled or cancelled._`;
 
     await ctx.editMessageText(message, {
@@ -1574,7 +1557,7 @@ async function executeLimitTrade(
 
     logger.info(
       `[limit] Order placed: user=${telegramId} market=${marketId} ` +
-      `outcome=${outcome.toUpperCase()} price=${snappedPrice} shares=${sharesToBuy} orderID=${orderResp.orderID}`
+      `outcome=${outcome.toUpperCase()} price=${snappedPrice} shares=${sharesToBuy} orderID=${orderResp.orderId}`
     );
 
   } catch (error: any) {

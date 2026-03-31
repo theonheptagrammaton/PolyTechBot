@@ -21,6 +21,9 @@ model User {
   walletAddress    String   @unique
   encryptedPrivateKey String
 
+  // Predexon managed user ID (UUID from Predexon Trading API)
+  predexonUserId   String?
+
   // Polymarket Proxy/Safe wallet (for trading)
   polymarketProxyAddress String?
 

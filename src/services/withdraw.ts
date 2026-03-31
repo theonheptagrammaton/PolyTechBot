@@ -247,3 +247,31 @@ export async function executeWithdraw(params: {
     return { success: false, error: error?.message || 'Unknown error' };
   }
 }
+
+/**
+ * Execute a withdrawal via Predexon API (managed, no gas needed).
+ * Uses Predexon's withdraw endpoint — handles signing and gas automatically.
+ */
+export async function executePredexonWithdraw(params: {
+  predexonUserId: string;
+  venue: 'polymarket' | 'predict';
+  amount: number;
+  destinationAddress: string;
+  chain: 'polygon' | 'bsc';
+}): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    const { withdraw } = await import('./predexon');
+    const result = await withdraw(params.predexonUserId, {
+      venue: params.venue,
+      amount: params.amount.toFixed(6),
+      destinationAddress: params.destinationAddress,
+      chain: params.chain,
+    });
+
+    logger.info(`[withdraw] Predexon withdraw success: ${result.transactionHash}`);
+    return { success: true, txHash: result.transactionHash };
+  } catch (error: any) {
+    logger.error('[withdraw] Predexon withdraw failed:', error?.message);
+    return { success: false, error: error?.message || 'Unknown error' };
+  }
+}

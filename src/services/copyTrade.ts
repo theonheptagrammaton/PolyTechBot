@@ -1,13 +1,12 @@
-import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
-import { Wallet } from 'ethers';
 import { prisma } from '../database/prisma';
 import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { config } from '../config';
 import { getActivePositions, ActivePosition } from './portfolio';
-import { createClobClientForUser } from './portfolio';
 import { transferCommission, COMMISSION_RATE } from './commission';
+import { placeOrder as predexonPlaceOrder } from './predexon';
+import { ensurePredexonUser } from './user';
 
 const CLOB_BASE = 'https://clob.polymarket.com';
 const DATA_API_BASE = 'https://data-api.polymarket.com';
@@ -280,24 +279,10 @@ async function executeCopyOrder(
   }
 
   try {
-    const privateKey = decrypt(user.encryptedPrivateKey);
-    const apiKey = decrypt(user.encryptedApiKey);
-    const apiSecret = decrypt(user.encryptedApiSecret);
-    const passphrase = decrypt(user.encryptedPassphrase);
+    // Ensure Predexon user exists (lazy migration for existing users)
+    const predexonUserId = await ensurePredexonUser(user as any);
 
-    const wallet = new Wallet(privateKey);
-    const clobClient = new ClobClient(
-      config.polymarket.host,
-      config.polymarket.chainId,
-      wallet,
-      { key: apiKey, secret: apiSecret, passphrase },
-      2, // GNOSIS_SAFE signature type
-      user.polymarketProxyAddress
-    );
-
-    // Fetch market info for tick size and negRisk
-    let tickSize = '0.01';
-    let isNegRisk = false;
+    // Fetch market info for tokenId resolution
     let tokenId = trade.assetId;
 
     try {
@@ -306,8 +291,6 @@ async function executeCopyOrder(
       });
       if (mResp.ok) {
         const m = await mResp.json();
-        if (m.minimum_tick_size) tickSize = String(m.minimum_tick_size);
-        if (m.neg_risk !== undefined) isNegRisk = !!m.neg_risk;
         // Resolve tokenId from market if assetId is empty
         if (!tokenId && m.tokens?.length) {
           const outcomeIdx = trade.outcome === 'YES' ? 0 : 1;
@@ -320,19 +303,10 @@ async function executeCopyOrder(
       return { status: 'failed', errorMsg: 'could not resolve tokenId' };
     }
 
-    // Fetch fee rate dynamically — do not hardcode 0 (some markets require non-zero)
-    let feeRateBps = 0;
-    try {
-      feeRateBps = await withClobRetry(() => clobClient.getFeeRateBps(tokenId));
-    } catch { /* proceed with 0 */ }
-
     const isSell = trade.side === 'SELL';
-    const tick = Math.max(parseFloat(tickSize), 0.001);
-    const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
     const slippagePct  = (subSlippage ?? user.slippageTolerance) ?? 1.0;
     const slippageMult = slippagePct / 100;
 
-    let price: number;
     let size: number;
     let commissionAmt = 0; // only used for BUY
 
@@ -345,8 +319,6 @@ async function executeCopyOrder(
         return { status: 'skipped', errorMsg: 'no matching position to sell' };
       }
 
-      // Sell the same number of shares the trader sold.
-      // If the trader sold MORE shares than the user holds, sell all of the user's shares.
       const traderShares = parseFloat((trade.sizeUsd / trade.price).toFixed(4));
       size = Math.min(traderShares, pos.size);
 
@@ -354,84 +326,71 @@ async function executeCopyOrder(
         return { status: 'skipped', errorMsg: 'sell size too small' };
       }
 
-      // Floor price = market price − user slippage%, snapped down to tick, min 0.01
-      price = parseFloat(
-        Math.max(Math.round((trade.price * (1 - slippageMult)) / tick) * tick, 0.01).toFixed(decimals)
-      );
-    } else {
-      // For BUY
-      commissionAmt = parseFloat((copySize * COMMISSION_RATE).toFixed(6));
-      const tradeAmount = parseFloat((copySize - commissionAmt).toFixed(6));
+      // SELL via Predexon — market order
+      const orderResp = await predexonPlaceOrder(predexonUserId, {
+        venue: 'polymarket',
+        tokenId,
+        side: 'sell',
+        type: 'market',
+        size: String(size),
+      });
 
-      if (tradeAmount < 1.0) {
-        return { status: 'skipped', errorMsg: 'trade amount too small after commission' };
-      }
-
-      // Worst-case price = market price + user slippage%, snapped up to tick, max 0.99
-      price = parseFloat(
-        Math.min(Math.round((trade.price * (1 + slippageMult)) / tick) * tick, 0.99).toFixed(decimals)
-      );
-      // Estimated shares (for min-size guard only — FAK order passes USD amount)
-      size = parseFloat((tradeAmount / price).toFixed(4));
-
-      if (size < 0.01) {
-        return { status: 'skipped', errorMsg: 'buy size too small' };
-      }
-
-      // FAK market order: pass USD amount, not shares
-      const orderResp = await withClobRetry(() => clobClient.createAndPostMarketOrder(
-        { tokenID: tokenId, side: Side.BUY, amount: tradeAmount, price, feeRateBps } as any,
-        { tickSize: tickSize as any, negRisk: isNegRisk },
-        OrderType.FAK
-      ));
-
-      if (!orderResp.success || !orderResp.orderID) {
-        const errMsg = orderResp.errorMsg || (orderResp as any).error || 'order rejected';
+      if (!orderResp.orderId) {
+        const errMsg = (orderResp as any).error || (orderResp as any).message || 'order rejected';
         if (isNoOrderbook({ message: errMsg })) {
           return { status: 'skipped', errorMsg: 'market closed/no orderbook' };
         }
         return { status: 'failed', errorMsg: errMsg };
       }
-
-      // Collect commission for BUY trades (fire-and-forget)
-      if (config.commission?.adminWalletAddress) {
-        transferCommission(
-          user.encryptedPrivateKey,
-          user.polymarketProxyAddress,
-          commissionAmt,
-          user.id
-        ).catch((err) =>
-          logger.warn(`[copy] Commission transfer failed for user ${user.telegramId}: ${err?.message}`)
-        );
-      }
-
-      return { status: 'filled', orderID: orderResp.orderID, filledPrice: price };
+      // (No commission on SELL)
+      return { status: 'filled', orderID: orderResp.orderId };
     }
 
-    // SELL path: ensure all approvals are set (NegRisk adapter approval required for NegRisk sells)
-    if (isNegRisk) {
-      const { enableTrading } = await import('./deposit');
-      await enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress).catch((err) =>
-        logger.warn(`[copy] enableTrading failed before NegRisk sell: ${err?.message}`)
-      );
+    // BUY path
+    commissionAmt = parseFloat((copySize * COMMISSION_RATE).toFixed(6));
+    const tradeAmount = parseFloat((copySize - commissionAmt).toFixed(6));
+
+    if (tradeAmount < 1.0) {
+      return { status: 'skipped', errorMsg: 'trade amount too small after commission' };
     }
 
-    // SELL path: FAK market order, amount = shares
-    const orderResp = await withClobRetry(() => clobClient.createAndPostMarketOrder(
-      { tokenID: tokenId, side: Side.SELL, amount: size, price, feeRateBps } as any,
-      { tickSize: tickSize as any, negRisk: isNegRisk },
-      OrderType.FAK
-    ));
+    const price = trade.price * (1 + slippageMult);
+    size = parseFloat((tradeAmount / price).toFixed(4));
 
-    if (!orderResp.success || !orderResp.orderID) {
-      const errMsg = orderResp.errorMsg || (orderResp as any).error || 'order rejected';
+    if (size < 0.01) {
+      return { status: 'skipped', errorMsg: 'buy size too small' };
+    }
+
+    // BUY via Predexon — market order (amount = USD to spend)
+    const orderResp = await predexonPlaceOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId,
+      side: 'buy',
+      type: 'market',
+      amount: String(tradeAmount),
+    });
+
+    if (!orderResp.orderId) {
+      const errMsg = (orderResp as any).error || (orderResp as any).message || 'order rejected';
       if (isNoOrderbook({ message: errMsg })) {
         return { status: 'skipped', errorMsg: 'market closed/no orderbook' };
       }
       return { status: 'failed', errorMsg: errMsg };
     }
-    // (No commission on SELL)
-    return { status: 'filled', orderID: orderResp.orderID };
+
+    // Collect commission for BUY trades (fire-and-forget)
+    if (config.commission?.adminWalletAddress) {
+      transferCommission(
+        user.encryptedPrivateKey,
+        user.polymarketProxyAddress,
+        commissionAmt,
+        user.id
+      ).catch((err) =>
+        logger.warn(`[copy] Commission transfer failed for user ${user.telegramId}: ${err?.message}`)
+      );
+    }
+
+    return { status: 'filled', orderID: orderResp.orderId, filledPrice: price };
   } catch (err: any) {
     if (isNoOrderbook(err)) {
       return { status: 'skipped', errorMsg: 'market closed/no orderbook' };
@@ -511,14 +470,11 @@ async function tickForTrader(
   for (const sub of subs) {
     if (balanceCache.has(sub.userId) || balanceFetchFailed.has(sub.userId)) continue;
     try {
-      const client = await createClobClientForUser(
-        sub.user.encryptedPrivateKey,
-        sub.user.encryptedApiKey,
-        sub.user.encryptedApiSecret,
-        sub.user.encryptedPassphrase
-      );
-      const balData = await client.getBalanceAllowance({ asset_type: 'COLLATERAL' as any });
-      balanceCache.set(sub.userId, balData?.balance ? parseFloat(balData.balance) / 1_000_000 : 0);
+      const { getBalance } = await import('./predexon');
+      const predexonId = await ensurePredexonUser(sub.user as any);
+      const balances = await getBalance(predexonId, 'polymarket');
+      const avail = balances.length > 0 ? parseFloat(balances[0].available) : 0;
+      balanceCache.set(sub.userId, avail);
     } catch (err: any) {
       logger.warn(`[copy] Failed to fetch balance for user ${sub.user.telegramId}: ${err?.message}`);
       balanceFetchFailed.add(sub.userId);

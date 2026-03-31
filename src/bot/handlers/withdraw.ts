@@ -3,7 +3,7 @@ import { Markup } from 'telegraf';
 import { ethers } from 'ethers';
 import { logger } from '../../utils/logger';
 import { getUserByTelegramId } from '../../services/user';
-import { getTokenBalance, executeWithdraw, executeBridgeWithdraw } from '../../services/withdraw';
+import { getTokenBalance, executeWithdraw, executeBridgeWithdraw, executePredexonWithdraw } from '../../services/withdraw';
 import { sendPage } from '../../utils/telegram';
 import { ce, EMOJI } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
@@ -521,22 +521,35 @@ async function handleAmountInput(
     const isCrossChainExec = state.chain !== 'polygon';
     const crossChainExec = isCrossChainExec ? CROSS_CHAIN_CONFIG[state.chain] : null;
 
-    const result = isCrossChainExec
-      ? await executeBridgeWithdraw({
-          encryptedPrivateKey: user.encryptedPrivateKey,
-          proxyAddress: user.polymarketProxyAddress,
-          chain: state.chain,
-          recipientAddr: state.destinationAddress!,
-          amount,
-        })
-      : await executeWithdraw({
-          encryptedPrivateKey: user.encryptedPrivateKey,
-          proxyAddress: user.polymarketProxyAddress,
-          tokenAddress: state.tokenAddress!,
-          tokenDecimals: state.tokenDecimals!,
-          destinationAddress: state.destinationAddress!,
-          amount,
-        });
+    // Use Predexon API for withdrawals when predexonUserId is available (managed, no gas needed)
+    let result: { success: boolean; txHash?: string; pending?: boolean; error?: string };
+    if (user.predexonUserId) {
+      result = await executePredexonWithdraw({
+        predexonUserId: user.predexonUserId,
+        venue: 'polymarket',
+        amount,
+        destinationAddress: state.destinationAddress!,
+        chain: 'polygon',
+      });
+    } else {
+      // Legacy fallback for users without Predexon userId
+      result = isCrossChainExec
+        ? await executeBridgeWithdraw({
+            encryptedPrivateKey: user.encryptedPrivateKey,
+            proxyAddress: user.polymarketProxyAddress,
+            chain: state.chain,
+            recipientAddr: state.destinationAddress!,
+            amount,
+          })
+        : await executeWithdraw({
+            encryptedPrivateKey: user.encryptedPrivateKey,
+            proxyAddress: user.polymarketProxyAddress,
+            tokenAddress: state.tokenAddress!,
+            tokenDecimals: state.tokenDecimals!,
+            destinationAddress: state.destinationAddress!,
+            amount,
+          });
+    }
 
     if (result.success) {
       const statusLine = result.pending

@@ -14,6 +14,11 @@ interface Config {
     webhookDomain?: string;
     webhookPort?: number;
   };
+  predexon: {
+    apiKey: string;
+    tradeUrl: string;
+    dataUrl: string;
+  };
   polymarket: {
     host: string;
     chainId: number;
@@ -50,9 +55,7 @@ function validateConfig(): Config {
     'TELEGRAM_BOT_TOKEN',
     'DATABASE_URL',
     'ENCRYPTION_KEY',
-    'POLY_BUILDER_API_KEY',
-    'POLY_BUILDER_SECRET',
-    'POLY_BUILDER_PASSPHRASE',
+    'PREDEXON_API_KEY',
   ];
 
   const missingVars = requiredEnvVars.filter((varName) => !process.env[varName]);
@@ -85,13 +88,18 @@ function validateConfig(): Config {
       webhookDomain: process.env.WEBHOOK_DOMAIN || undefined,
       webhookPort: parseInt(process.env.WEBHOOK_PORT || '8443', 10),
     },
+    predexon: {
+      apiKey: process.env.PREDEXON_API_KEY!,
+      tradeUrl: process.env.PREDEXON_TRADE_URL || 'https://trade.predexon.com',
+      dataUrl: process.env.PREDEXON_DATA_URL || 'https://api.predexon.com',
+    },
     polymarket: {
       host: process.env.POLYMARKET_HOST || 'https://clob.polymarket.com',
       chainId: parseInt(process.env.POLYMARKET_CHAIN_ID || '137', 10),
       builder: {
-        apiKey: process.env.POLY_BUILDER_API_KEY!,
-        secret: process.env.POLY_BUILDER_SECRET!,
-        passphrase: process.env.POLY_BUILDER_PASSPHRASE!,
+        apiKey: process.env.POLY_BUILDER_API_KEY || '',
+        secret: process.env.POLY_BUILDER_SECRET || '',
+        passphrase: process.env.POLY_BUILDER_PASSPHRASE || '',
       },
     },
     database: {
