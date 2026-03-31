@@ -4,7 +4,7 @@ import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
-import { generateAllTimePnlImage } from '../../services/pnlImage';
+import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
 
 const IMG_WALLET      = path.join(__dirname, '../img/wallet.PNG');
 const IMG_PORTFOLIO   = path.join(__dirname, '../img/portfolio.PNG');
@@ -1215,11 +1215,19 @@ export async function handlePnl(ctx: Context): Promise<void> {
     const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
     const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
     const totalPnl        = totalUnrealized + totalRealized;
-    // Use initialValue from API — the authoritative cost basis for active positions
     const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
     const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
     const totalInvested   = activeInvested + closedInvested;
     const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
+
+    // All-time card stats
+    const tradeCount = activePositions.length + closedPositions.length;
+    const allPnls = [
+      ...activePositions.map(p => p.cashPnl),
+      ...closedPositions.map(p => p.realizedPnl),
+    ];
+    const bestTrade  = allPnls.length > 0 ? Math.max(...allPnls) : 0;
+    const worstTrade = allPnls.length > 0 ? Math.min(...allPnls) : 0;
 
     const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
 
@@ -1240,19 +1248,19 @@ export async function handlePnl(ctx: Context): Promise<void> {
     let caption = `${ce(EMOJI.pnlChart, '📊')} <b>All-Time P&amp;L</b>\n\n`;
     caption += `${ce(EMOJI.diamond, '💎')} <b>Total P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${totalPnl.toFixed(2)}</b>\n`;
     caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${percentPnl.toFixed(1)}%\n\n`;
-    caption += `${ce(EMOJI.bag, '💰')} <b>Invested:</b>  $${totalInvested.toFixed(2)}\n`;
-    caption += `${ce(EMOJI.trophy, '🏆')} <b>Portfolio Value:</b>  $${(totalInvested + totalPnl).toFixed(2)}\n`;
-    caption += `${ce(EMOJI.usdc, '💲')} <b>Balance:</b>  $${balance}\n`;
-    caption += `${ce(EMOJI.briefcase, '💼')} <b>Positions:</b>  ${activePositions.length} active`;
+    caption += `${ce(EMOJI.bag, '💰')} <b>Trades:</b>  ${tradeCount}\n`;
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>Best Trade:</b>  +$${bestTrade.toFixed(2)}\n`;
+    caption += `${ce(EMOJI.usdc, '💲')} <b>Worst Trade:</b>  -$${Math.abs(worstTrade).toFixed(2)}\n`;
+    caption += `${ce(EMOJI.briefcase, '💼')} <b>Balance:</b>  $${balance}`;
 
     // Try image generation
     try {
       const imageBuffer = await generateAllTimePnlImage({
         totalPnl,
-        percentPnl,
-        totalInvested,
+        tradeCount,
+        bestTrade,
+        worstTrade,
         balance,
-        positionCount: activePositions.length,
         username: ctx.from?.username,
         displayName,
         profilePhotoBuffer,
@@ -1342,8 +1350,8 @@ export async function handlePortfolioPnl(ctx: Context): Promise<void> {
 
     // Try image generation
     try {
-      const imageBuffer = await generateAllTimePnlImage({
-        totalPnl: unrealizedPnl,
+      const imageBuffer = await generatePortfolioPnlImage({
+        unrealizedPnl,
         percentPnl,
         totalInvested,
         balance,
@@ -1406,14 +1414,17 @@ export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'
       const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
       const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
       const totalPnl        = totalUnrealized + totalRealized;
-      const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
-      const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
-      const totalInvested   = activeInvested + closedInvested;
-      const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
+
+      const tradeCount = activePositions.length + closedPositions.length;
+      const allPnls = [
+        ...activePositions.map(p => p.cashPnl),
+        ...closedPositions.map(p => p.realizedPnl),
+      ];
+      const bestTrade  = allPnls.length > 0 ? Math.max(...allPnls) : 0;
+      const worstTrade = allPnls.length > 0 ? Math.min(...allPnls) : 0;
 
       imageBuffer = await generateAllTimePnlImage({
-        totalPnl, percentPnl, totalInvested, balance,
-        positionCount: activePositions.length,
+        totalPnl, tradeCount, bestTrade, worstTrade, balance,
         username: ctx.from?.username,
         displayName,
         profilePhotoBuffer,
@@ -1423,8 +1434,8 @@ export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'
       const totalInvested = activePositions.reduce((s, p) => s + (p.initialValue), 0);
       const percentPnl    = totalInvested > 0 ? (unrealizedPnl / totalInvested) * 100 : 0;
 
-      imageBuffer = await generateAllTimePnlImage({
-        totalPnl: unrealizedPnl, percentPnl, totalInvested, balance,
+      imageBuffer = await generatePortfolioPnlImage({
+        unrealizedPnl, percentPnl, totalInvested, balance,
         positionCount: activePositions.length,
         username: ctx.from?.username,
         displayName,

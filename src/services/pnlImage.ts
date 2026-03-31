@@ -183,10 +183,10 @@ async function makeCircular(imageBuffer: Buffer, size: number): Promise<Buffer> 
 
 export interface AllTimePnlData {
   totalPnl: number;
-  percentPnl: number;
-  totalInvested: number;
+  tradeCount: number;
+  bestTrade: number;
+  worstTrade: number;
   balance: string;
-  positionCount: number;
   username?: string;
   displayName?: string;
   profilePhotoBuffer?: Buffer;
@@ -226,25 +226,15 @@ export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buf
   const template = pickAlltimeTemplate(data.totalPnl);
   if (!template) return null;
 
-  const totalInvested = data.totalInvested;
-  const posValue = totalInvested + data.totalPnl;
-  const avgCostCents = data.positionCount > 0
-    ? ((totalInvested / data.positionCount) * 100).toFixed(1)
-    : '0.0';
-
   const fieldData: Record<string, string | number> = {
-    title: 'Max Realized',
-    outcome: '',
     displayName: data.displayName || data.username || '',
     pnlAmount: Math.abs(data.totalPnl).toFixed(2),
-    pnlPercent: Math.abs(data.percentPnl).toFixed(1),
-    invested: totalInvested.toFixed(2),
-    positionValue: posValue.toFixed(2),
-    avgCost: avgCostCents,
+    tradeCount: String(data.tradeCount),
+    bestTrade: data.bestTrade.toFixed(2),
+    worstTrade: Math.abs(data.worstTrade).toFixed(2),
     username: data.username || '',
   };
 
-  // eventIconBuffer intentionally omitted — icon slot left empty for all-time card
   return renderImage(template, ALLTIME_CARD_LAYOUT, fieldData, data.profilePhotoBuffer);
 }
 

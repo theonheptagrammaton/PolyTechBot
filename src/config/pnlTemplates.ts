@@ -138,10 +138,19 @@ export const POSITION_LAYOUT: TemplateLayoutConfig = {
 export const ALLTIME_CARD_LAYOUT: TemplateLayoutConfig = {
   ...ALL_TIME_LAYOUT,
   fields: [
-    // "Max Realized" title — pill içi, daha büyük font
-    { key: 'title', x: 1780, y: 300, fontSize: 150, fontWeight: 'bold', color: '#000000', anchor: 'middle', maxWidth: 1200 },
-    // outcome boş — alan gösterilmez ama layout tutarlılığı için tutulur
-    { key: 'outcome', x: 1085, y: 430, fontSize: 70, fontWeight: 'bold', color: '#FFFFFF', anchor: 'middle', maxWidth: 800 },
-    ...ALL_TIME_LAYOUT.fields,
+    // All-time PNL dollar amount (same position as pnlAmount)
+    { key: 'pnlAmount', x: 1600, y: 620, fontSize: 230, fontWeight: 'bold', color: '#000000', anchor: 'start' },
+
+    // Total trade count (same position as invested)
+    { key: 'tradeCount', x: 2120, y: 1140, fontSize: 110, fontWeight: 'bold', color: '#FFFFFF', anchor: 'start' },
+
+    // Best trade profit (same position as positionValue)
+    { key: 'bestTrade', x: 2120, y: 1280, fontSize: 110, fontWeight: 'bold', color: '#FFFFFF', anchor: 'start' },
+
+    // Worst trade loss (same position as avgCost)
+    { key: 'worstTrade', x: 2120, y: 1420, fontSize: 110, fontWeight: 'bold', color: '#FFFFFF', anchor: 'start' },
+
+    // Username
+    { key: 'username', x: 480, y: 1400, fontSize: 80, fontWeight: 'bold', color: '#FFFFFF', anchor: 'start' },
   ],
 };
