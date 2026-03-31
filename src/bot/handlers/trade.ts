@@ -10,7 +10,6 @@ import { generatePositionPnlImage } from '../../services/pnlImage';
 import { getActivePositions, getBalance, invalidatePortfolioCache } from '../../services/portfolio';
 import { fetchProfilePhoto } from '../../utils/telegram';
 import { getUserByTelegramId, ensurePredexonUser } from '../../services/user';
-import { decrypt } from '../../utils/encryption';
 import { enableTrading } from '../../services/deposit';
 import { prisma } from '../../database/prisma';
 import { placeOrder } from '../../services/predexon';
@@ -461,13 +460,6 @@ async function executeTrade(
       );
       return;
     }
-
-    // Decrypt credentials
-
-    const privateKey = decrypt(user.encryptedPrivateKey);
-    const apiKey = decrypt(user.encryptedApiKey);
-    const apiSecret = decrypt(user.encryptedApiSecret);
-    const passphrase = decrypt(user.encryptedPassphrase);
 
     // Step 2+3: Check balance (and trading approvals if needed) in parallel
     await ctx.telegram.editMessageText(
@@ -1471,11 +1463,6 @@ async function executeLimitTrade(
       return;
     }
 
-
-    const privateKey  = decrypt(user.encryptedPrivateKey);
-    const apiKey      = decrypt(user.encryptedApiKey);
-    const apiSecret   = decrypt(user.encryptedApiSecret);
-    const passphrase  = decrypt(user.encryptedPassphrase);
 
     const tokenId = stateTokenId;
     const tickSize = stateTickSize || '0.01';

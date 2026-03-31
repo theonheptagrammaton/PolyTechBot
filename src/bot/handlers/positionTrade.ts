@@ -3,7 +3,6 @@ import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { config } from '../../config';
 import { getActivePositions, ActivePosition } from '../../services/portfolio';
-import { decrypt } from '../../utils/encryption';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
 import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';

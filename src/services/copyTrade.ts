@@ -1,7 +1,6 @@
 import { prisma } from '../database/prisma';
 import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
-import { decrypt } from '../utils/encryption';
 import { config } from '../config';
 import { getActivePositions, ActivePosition } from './portfolio';
 import { transferCommission, COMMISSION_RATE } from './commission';
@@ -85,13 +84,7 @@ export function computeCopySize(
   return parseFloat(target.toFixed(2));
 }
 
-// ─── CLOB Retry Helpers ───────────────────────────────────────────────────────
-
-function isClobRateLimit(err: any): boolean {
-  return err?.status === 429 ||
-    err?.response?.status === 429 ||
-    (typeof err?.message === 'string' && err.message.includes('429'));
-}
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function isNoOrderbook(err: any): boolean {
   const haystack = [
@@ -100,28 +93,6 @@ function isNoOrderbook(err: any): boolean {
     typeof err?.data === 'string' ? err.data : '',
   ].join(' ').toLowerCase();
   return haystack.includes('orderbook') || haystack.includes('no orderbook');
-}
-
-/**
- * Wraps a CLOB API call with exponential-backoff retry on 429 rate-limit errors.
- * Delays: 2s → 4s → 8s (max 3 retries).
- */
-async function withClobRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err: any) {
-      if (isClobRateLimit(err) && attempt < maxRetries) {
-        const delay = Math.min(2000 * Math.pow(2, attempt), 16_000);
-        logger.warn(`[copy] CLOB 429 — retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      throw err;
-    }
-  }
-  /* istanbul ignore next */
-  throw new Error('withClobRetry exhausted');
 }
 
 // ─── Trade Detection ──────────────────────────────────────────────────────────

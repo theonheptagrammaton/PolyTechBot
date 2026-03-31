@@ -1,5 +1,4 @@
 import { logger } from '../utils/logger';
-import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
 import {
   getOrders as predexonGetOrders,
