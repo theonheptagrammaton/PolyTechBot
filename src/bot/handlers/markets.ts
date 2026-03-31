@@ -155,9 +155,8 @@ function buildEventCard(event: Event, pageIdx: number, category: string): string
   const emoji = tagEmoji((event as any).tags) || CATEGORY_META[category]?.emoji || '📊';
   const title = safeTitle(event.title);
 
-  // Top market by volume
-  const topMarket = [...(event.markets || [])]
-    .sort((a, b) => (b.volume24hr || 0) - (a.volume24hr || 0))[0];
+  // First market (original Polymarket order)
+  const topMarket = (event.markets || [])[0];
 
   let priceRow = '';
   if (topMarket) {
@@ -419,10 +418,9 @@ export async function handleEventDetails(
       });
     });
 
+    // Keep original API order (matches Polymarket website ordering)
     const pool = activeMarkets.length > 0 ? activeMarkets : allMarkets;
-    const withVolume = pool.filter((m: any) => (m.volume24hr || 0) > 0);
-    const sortedMarkets = (withVolume.length > 0 ? withVolume : pool)
-      .sort((a: any, b: any) => (b.volume24hr || 0) - (a.volume24hr || 0));
+    const sortedMarkets = pool;
 
     const totalMarkets = sortedMarkets.length;
 
