@@ -1,4 +1,5 @@
 import { Context, Markup } from 'telegraf';
+import path from 'path';
 import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { getUserByTelegramId } from '../../services/user';
@@ -9,6 +10,8 @@ import {
   CASHBACK_RATE,
 } from '../../services/cashback';
 import { logger } from '../../utils/logger';
+
+const CASHBACK_IMAGE = path.join(__dirname, '..', 'img', 'cashback.jpeg');
 
 export async function handleCashbackPage(ctx: Context): Promise<void> {
   try {
@@ -40,6 +43,7 @@ export async function handleCashbackPage(ctx: Context): Promise<void> {
 
     await sendPage(ctx, msg, {
       parse_mode: 'HTML',
+      image_path: CASHBACK_IMAGE,
       ...Markup.inlineKeyboard([
         [Markup.button.callback(claimLabel, 'cashback_claim')],
         [
