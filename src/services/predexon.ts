@@ -150,16 +150,15 @@ export async function getPredexonUser(userId: string): Promise<PredexonUser> {
 
 /**
  * Creates a user and polls until status becomes "ready".
- * Throws if provisioning fails or times out (60s).
+ * Throws if provisioning fails or times out.
  */
-export async function createAndWaitForUser(): Promise<PredexonUser> {
+export async function createAndWaitForUser(maxWaitMs = 180_000): Promise<PredexonUser> {
   const user = await createPredexonUser();
   logger.info(`[predexon] User created: ${user.userId} (status: ${user.status})`);
 
   if (user.status === 'ready') return user;
 
-  const maxWaitMs = 60_000;
-  const pollIntervalMs = 2_000;
+  const pollIntervalMs = 3_000;
   const deadline = Date.now() + maxWaitMs;
 
   while (Date.now() < deadline) {
@@ -177,6 +176,23 @@ export async function createAndWaitForUser(): Promise<PredexonUser> {
   }
 
   throw new Error(`Predexon user provisioning timed out for ${user.userId}`);
+}
+
+/**
+ * Waits for an existing user to become "ready".
+ * Returns the user if ready, null if still provisioning after timeout.
+ */
+export async function waitForUserReady(userId: string, maxWaitMs = 120_000): Promise<PredexonUser | null> {
+  const pollIntervalMs = 3_000;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    const current = await getPredexonUser(userId);
+    if (current.status === 'ready') return current;
+    if (current.status === 'failed') return null;
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  return null;
 }
 
 export async function deletePredexonUser(userId: string): Promise<void> {

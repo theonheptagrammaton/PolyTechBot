@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger';
 import {
+  createPredexonUser,
   createAndWaitForUser,
   getBridgeDeposit,
   type PredexonUser,
@@ -34,12 +35,11 @@ export interface PolymarketSetupResult {
 /**
  * Complete Polymarket account setup via Predexon Trading API.
  *
- * Instead of deploying a Gnosis Safe proxy, creating CLOB API keys,
- * and sending 9 approval transactions, Predexon handles all of this
- * with a single API call. No Builder API quota limits.
- *
- * @param _privateKey - Local EOA private key (no longer needed for setup but kept for signature)
- * @param eoaAddress - Local EOA address for reference
+ * Flow:
+ * 1. Create Predexon user (returns immediately with status "provisioning")
+ * 2. Try to wait up to 180s for "ready" status
+ * 3. If still provisioning, save anyway — wallet will be ready by first trade
+ * 4. Fetch bridge deposit addresses (or fallback to direct Polygon deposit)
  */
 export async function setupPolymarketAccount(
   _privateKey: string,
@@ -48,46 +48,57 @@ export async function setupPolymarketAccount(
   try {
     logger.info('=== Starting Polymarket Account Setup via Predexon ===');
 
-    // Step 1: Create Predexon user (managed wallet + proxy + approvals)
+    // Step 1: Create Predexon user and wait for provisioning
     logger.info('Step 1: Creating Predexon user (managed wallet)...');
-    const predexonUser: PredexonUser = await createAndWaitForUser();
-    logger.info(`✅ Predexon user ready: ${predexonUser.userId}`);
-    logger.info(`   Polymarket wallet: ${predexonUser.polymarketWalletAddress}`);
+    let predexonUser: PredexonUser;
+
+    try {
+      predexonUser = await createAndWaitForUser(180_000); // 3 min max
+      logger.info(`✅ Predexon user ready: ${predexonUser.userId}`);
+    } catch (waitErr: any) {
+      // If timeout, check if user was at least created
+      if (waitErr.message?.includes('timed out')) {
+        // Create a fresh user and return immediately — provisioning continues in background
+        logger.warn('Predexon provisioning slow, creating user and continuing...');
+        predexonUser = await createPredexonUser();
+        logger.info(`⏳ Predexon user created (still provisioning): ${predexonUser.userId}`);
+      } else {
+        throw waitErr;
+      }
+    }
+
+    const walletAddress = predexonUser.polymarketWalletAddress || '';
+    logger.info(`   Polymarket wallet: ${walletAddress || '(pending)'}`);
 
     // Step 2: Get deposit addresses via Predexon Bridge API
-    logger.info('Step 2: Fetching deposit addresses via Predexon Bridge...');
     let depositAddresses: DepositAddresses;
-    try {
-      const bridgeInfo = await getBridgeDeposit(predexonUser.polymarketWalletAddress);
-      depositAddresses = {
-        evm: bridgeInfo.depositAddresses.evm,
-        svm: bridgeInfo.depositAddresses.solana,
-        btc: bridgeInfo.depositAddresses.bitcoin,
-        tvm: '', // Predexon bridge may not support Tron; fallback empty
-      };
-      logger.info('✅ Deposit addresses fetched');
-      logger.info(`   EVM: ${depositAddresses.evm}`);
-      logger.info(`   Solana: ${depositAddresses.svm}`);
-      logger.info(`   Bitcoin: ${depositAddresses.btc}`);
-    } catch (bridgeErr) {
-      // Bridge is optional — user can still deposit directly to Polygon wallet
-      logger.warn('Bridge deposit addresses unavailable, using direct Polygon deposit:', bridgeErr);
-      depositAddresses = {
-        evm: predexonUser.polymarketWalletAddress,
-        svm: '',
-        btc: '',
-        tvm: '',
-      };
+    if (walletAddress) {
+      logger.info('Step 2: Fetching deposit addresses via Predexon Bridge...');
+      try {
+        const bridgeInfo = await getBridgeDeposit(walletAddress);
+        depositAddresses = {
+          evm: bridgeInfo.depositAddresses.evm,
+          svm: bridgeInfo.depositAddresses.solana,
+          btc: bridgeInfo.depositAddresses.bitcoin,
+          tvm: '',
+        };
+        logger.info('✅ Deposit addresses fetched');
+      } catch (bridgeErr) {
+        logger.warn('Bridge deposit addresses unavailable, using direct Polygon deposit:', bridgeErr);
+        depositAddresses = { evm: walletAddress, svm: '', btc: '', tvm: '' };
+      }
+    } else {
+      // Wallet not ready yet — deposit addresses will be fetched later
+      depositAddresses = { evm: '', svm: '', btc: '', tvm: '' };
     }
 
     logger.info('=== Polymarket Account Setup Complete (via Predexon) ===');
 
     return {
       predexonUserId: predexonUser.userId,
-      proxyAddress: predexonUser.polymarketWalletAddress,
+      proxyAddress: walletAddress,
       eoaAddress: eoaAddress || '',
       depositAddresses,
-      // Legacy fields — new users don't use CLOB credentials
       apiKey: 'predexon-managed',
       apiSecret: 'predexon-managed',
       passphrase: 'predexon-managed',
@@ -100,10 +111,7 @@ export async function setupPolymarketAccount(
 
 /**
  * Get existing proxy address — for Predexon users this is stored in DB.
- * Returns null if not found (triggers lazy migration).
  */
 export async function getExistingProxyAddress(_privateKey: string): Promise<string | null> {
-  // For Predexon users, the proxy address is always stored at creation time.
-  // This function is kept for backward compatibility with old code paths.
   return null;
 }
