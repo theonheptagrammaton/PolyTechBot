@@ -68,6 +68,8 @@ function ensureFontInstalled(): void {
 
 const greenPool: Buffer[] = [];
 const redPool: Buffer[] = [];
+let alltimeGreen: Buffer | null = null;
+let alltimeRed: Buffer | null = null;
 let poolLoaded = false;
 
 function loadTemplatePools(): void {
@@ -75,6 +77,8 @@ function loadTemplatePools(): void {
   poolLoaded = true;
   greenPool.length = 0;
   redPool.length = 0;
+  alltimeGreen = null;
+  alltimeRed = null;
 
   if (!fs.existsSync(TEMPLATE_DIR)) {
     logger.warn(`[pnlImage] Template directory not found: ${TEMPLATE_DIR}`);
@@ -89,6 +93,16 @@ function loadTemplatePools(): void {
     const lower = file.toLowerCase();
     const buf = fs.readFileSync(path.join(TEMPLATE_DIR, file));
 
+    // Dedicated all-time templates (used for main page & portfolio)
+    if (lower === 'alltimegreen.png') {
+      alltimeGreen = buf;
+      continue;
+    }
+    if (lower === 'alltimered.png') {
+      alltimeRed = buf;
+      continue;
+    }
+
     if (lower.includes('green')) {
       greenPool.push(buf);
     } else if (lower.includes('red')) {
@@ -96,14 +110,23 @@ function loadTemplatePools(): void {
     }
   }
 
-  logger.info(`[pnlImage] Loaded ${greenPool.length} green + ${redPool.length} red templates`);
+  logger.info(`[pnlImage] Loaded ${greenPool.length} green + ${redPool.length} red templates, alltime: green=${!!alltimeGreen} red=${!!alltimeRed}`);
 }
 
+/** Pick a random template from the pool (for position PNL cards). */
 function pickTemplate(pnlValue: number): Buffer | null {
   loadTemplatePools();
   const pool = pnlValue >= 0 ? greenPool : redPool;
   if (pool.length === 0) return null;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/** Pick the dedicated all-time template, falling back to random pool. */
+function pickAlltimeTemplate(pnlValue: number): Buffer | null {
+  loadTemplatePools();
+  const dedicated = pnlValue >= 0 ? alltimeGreen : alltimeRed;
+  if (dedicated) return dedicated;
+  return pickTemplate(pnlValue);
 }
 
 
@@ -200,7 +223,7 @@ export interface PositionPnlData {
 
 export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buffer | null> {
   ensureFontInstalled();
-  const template = pickTemplate(data.totalPnl);
+  const template = pickAlltimeTemplate(data.totalPnl);
   if (!template) return null;
 
   const totalInvested = data.totalInvested;
@@ -227,7 +250,7 @@ export async function generateAllTimePnlImage(data: AllTimePnlData): Promise<Buf
 
 export async function generatePortfolioPnlImage(data: PortfolioPnlData): Promise<Buffer | null> {
   ensureFontInstalled();
-  const template = pickTemplate(data.unrealizedPnl);
+  const template = pickAlltimeTemplate(data.unrealizedPnl);
   if (!template) return null;
 
   const totalInvested = data.totalInvested;
