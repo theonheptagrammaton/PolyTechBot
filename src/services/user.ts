@@ -131,6 +131,36 @@ export async function getCompleteUserInfo(user: User): Promise<UserWithCredentia
       await ensurePredexonUser(user);
     }
 
+    // Provisioning recovery: predexonUserId exists but proxy address was never saved
+    if (user.predexonUserId && !user.polymarketProxyAddress) {
+      const { waitForUserReady, getBridgeDeposit } = await import('./predexon');
+      const ready = await waitForUserReady(user.predexonUserId, 10_000).catch(() => null);
+      if (ready?.polymarketWalletAddress) {
+        let evm = ready.polymarketWalletAddress;
+        let svm = '';
+        let btc = '';
+        try {
+          const bridge = await getBridgeDeposit(ready.polymarketWalletAddress);
+          evm = (bridge as any).depositAddresses?.evm || evm;
+          svm = (bridge as any).depositAddresses?.solana || '';
+          btc = (bridge as any).depositAddresses?.bitcoin || '';
+        } catch { /* use proxy address directly */ }
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            polymarketProxyAddress: ready.polymarketWalletAddress,
+            depositAddressEvm: evm,
+            depositAddressSvm: svm,
+            depositAddressBtc: btc,
+          },
+        });
+        await invalidateUserCache(user);
+        user = { ...user, polymarketProxyAddress: ready.polymarketWalletAddress,
+          depositAddressEvm: evm, depositAddressSvm: svm, depositAddressBtc: btc };
+        logger.info(`[user] Provisioning recovery successful for ${user.id}`);
+      }
+    }
+
     // For backwards compatibility, if proxy address is null, we should create it
     let polymarketProxyAddress = user.polymarketProxyAddress;
     if (!polymarketProxyAddress) {

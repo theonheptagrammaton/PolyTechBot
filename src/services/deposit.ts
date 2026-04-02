@@ -343,8 +343,14 @@ export async function depositToPolymarket(
  */
 export async function enableTrading(
   encryptedPrivateKey: string,
-  proxyAddress?: string
+  proxyAddress?: string,
+  predexonUserId?: string
 ): Promise<{ success: boolean; txHash?: string; alreadyEnabled?: boolean }> {
+  if (predexonUserId) {
+    logger.info('[deposit] enableTrading: Predexon user — skipping (Predexon manages approvals)');
+    return { success: true, alreadyEnabled: true };
+  }
+
   try {
     logger.info('[Trading] Enabling trading with all required approvals...');
 

@@ -1049,7 +1049,7 @@ async function executePositionOrder(
 
     // Transfer 1% commission from estimated sell proceeds (fire-and-forget)
     const sellCommissionUsdc = price * size * COMMISSION_RATE;
-    transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, sellCommissionUsdc, user.id)
+    transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, sellCommissionUsdc, user.id, user.predexonUserId ?? undefined)
       .catch((feeErr) => {
         logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);
       });
@@ -1078,7 +1078,7 @@ async function executePositionOrder(
 
   // Transfer 1% commission after successful order (fire-and-forget)
   const buyCommissionUsdc = price * size * COMMISSION_RATE;
-  transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, buyCommissionUsdc, user.id)
+  transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, buyCommissionUsdc, user.id, user.predexonUserId ?? undefined)
     .catch((feeErr) => {
       logger.warn('[positionTrade] Commission transfer after buy failed (non-fatal):', feeErr);
     });

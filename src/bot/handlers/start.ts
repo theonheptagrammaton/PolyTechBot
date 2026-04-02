@@ -481,8 +481,10 @@ async function sendWalletSuccess(ctx: Context, result: UserWithCredentials): Pro
     `${ce(EMOJI.cherry, '🎉')} <b>Your Account is Ready!</b>\n\n` +
     `${ce(EMOJI.refCode, '🔑')} <b>Private Key — Save it now:</b>\n` +
     `<code>${result.walletInfo.privateKey}</code>\n\n` +
-    `${ce(EMOJI.loading, '⚠️')} <b>This key is shown only once.</b>\n` +
-    `Never share it with anyone — losing it means losing access to your funds.\n\n` +
+    `${ce(EMOJI.loading, '⚠️')} <b>Save this key — it is shown only once.</b>\n` +
+    `This is your system wallet key used for on-chain operations. ` +
+    `Your trading funds are held in your platform account and are NOT stored in this wallet.\n` +
+    `<b>Never share this key with anyone.</b>\n\n` +
     `Use the menu below to deposit and start trading.`;
 
   await ctx.reply(successMessage, { parse_mode: 'HTML' });

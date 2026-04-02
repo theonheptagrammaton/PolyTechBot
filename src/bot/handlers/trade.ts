@@ -482,7 +482,7 @@ async function executeTrade(
     ).catch(() => '0');
 
     const enablePromise = !user.tradingEnabled
-      ? enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress)
+      ? enableTrading(user.encryptedPrivateKey, user.polymarketProxyAddress, user.predexonUserId ?? undefined)
       : null;
 
     const [balanceStr, enableResult] = await Promise.all([
@@ -779,7 +779,7 @@ async function executeTrade(
 
     // Collect platform commission (1%) after successful trade — fire-and-forget
     if (config.commission?.adminWalletAddress) {
-      transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionAmt, user.id)
+      transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionAmt, user.id, user.predexonUserId ?? undefined)
         .catch((err) => logger.warn(`[trade] Commission transfer failed for user ${telegramId}:`, err?.message || err));
     }
 
@@ -1511,7 +1511,7 @@ async function executeLimitTrade(
 
     // Commission transfer (fire-and-forget) — same pattern as market orders
     if (config.commission?.adminWalletAddress) {
-      transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionAmt, user.id)
+      transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, commissionAmt, user.id, user.predexonUserId ?? undefined)
         .catch((err) => logger.warn(`[limit] Commission transfer failed for user ${telegramId}: ${err?.message}`));
     }
 

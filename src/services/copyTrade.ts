@@ -242,6 +242,7 @@ async function executeCopyOrder(
     encryptedPassphrase: string;
     polymarketProxyAddress: string | null;
     slippageTolerance: number;
+    predexonUserId?: string | null;
   },
   trade: DetectedTrade,
   copySize: number,
@@ -357,7 +358,8 @@ async function executeCopyOrder(
         user.encryptedPrivateKey,
         user.polymarketProxyAddress,
         commissionAmt,
-        user.id
+        user.id,
+        user.predexonUserId ?? undefined
       ).catch((err) =>
         logger.warn(`[copy] Commission transfer failed for user ${user.telegramId}: ${err?.message}`)
       );
@@ -424,6 +426,7 @@ async function tickForTrader(
           encryptedPassphrase: true,
           polymarketProxyAddress: true,
           slippageTolerance: true,
+          predexonUserId: true,
         },
       },
     },
@@ -827,6 +830,7 @@ async function checkTpSlPositions(
     encryptedPassphrase: string;
     polymarketProxyAddress: string | null;
     slippageTolerance: number;
+    predexonUserId?: string | null;
   },
   sub: {
     subscriptionId: string;

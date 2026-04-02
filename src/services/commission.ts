@@ -58,12 +58,63 @@ export function transferCommission(
   encryptedPrivateKey: string,
   proxyAddress: string,       // user's Gnosis Safe proxy address
   commissionUsdc: number,     // human-readable e.g. 0.10 for $0.10
-  traderId?: string           // DB user ID — used to credit referral earnings
+  traderId?: string,          // DB user ID — used to credit referral earnings
+  predexonUserId?: string     // if set, use Predexon withdraw path instead of Safe signing
 ): Promise<{ success: boolean; txHash?: string }> {
+  const adminWallet = config.commission.adminWalletAddress;
+
+  // Predexon-managed wallets: use Predexon withdraw API (no EOA Safe signing needed)
+  if (predexonUserId && adminWallet) {
+    return _transferCommissionPredexon(predexonUserId, commissionUsdc, adminWallet, traderId);
+  }
+
   // Serialize per-proxy to prevent Safe nonce races when two trades fire simultaneously
   return enqueueForProxy(proxyAddress, () =>
     _transferCommission(encryptedPrivateKey, proxyAddress, commissionUsdc, traderId)
   );
+}
+
+async function _transferCommissionPredexon(
+  predexonUserId: string,
+  commissionUsdc: number,
+  adminWallet: string,
+  traderId?: string,
+): Promise<{ success: boolean; txHash?: string }> {
+  if (commissionUsdc < 0.01) {
+    logger.info(`[commission] Predexon: amount $${commissionUsdc.toFixed(6)} too small — skipping`);
+    return { success: true };
+  }
+
+  try {
+    const { withdraw } = await import('./predexon');
+    const result = await withdraw(predexonUserId, {
+      venue: 'polymarket',
+      amount: commissionUsdc.toFixed(6),
+      destinationAddress: adminWallet,
+      chain: 'polygon',
+    });
+
+    logger.info(`[commission] Predexon commission $${commissionUsdc.toFixed(4)} → ${adminWallet.substring(0, 10)}... tx: ${result.transactionHash}`);
+
+    prisma.commissionLog.create({ data: { userId: traderId ?? null, amount: commissionUsdc } })
+      .catch((err) => logger.warn('[commission] Failed to log commission:', err?.message || err));
+
+    if (traderId) {
+      creditReferralCommission(traderId, commissionUsdc).catch((err) => {
+        logger.warn('[commission] creditReferralCommission failed:', err?.message || err);
+      });
+      import('./cashback').then(({ creditCashback }) => {
+        creditCashback(traderId, commissionUsdc).catch((err) => {
+          logger.warn('[commission] creditCashback failed:', err?.message || err);
+        });
+      });
+    }
+
+    return { success: true, txHash: result.transactionHash };
+  } catch (error: any) {
+    logger.error(`[commission] Predexon commission failed: ${error?.message ?? String(error)}`);
+    return { success: false };
+  }
 }
 
 async function _transferCommission(
