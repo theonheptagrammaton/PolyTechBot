@@ -19,7 +19,10 @@ const RPC_URLS = [
   'https://1rpc.io/matic',
 ];
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-const ERC20_ABI = ['function transfer(address to, uint256 amount) returns (bool)'];
+const ERC20_ABI = [
+  'function transfer(address to, uint256 amount) returns (bool)',
+  'function balanceOf(address account) view returns (uint256)',
+];
 
 export interface ReferralStats {
   code: string;
@@ -246,7 +249,7 @@ export interface ClaimResult {
   success: boolean;
   amount?: number;
   txHash?: string;
-  pending?: boolean;
+  insufficientTreasury?: boolean;
   error?: string;
 }
 
@@ -273,13 +276,10 @@ export async function claimReferralEarnings(userId: string, proxyAddress: string
   }
 
   if (!treasuryKey) {
-    // No treasury configured — notify admin, mark as pending
-    logger.warn(`[referral] REFERRAL_TREASURY_KEY not set. Manual payout needed for user ${userId}: $${claimable.toFixed(2)}`);
+    logger.warn(`[referral] REFERRAL_TREASURY_KEY not set. Payout blocked for user ${userId}: $${claimable.toFixed(2)}`);
     return {
       success: false,
-      pending: true,
-      amount: claimable,
-      error: 'Automatic payout is currently unavailable. Your earnings have been noted and will be processed manually within 24 hours.',
+      error: 'Ödeme sistemi henüz yapılandırılmadı. Lütfen destek ile iletişime geçin.',
     };
   }
 
@@ -304,14 +304,37 @@ export async function claimReferralEarnings(userId: string, proxyAddress: string
     const usdcContract = new ethers.Contract(USDC_E_ADDRESS, ERC20_ABI, treasury);
 
     const amountRaw = Math.floor(claimable * 1e6); // 6 decimals
+    const treasuryBalance: ethers.BigNumber = await usdcContract.balanceOf(treasury.address);
+    if (treasuryBalance.lt(amountRaw)) {
+      // Rollback the deducted amount before returning
+      await prisma.user.update({
+        where: { id: userId },
+        data: { referralClaimable: { increment: claimable } },
+      }).catch((rollbackErr) => {
+        logger.error(`[referral] CRITICAL: Balance check rollback failed for user ${userId}`, rollbackErr);
+      });
+      logger.warn(`[referral] Treasury balance insufficient: have ${treasuryBalance.toString()}, need ${amountRaw}`);
+      return {
+        success: false,
+        insufficientTreasury: true,
+        amount: claimable,
+        error: 'Şu anda ödeme yapılamıyor. Lütfen daha sonra tekrar deneyin.',
+      };
+    }
 
     logger.info(`[referral] Sending $${claimable.toFixed(2)} USDC.e to ${proxyAddress}`);
+
+    const feeData = await provider.getFeeData();
+    const priorityFee = feeData.maxPriorityFeePerGas ?? ethers.utils.parseUnits('30', 'gwei');
+    const baseFee = feeData.lastBaseFeePerGas ?? ethers.utils.parseUnits('50', 'gwei');
+    // maxFeePerGas = 2× baseFee + tip (EIP-1559 standard headroom)
+    const maxFee = baseFee.mul(2).add(priorityFee);
 
     const tx = await Promise.race([
       usdcContract.transfer(proxyAddress, amountRaw, {
         gasLimit: 80_000,
-        maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
-        maxFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+        maxPriorityFeePerGas: priorityFee,
+        maxFeePerGas: maxFee,
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('send timeout after 20s')), 20_000)

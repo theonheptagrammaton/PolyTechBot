@@ -339,6 +339,20 @@ export async function sendImageBufferPage(
 }
 
 /**
+ * Sends a message to all configured admin users.
+ * Silently ignores delivery failures for individual admins.
+ */
+export async function notifyAdmins(
+  telegram: { sendMessage: (chatId: string | number, text: string, extra?: any) => Promise<any> },
+  message: string,
+): Promise<void> {
+  const { config } = await import('../config');
+  for (const adminId of config.telegram.adminUserIds) {
+    await telegram.sendMessage(adminId, message, { parse_mode: 'HTML' }).catch(() => {});
+  }
+}
+
+/**
  * Safely answers a callback query, ignoring "query is too old" errors.
  */
 export async function safeAnswerCbQuery(ctx: Context, text?: string): Promise<void> {

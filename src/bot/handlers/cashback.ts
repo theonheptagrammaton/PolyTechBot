@@ -1,6 +1,6 @@
 import { Context, Markup } from 'telegraf';
 import path from 'path';
-import { sendPage } from '../../utils/telegram';
+import { sendPage, notifyAdmins } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { getUserByTelegramId } from '../../services/user';
 import {
@@ -95,13 +95,9 @@ export async function handleCashbackClaim(ctx: Context): Promise<void> {
           [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
         ]),
       });
-    } else if (result.pending) {
-      const msg =
-        `⏳ <b>Withdrawal Pending</b>\n\n` +
-        `Your cashback of <b>$${result.amount?.toFixed(2)}</b> has been queued.\n\n` +
-        `${esc(result.error ?? '')}`;
-
-      await sendPage(ctx, msg, {
+    } else if (result.insufficientTreasury) {
+      await notifyAdmins(ctx.telegram, `⚠️ <b>Treasury Yetersiz — Cashback Claim</b>\nKullanıcı: ${telegramId}\nTutar: $${result.amount?.toFixed(2)}`);
+      await sendPage(ctx, `❌ ${esc(result.error ?? '')}`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('💰 Back to Cashback', 'cashback_page')],

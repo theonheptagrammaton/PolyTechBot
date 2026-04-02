@@ -1,6 +1,6 @@
 import path from 'path';
 import { Context, Markup } from 'telegraf';
-import { sendPage } from '../../utils/telegram';
+import { sendPage, notifyAdmins } from '../../utils/telegram';
 
 const IMG_REFERRAL = path.join(__dirname, '../img/referral.PNG');
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
@@ -127,13 +127,9 @@ export async function handleReferralClaim(ctx: Context): Promise<void> {
           [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
         ]),
       });
-    } else if (result.pending) {
-      const msg =
-        ce(EMOJI.loading, '⏳') + ` <b>Withdrawal Pending</b>\n\n` +
-        `Your earnings of <b>$${result.amount?.toFixed(2)}</b> have been queued.\n\n` +
-        `${result.error}`;
-
-      await sendPage(ctx, msg, {
+    } else if (result.insufficientTreasury) {
+      await notifyAdmins(ctx.telegram, `⚠️ <b>Treasury Yetersiz — Referral Claim</b>\nKullanıcı: ${telegramId}\nTutar: $${result.amount?.toFixed(2)}`);
+      await sendPage(ctx, `❌ ${result.error}`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('👥 Back to Referrals', 'referral_hub')],
