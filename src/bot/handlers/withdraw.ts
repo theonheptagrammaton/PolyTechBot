@@ -21,8 +21,8 @@ const CROSS_CHAIN_CONFIG: Record<string, {
   bsc:      { label: 'Binance Smart Chain',  icon: '🟡', addressType: 'evm', backAction: 'wd_chain_bsc' },
 };
 
-// USDC.e on Polygon (source token for all cross-chain withdrawals)
-const USDC_E = { address: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', decimals: 6, symbol: 'USDC.e' };
+// Native USDC on Polygon (source token for all withdrawals — Predexon-managed wallets hold native USDC)
+const NATIVE_USDC = { address: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', decimals: 6, symbol: 'USDC' };
 
 // ─── Token config ───────────────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
   try {
     await ctx.answerCbQuery();
 
-    // ── Cross-chain: fetch USDC.e balance, go straight to address input ──────
+    // ── Cross-chain: fetch USDC balance, go straight to address input ──────
     if (chain !== 'polygon') {
       const crossChain = CROSS_CHAIN_CONFIG[chain];
       if (!crossChain) return;
@@ -129,17 +129,17 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
       try {
         const { formatted } = await getTokenBalance(
           user.polymarketProxyAddress,
-          USDC_E.address,
-          USDC_E.decimals,
+          NATIVE_USDC.address,
+          NATIVE_USDC.decimals,
         );
         balance = formatted;
       } catch (e) {
-        logger.warn('[withdraw] USDC.e balance fetch failed:', e);
+        logger.warn('[withdraw] USDC balance fetch failed:', e);
       }
 
       const text =
         `${crossChain.icon} *Withdraw USDC → ${crossChain.label}*\n\n` +
-        `💵 *Available:* $${balance} USDC.e\n\n` +
+        `💵 *Available:* $${balance} USDC\n\n` +
         `📍 Please enter your ${crossChain.label} destination address:`;
 
       const keyboard = Markup.inlineKeyboard([
@@ -170,10 +170,10 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
 
       withdrawState.set(telegramId, {
         chain: chain as 'solana' | 'ethereum' | 'bsc',
-        token: 'USDC.e',
-        tokenAddress: USDC_E.address,
-        tokenDecimals: USDC_E.decimals,
-        tokenSymbol: USDC_E.symbol,
+        token: 'USDC',
+        tokenAddress: NATIVE_USDC.address,
+        tokenDecimals: NATIVE_USDC.decimals,
+        tokenSymbol: NATIVE_USDC.symbol,
         tokenAmountLabel: 'USD',
         balance,
         chatId,
@@ -184,7 +184,7 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
       return;
     }
 
-    // ── Polygon: direct USDC.e withdrawal (same UX as cross-chain) ──────────
+    // ── Polygon: direct USDC withdrawal (same UX as cross-chain) ──────────
     const telegramIdPoly = ctx.from?.id.toString();
     if (!telegramIdPoly) return;
 
@@ -201,18 +201,18 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
     try {
       const { formatted } = await getTokenBalance(
         userPoly.polymarketProxyAddress,
-        USDC_E.address,
-        USDC_E.decimals,
+        NATIVE_USDC.address,
+        NATIVE_USDC.decimals,
       );
       balancePoly = formatted;
     } catch (e) {
-      logger.warn('[withdraw] Polygon USDC.e balance fetch failed:', e);
+      logger.warn('[withdraw] Polygon USDC balance fetch failed:', e);
     }
 
     const polyText =
-      `🟢 *Withdraw USDC.e — Polygon*\n\n` +
-      `💵 *Available:* $${balancePoly} USDC.e\n` +
-      `🌐 *Token:*\n\`${USDC_E.address}\`\n\n` +
+      `🟢 *Withdraw USDC — Polygon*\n\n` +
+      `💵 *Available:* $${balancePoly} USDC\n` +
+      `🌐 *Token:*\n\`${NATIVE_USDC.address}\`\n\n` +
       `📍 Please enter your Polygon wallet address:`;
 
     const polyKeyboard = Markup.inlineKeyboard([
@@ -243,10 +243,10 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
 
     withdrawState.set(telegramIdPoly, {
       chain: 'polygon',
-      token: 'USDC.e',
-      tokenAddress: USDC_E.address,
-      tokenDecimals: USDC_E.decimals,
-      tokenSymbol: USDC_E.symbol,
+      token: 'USDC',
+      tokenAddress: NATIVE_USDC.address,
+      tokenDecimals: NATIVE_USDC.decimals,
+      tokenSymbol: NATIVE_USDC.symbol,
       tokenAmountLabel: 'USD',
       balance: balancePoly,
       chatId: chatIdPoly,
@@ -397,7 +397,7 @@ async function handleAddressInput(
     if (!isValidSolanaAddress(address)) {
       await editWithdrawMessage(ctx, state,
         `${crossChain.icon} <b>Withdraw USDC → ${crossChain.label}</b>\n\n` +
-        `💵 <b>Available:</b> $${state.balance} USDC.e\n\n` +
+        `💵 <b>Available:</b> $${state.balance} USDC\n\n` +
         `❌ <b>Invalid Solana address.</b> Please enter a valid Solana wallet address:`,
         [[Markup.button.callback('← Back', 'withdraw_menu')]]
       );
@@ -410,8 +410,8 @@ async function handleAddressInput(
       const backBtn = Markup.button.callback('← Back', 'withdraw_menu');
       const label = isCrossChain
         ? `${crossChain!.icon} <b>Withdraw USDC → ${crossChain!.label}</b>`
-        : `🟢 <b>Withdraw USDC.e — Polygon</b>`;
-      const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC.e`;
+        : `🟢 <b>Withdraw USDC — Polygon</b>`;
+      const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC`;
       await editWithdrawMessage(ctx, state,
         `${label}\n\n${balanceLine}\n\n❌ <b>Invalid address.</b> Please enter a valid EVM wallet address:`,
         [[backBtn]]
@@ -433,8 +433,8 @@ async function handleAddressInput(
 
   const headerLine = crossChainAddrDone
     ? `${crossChainAddrDone.icon} <b>Withdraw USDC → ${crossChainAddrDone.label}</b>`
-    : `🟢 <b>Withdraw USDC.e — Polygon</b>`;
-  const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC.e`;
+    : `🟢 <b>Withdraw USDC — Polygon</b>`;
+  const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC`;
 
   await editWithdrawMessage(ctx, state,
     `${headerLine}\n\n` +
@@ -472,8 +472,8 @@ async function handleAmountInput(
   const crossChainAmt = isCrossChainAmt ? CROSS_CHAIN_CONFIG[state.chain] : null;
   const headerAmt = crossChainAmt
     ? `${crossChainAmt.icon} <b>Withdraw USDC → ${crossChainAmt.label}</b>`
-    : `🟢 <b>Withdraw USDC.e — Polygon</b>`;
-  const balanceAmt = `💵 <b>Available:</b> $${state.balance} USDC.e`;
+    : `🟢 <b>Withdraw USDC — Polygon</b>`;
+  const balanceAmt = `💵 <b>Available:</b> $${state.balance} USDC`;
 
   if (isNaN(amount) || amount <= 0) {
     await editWithdrawMessage(ctx, state,
@@ -529,7 +529,7 @@ async function handleAmountInput(
         venue: 'polymarket',
         amount,
         destinationAddress: state.destinationAddress!,
-        chain: 'polygon',
+        chain: state.chain,
       });
     } else {
       // Legacy fallback for users without Predexon userId

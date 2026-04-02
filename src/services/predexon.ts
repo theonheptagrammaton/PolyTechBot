@@ -84,7 +84,7 @@ export interface PredexonWithdrawParams {
   venue: 'polymarket' | 'predict';
   amount: string;
   destinationAddress: string;
-  chain: 'polygon' | 'bsc';
+  chain: string;
 }
 
 export interface PredexonWithdrawResult {

@@ -257,7 +257,7 @@ export async function executePredexonWithdraw(params: {
   venue: 'polymarket' | 'predict';
   amount: number;
   destinationAddress: string;
-  chain: 'polygon' | 'bsc';
+  chain: string;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
     const { withdraw } = await import('./predexon');
