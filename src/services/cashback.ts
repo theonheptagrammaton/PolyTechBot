@@ -158,7 +158,9 @@ export async function claimCashback(userId: string, proxyAddress: string): Promi
     logger.info(`[cashback] Sending $${claimable.toFixed(2)} USDC.e to ${proxyAddress}`);
 
     const feeData = await provider.getFeeData();
-    const priorityFee = feeData.maxPriorityFeePerGas ?? ethers.utils.parseUnits('30', 'gwei');
+    const minPriority = ethers.utils.parseUnits('30', 'gwei');
+    const rawPriority = feeData.maxPriorityFeePerGas ?? minPriority;
+    const priorityFee = rawPriority.lt(minPriority) ? minPriority : rawPriority;
     const baseFee = feeData.lastBaseFeePerGas ?? ethers.utils.parseUnits('50', 'gwei');
     const maxFee = baseFee.mul(2).add(priorityFee);
 

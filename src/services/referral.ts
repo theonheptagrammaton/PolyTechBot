@@ -325,9 +325,10 @@ export async function claimReferralEarnings(userId: string, proxyAddress: string
     logger.info(`[referral] Sending $${claimable.toFixed(2)} USDC.e to ${proxyAddress}`);
 
     const feeData = await provider.getFeeData();
-    const priorityFee = feeData.maxPriorityFeePerGas ?? ethers.utils.parseUnits('30', 'gwei');
+    const minPriority = ethers.utils.parseUnits('30', 'gwei');
+    const rawPriority = feeData.maxPriorityFeePerGas ?? minPriority;
+    const priorityFee = rawPriority.lt(minPriority) ? minPriority : rawPriority;
     const baseFee = feeData.lastBaseFeePerGas ?? ethers.utils.parseUnits('50', 'gwei');
-    // maxFeePerGas = 2× baseFee + tip (EIP-1559 standard headroom)
     const maxFee = baseFee.mul(2).add(priorityFee);
 
     const tx = await Promise.race([
