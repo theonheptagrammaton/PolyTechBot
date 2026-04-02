@@ -610,23 +610,23 @@ export function mainMenuKeyboard() {
       Markup.button.callback('🤝 Copy Trade', 'copy_list'),
     ],
     [
-      Markup.button.callback('📁 Portfolio', 'portfolio'),
-      Markup.button.callback('👛 Wallet', 'wallet_page'),
+      Markup.button.callback('💼 Portfolio', 'portfolio'),
+      Markup.button.callback('🏦 Wallet', 'wallet_page'),
     ],
     [
-      Markup.button.callback('🔓 Smart Wallets', 'show_wallet'),
+      Markup.button.callback('🧠 Smart Traders', 'show_wallet'),
       Markup.button.callback('🔄 Refresh', 'back_to_menu'),
     ],
     [
-      Markup.button.callback('💰 Limit Orders', 'portfolio_orders_1'),
+      Markup.button.callback('📊 Limit Orders', 'portfolio_orders_1'),
       Markup.button.callback('👥 Referral', 'referral_hub'),
     ],
     [
-      Markup.button.callback('💼 Active Positions', 'portfolio_open_1'),
+      Markup.button.callback('📁 Positions', 'portfolio_open_1'),
       Markup.button.callback('⚙️ Settings', 'settings_menu'),
     ],
     [
-      Markup.button.callback('📊 P&L', 'pnl_alltime'),
+      Markup.button.callback('💵 PnL', 'pnl_alltime'),
       Markup.button.callback('💰 Deposit', 'wallet_page'),
     ],
   ]);
