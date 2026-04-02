@@ -898,6 +898,10 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
     if (!user) { await ctx.reply('❌ User not found.'); return; }
 
     try {
+      // Grab pos from cache BEFORE deleting it (needed for PNL card avgPrice)
+      const cachedList = positionListCache.get(telegramId) ?? [];
+      const soldPos = cachedList.find(p => p.asset === state.assetId) ?? null;
+
       const result = await executePositionOrder(user, state.assetId, state.conditionId, state.negRisk, 'sell', state.price, state.size);
 
       // Invalidate caches so next positions view is fresh
@@ -924,6 +928,44 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
         await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...doneKeyboard });
       } catch {
         await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+      }
+
+      // Fire-and-forget: send PNL card after successful sell
+      if (soldPos) {
+        (async () => {
+          try {
+            const avgPrice = soldPos.avgPrice ?? 0;
+            const invested = state.size! * avgPrice;
+            const proceeds = state.size! * state.price!;
+            const cashPnl = proceeds - invested;
+            const percentPnl = invested > 0 ? (cashPnl / invested) * 100 : 0;
+
+            const profilePhotoBuffer = await fetchProfilePhoto(ctx).catch(() => undefined);
+
+            const imgBuffer = await generatePositionPnlImage({
+              title: state.title,
+              outcome: state.outcome,
+              cashPnl,
+              percentPnl,
+              avgPrice,
+              curPrice: state.price!,
+              invested,
+              currentValue: proceeds,
+              username: ctx.from?.username,
+              displayName: ctx.from?.first_name,
+              profilePhotoBuffer,
+            });
+
+            if (imgBuffer) {
+              await ctx.replyWithPhoto(
+                { source: imgBuffer },
+                { caption: `${cashPnl >= 0 ? '🟢' : '🔴'} <b>Realized P&L: ${cashPnl >= 0 ? '+' : ''}$${cashPnl.toFixed(2)}</b>`, parse_mode: 'HTML' }
+              );
+            }
+          } catch (pnlErr) {
+            logger.warn('[positionTrade] PNL card after sell failed (non-fatal):', pnlErr);
+          }
+        })();
       }
     } catch (err: any) {
       logger.error('[positionTrade] Sell failed:', err);
