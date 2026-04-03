@@ -6,8 +6,8 @@ import { getPolygonProvider } from '../utils/provider';
 
 const BRIDGE_API_URL = 'https://bridge.polymarket.com';
 
-// USDC.e on Polygon — always the source token for cross-chain withdrawals
-const USDC_E_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const USDC_E_POLYGON      = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e (bridged)
+const NATIVE_USDC_POLYGON = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Native USDC
 
 // Destination USDC addresses per chain
 const BRIDGE_CHAIN_CONFIG: Record<string, { chainId: string; toTokenAddress: string }> = {
@@ -74,7 +74,7 @@ async function createBridgeWithdrawAddress(
 
 /**
  * Execute a cross-chain withdrawal via Bridge API.
- * Sends USDC.e from proxy → Bridge address → Bridge delivers USDC on destination chain.
+ * Auto-detects source USDC token (USDC.e preferred, falls back to native USDC).
  */
 export async function executeBridgeWithdraw(params: {
   encryptedPrivateKey: string;
@@ -89,12 +89,17 @@ export async function executeBridgeWithdraw(params: {
       params.chain,
       params.recipientAddr,
     );
-    logger.info(`[withdraw] Sending ${params.amount} USDC.e to Bridge address ${bridgeAddress} for ${params.chain} withdrawal`);
+
+    // Auto-detect: prefer USDC.e (backward compat), fall back to native USDC
+    const amountRaw = BigInt(Math.round(params.amount * 1_000_000));
+    const { raw: usdceBalance } = await getTokenBalance(params.proxyAddress, USDC_E_POLYGON, 6);
+    const sourceToken = usdceBalance >= amountRaw ? USDC_E_POLYGON : NATIVE_USDC_POLYGON;
+    logger.info(`[withdraw] Bridge withdraw ${params.amount} USDC (${sourceToken === NATIVE_USDC_POLYGON ? 'native' : 'USDC.e'}) → ${bridgeAddress} for ${params.chain}`);
 
     return await executeWithdraw({
       encryptedPrivateKey: params.encryptedPrivateKey,
       proxyAddress: params.proxyAddress,
-      tokenAddress: USDC_E_POLYGON,
+      tokenAddress: sourceToken,
       tokenDecimals: 6,
       destinationAddress: bridgeAddress,
       amount: params.amount,

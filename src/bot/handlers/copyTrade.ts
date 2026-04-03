@@ -1542,7 +1542,7 @@ export async function handleManageEditPrompt(ctx: Context, subId: string, editSt
     parse_mode: 'HTML',
     ...Markup.inlineKeyboard([
       [
-        Markup.button.callback('⏭ Clear / Off', `cpm_clear_${editStep}_${subId}`),
+        Markup.button.callback('⏭ Clear / Off', `cpm_clear_${subId}_${editStep}`),
       ],
       [
         Markup.button.callback('← Cancel', `copy_task_${subId}`),
@@ -1720,7 +1720,7 @@ export async function handleManageSlPrompt(ctx: Context, subId: string): Promise
           Markup.button.callback('📉 Percentage', `cpm_sltype_pct_${subId}`),
           Markup.button.callback('💲 Fixed Price', `cpm_sltype_fix_${subId}`),
         ],
-        [Markup.button.callback('⏭ Turn Off', `cpm_clear_awaiting_sl_pct_${subId}`)],
+        [Markup.button.callback('⏭ Turn Off', `cpm_clear_${subId}_awaiting_sl_pct`)],
         [Markup.button.callback('← Cancel', `copy_task_${subId}`)],
       ]),
     }
@@ -1751,7 +1751,7 @@ export async function handleManageTpPrompt(ctx: Context, subId: string): Promise
           Markup.button.callback('📈 Percentage', `cpm_tptype_pct_${subId}`),
           Markup.button.callback('💲 Fixed Price', `cpm_tptype_fix_${subId}`),
         ],
-        [Markup.button.callback('⏭ Turn Off', `cpm_clear_awaiting_tp_pct_${subId}`)],
+        [Markup.button.callback('⏭ Turn Off', `cpm_clear_${subId}_awaiting_tp_pct`)],
         [Markup.button.callback('← Cancel', `copy_task_${subId}`)],
       ]),
     }

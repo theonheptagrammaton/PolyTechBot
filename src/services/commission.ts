@@ -28,7 +28,8 @@ const RPC_URLS = [
   'https://polygon.llamarpc.com',
   'https://1rpc.io/matic',
 ];
-const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const USDC_E_ADDRESS      = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e (bridged)
+const NATIVE_USDC_ADDRESS = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Native USDC
 
 /** Platform commission rate: 1% */
 export const COMMISSION_RATE = 0.01;
@@ -42,6 +43,7 @@ const GNOSIS_SAFE_ABI = [
 
 const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
+  'function balanceOf(address account) view returns (uint256)',
 ];
 
 /**
@@ -172,8 +174,18 @@ async function _transferCommission(
     const privateKey = decrypt(encryptedPrivateKey);
     const userSigner = new ethers.Wallet(privateKey);
 
-    // USDC.e has 6 decimals
+    // USDC has 6 decimals (both USDC.e and native USDC)
     const amountRaw = Math.round(commissionUsdc * 1e6);
+
+    // Auto-detect source USDC: prefer USDC.e (backward compat), fall back to native USDC
+    const [usdceBalance, nativeBalance] = await Promise.all([
+      new ethers.Contract(USDC_E_ADDRESS, ERC20_ABI, provider).balanceOf(proxyAddress) as Promise<ethers.BigNumber>,
+      new ethers.Contract(NATIVE_USDC_ADDRESS, ERC20_ABI, provider).balanceOf(proxyAddress) as Promise<ethers.BigNumber>,
+    ]);
+    const usdcSource = usdceBalance.gte(amountRaw) ? USDC_E_ADDRESS : NATIVE_USDC_ADDRESS;
+    if (usdcSource !== USDC_E_ADDRESS) {
+      logger.info(`[commission] Using native USDC (USDC.e balance ${usdceBalance.toString()} < ${amountRaw}, native ${nativeBalance.toString()})`);
+    }
 
     // Encode ERC20 transfer(adminWallet, amount)
     const iface = new ethers.utils.Interface(ERC20_ABI);
@@ -186,7 +198,7 @@ async function _transferCommission(
     const nonce: ethers.BigNumber = await safeContract.nonce();
 
     // Gnosis Safe tx parameters — standard CALL (operation=0), no gas refund
-    const to = USDC_E_ADDRESS;
+    const to = usdcSource;
     const value = 0;
     const data = transferData;
     const operation = 0;        // CALL

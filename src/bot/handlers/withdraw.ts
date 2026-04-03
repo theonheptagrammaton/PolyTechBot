@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { logger } from '../../utils/logger';
 import { getUserByTelegramId } from '../../services/user';
 import { getTokenBalance, executeWithdraw, executeBridgeWithdraw, executePredexonWithdraw } from '../../services/withdraw';
+import { getBalance as predexonGetBalance } from '../../services/predexon';
 import { sendPage } from '../../utils/telegram';
 import { ce, EMOJI } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
@@ -127,12 +128,17 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
 
       let balance = '0.0000';
       try {
-        const { formatted } = await getTokenBalance(
-          user.polymarketProxyAddress,
-          NATIVE_USDC.address,
-          NATIVE_USDC.decimals,
-        );
-        balance = formatted;
+        if (user.predexonUserId) {
+          const balances = await predexonGetBalance(user.predexonUserId, 'polymarket');
+          balance = parseFloat(balances[0]?.available ?? '0').toFixed(4);
+        } else {
+          const { formatted } = await getTokenBalance(
+            user.polymarketProxyAddress,
+            NATIVE_USDC.address,
+            NATIVE_USDC.decimals,
+          );
+          balance = formatted;
+        }
       } catch (e) {
         logger.warn('[withdraw] USDC balance fetch failed:', e);
       }
@@ -199,12 +205,17 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
 
     let balancePoly = '0.0000';
     try {
-      const { formatted } = await getTokenBalance(
-        userPoly.polymarketProxyAddress,
-        NATIVE_USDC.address,
-        NATIVE_USDC.decimals,
-      );
-      balancePoly = formatted;
+      if (userPoly.predexonUserId) {
+        const balances = await predexonGetBalance(userPoly.predexonUserId, 'polymarket');
+        balancePoly = parseFloat(balances[0]?.available ?? '0').toFixed(4);
+      } else {
+        const { formatted } = await getTokenBalance(
+          userPoly.polymarketProxyAddress,
+          NATIVE_USDC.address,
+          NATIVE_USDC.decimals,
+        );
+        balancePoly = formatted;
+      }
     } catch (e) {
       logger.warn('[withdraw] Polygon USDC balance fetch failed:', e);
     }
@@ -280,12 +291,17 @@ export async function handleWithdrawToken(ctx: Context, tokenKey: string): Promi
     // Fetch balance
     let balance = '0.0000';
     try {
-      const { formatted } = await getTokenBalance(
-        user.polymarketProxyAddress,
-        token.address,
-        token.decimals
-      );
-      balance = formatted;
+      if (user.predexonUserId && tokenKey === 'USDC') {
+        const balances = await predexonGetBalance(user.predexonUserId, 'polymarket');
+        balance = parseFloat(balances[0]?.available ?? '0').toFixed(4);
+      } else {
+        const { formatted } = await getTokenBalance(
+          user.polymarketProxyAddress,
+          token.address,
+          token.decimals
+        );
+        balance = formatted;
+      }
     } catch (e) {
       logger.warn('[withdraw] Balance fetch failed:', e);
     }

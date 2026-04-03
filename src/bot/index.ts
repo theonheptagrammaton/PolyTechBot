@@ -816,8 +816,8 @@ export class TelegramBot {
     this.bot.action(/^cpm_deldo_(.+)$/, async (ctx) => handleManageDeleteExecute(ctx, ctx.match[1]));
 
     // Manage page: Clear fields
-    this.bot.action(/^cpm_clear_(.+?)_(.+)$/, async (ctx) => {
-      await handleManageClear(ctx, ctx.match[2], ctx.match[1]);
+    this.bot.action(/^cpm_clear_([^_]+)_(.+)$/, async (ctx) => {
+      await handleManageClear(ctx, ctx.match[1], ctx.match[2]);
     });
 
     // Manage page: SL / TP prompts

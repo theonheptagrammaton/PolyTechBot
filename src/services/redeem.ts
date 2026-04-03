@@ -19,8 +19,9 @@ function claimedKey(proxyAddress: string, conditionId: string): string {
 }
 
 // Polymarket contract addresses (from official docs)
-const CTF_ADDRESS    = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const USDC_E_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const CTF_ADDRESS         = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const USDC_E_POLYGON      = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e (bridged)
+const NATIVE_USDC_POLYGON = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Native USDC
 
 const CTF_REDEEM_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external',
@@ -73,76 +74,79 @@ async function redeemPosition(params: {
   proxyAddress: string;
   position: ActivePosition;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  const privateKey = decrypt(params.encryptedPrivateKey);
+  const privateKey  = decrypt(params.encryptedPrivateKey);
   const iface       = new ethers.utils.Interface(CTF_REDEEM_ABI);
   const conditionId = params.position.conditionId as string;
 
-  const callData = iface.encodeFunctionData('redeemPositions', [
-    USDC_E_POLYGON,
-    ethers.constants.HashZero,
-    conditionId,
-    [1, 2],
-  ]);
+  // Try USDC.e first (legacy positions), then native USDC (post-migration positions)
+  for (const collateralToken of [USDC_E_POLYGON, NATIVE_USDC_POLYGON]) {
+    const callData = iface.encodeFunctionData('redeemPositions', [
+      collateralToken,
+      ethers.constants.HashZero,
+      conditionId,
+      [1, 2],
+    ]);
+    const txPayload = [{ to: CTF_ADDRESS, data: callData, value: '0' }];
+    const tokenLabel = collateralToken === USDC_E_POLYGON ? 'USDC.e' : 'native USDC';
 
-  const txPayload = [{ to: CTF_ADDRESS, data: callData, value: '0' }];
+    for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
+      try {
+        logger.info(
+          `[redeem] Trying ${txType}/${tokenLabel}: conditionId=${conditionId.slice(0, 18)}... outcome=${params.position.outcome}`
+        );
 
-  // Try SAFE type first, then PROXY type
-  for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
-    try {
-      logger.info(
-        `[redeem] Trying ${txType} relay: conditionId=${conditionId.slice(0, 18)}... outcome=${params.position.outcome}`
-      );
+        const relayClient = createRelayClient(privateKey, txType);
 
-      const relayClient = createRelayClient(privateKey, txType);
+        const response = await Promise.race([
+          relayClient.execute(txPayload),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('relay execute timeout')), 30_000)
+          ),
+        ]);
 
-      const response = await Promise.race([
-        relayClient.execute(txPayload),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('relay execute timeout')), 30_000)
-        ),
-      ]);
+        if (!response) {
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: no response from relayer`);
+          continue;
+        }
 
-      if (!response) {
-        logger.warn(`[redeem] ${txType}: no response from relayer`);
+        logger.info(
+          `[redeem] ${txType}/${tokenLabel} response: id=${response.transactionID} state=${response.state} hash=${response.transactionHash || 'none'}`
+        );
+
+        const result = await Promise.race([
+          response.wait(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('confirmation timeout')), 60_000)
+          ),
+        ]);
+
+        if (!result) {
+          try {
+            const txInfo = await response.getTransaction();
+            logger.warn(`[redeem] ${txType}/${tokenLabel} STATE_FAILED: ${JSON.stringify(txInfo).slice(0, 400)}`);
+          } catch { /* ignore */ }
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: relay tx failed (STATE_FAILED)`);
+          continue;
+        }
+
+        const txHash = result.transactionHash;
+        if (!txHash) {
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: result has no transactionHash, state=${result.state}`);
+          continue;
+        }
+
+        logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash}`);
+        return { success: true, txHash };
+      } catch (error: any) {
+        logger.warn(`[redeem] ${txType}/${tokenLabel} attempt failed: ${error?.message?.slice(0, 200)}`);
         continue;
       }
-
-      logger.info(
-        `[redeem] ${txType} response: id=${response.transactionID} state=${response.state} hash=${response.transactionHash || 'none'}`
-      );
-
-      const result = await Promise.race([
-        response.wait(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('confirmation timeout')), 60_000)
-        ),
-      ]);
-
-      if (!result) {
-        // wait() returns undefined when STATE_FAILED — try fetching full tx info
-        try {
-          const txInfo = await response.getTransaction();
-          logger.warn(`[redeem] ${txType} STATE_FAILED: ${JSON.stringify(txInfo).slice(0, 400)}`);
-        } catch { /* ignore */ }
-        logger.warn(`[redeem] ${txType}: relay tx failed (STATE_FAILED)`);
-        continue; // try next type
-      }
-
-      const txHash = result.transactionHash;
-      if (!txHash) {
-        logger.warn(`[redeem] ${txType}: result has no transactionHash, state=${result.state}`);
-        continue;
-      }
-
-      logger.info(`[redeem] Confirmed via ${txType} Relayer: ${txHash}`);
-      return { success: true, txHash };
-    } catch (error: any) {
-      logger.warn(`[redeem] ${txType} attempt failed: ${error?.message?.slice(0, 200)}`);
-      continue;
     }
+    // Both tx types failed for this collateral token — try next token
+    logger.info(`[redeem] All tx types failed with ${tokenLabel}, trying next collateral token...`);
   }
 
-  return { success: false, error: 'Both SAFE and PROXY relay types failed' };
+  return { success: false, error: 'Redemption failed with all collateral token variants' };
 }
 
 /**
