@@ -928,7 +928,7 @@ export async function handleSmartWallets(
         ],
         [
           Markup.button.url('📈 Polymarket Analytics', 'https://polymarketanalytics.com/traders'),
-          Markup.button.url('📂 Predictfolio',         'https://predictfolio.com/leaderboard'),
+          Markup.button.url('📂 Predictfolio',         'https://predictfolio.com'),
         ],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]),
