@@ -378,32 +378,55 @@ async function executeCopyOrder(
 
 // ─── Market Info Cache (for notification titles) ──────────────────────────────
 
-async function fetchMarketInfo(conditionId: string): Promise<{ question: string; slug: string; eventSlug: string } | null> {
-  if (!conditionId) return null;
-  const cacheKey = `copy:mktinfo3:${conditionId}`;
+async function fetchMarketInfo(
+  conditionId: string,
+  assetId?: string,
+): Promise<{ question: string; slug: string; eventSlug: string } | null> {
+  if (!conditionId && !assetId) return null;
+
+  // Cache by assetId (always unique) when available; fall back to conditionId
+  const cacheKey = `copy:mktinfo4:${assetId || conditionId}`;
   const cached = await redisCache.get<{ question: string; slug: string; eventSlug: string }>(cacheKey);
   if (cached) return cached;
+
   try {
-    // Gamma API has the event slug (CLOB API only has market_slug, not event slug)
-    const gammaResp = await fetchWithRetry(`https://gamma-api.polymarket.com/markets?conditionId=${conditionId}&limit=1`);
-    if (gammaResp.ok) {
-      const gammaData = await gammaResp.json();
-      const gm = Array.isArray(gammaData) ? gammaData[0] : null;
-      if (gm) {
-        const slug = gm.slug ?? gm.marketSlug ?? '';
-        const eventSlug = gm.events?.[0]?.slug ?? gm.event?.slug ?? slug;
-        const result = { question: gm.question ?? conditionId.slice(0, 20), slug, eventSlug };
-        await redisCache.set(cacheKey, result, 3600);
-        return result;
+    let m: any = null;
+
+    // 1) Primary: resolve via token ID (most reliable — unique per outcome)
+    if (assetId) {
+      const tokResp = await fetchWithRetry(`${CLOB_BASE}/markets?clob_token_ids=${assetId}`);
+      if (tokResp.ok) {
+        const tokData = await tokResp.json();
+        const markets: any[] = Array.isArray(tokData) ? tokData : (tokData?.data ?? []);
+        for (const mkt of markets) {
+          const tokens: any[] = mkt.tokens ?? [];
+          if (tokens.some((t: any) => t.token_id === assetId)) {
+            m = mkt;
+            break;
+          }
+        }
       }
     }
-    // Fallback: CLOB API — event slug will equal market slug (acceptable for binary markets)
-    const resp = await fetchWithRetry(`${CLOB_BASE}/markets/${conditionId}`);
-    if (!resp.ok) return null;
-    const m = await resp.json();
-    if (!m || !m.condition_id) return null;
+
+    // 2) Fallback: CLOB by conditionId — validate returned ID matches
+    if (!m && conditionId) {
+      const resp = await fetchWithRetry(`${CLOB_BASE}/markets/${conditionId}`);
+      if (resp.ok) {
+        const candidate = await resp.json();
+        if (candidate?.condition_id === conditionId) {
+          m = candidate;
+        }
+      }
+    }
+
+    if (!m) return null;
+
     const slug = m.market_slug ?? '';
-    const result = { question: m.question ?? conditionId.slice(0, 20), slug, eventSlug: slug };
+    const result = {
+      question: m.question ?? (conditionId || assetId || '').slice(0, 20),
+      slug,
+      eventSlug: slug,
+    };
     await redisCache.set(cacheKey, result, 3600);
     return result;
   } catch {
@@ -738,7 +761,7 @@ async function tickForTrader(
 
           if (result.status === 'filled' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
-            const mktInfo = await fetchMarketInfo(trade.marketId).catch(() => null);
+            const mktInfo = await fetchMarketInfo(trade.marketId, trade.assetId).catch(() => null);
             const question = mktInfo?.question ?? trade.marketId.slice(0, 40);
             const marketUrl = (mktInfo?.eventSlug || mktInfo?.slug)
               ? `https://polymarket.com/event/${mktInfo!.eventSlug || mktInfo!.slug}`
