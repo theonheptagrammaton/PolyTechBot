@@ -1094,7 +1094,7 @@ let _sendNotification: ((telegramId: string, message: string, extra?: Notificati
  */
 async function resolveToken(tokenId: string): Promise<{ conditionId: string; outcome: 'YES' | 'NO' } | null> {
   if (!tokenId || tokenId === '0') return null;
-  const cacheKey = `ctf:token:${tokenId}`;
+  const cacheKey = `ctf:token2:${tokenId}`;
   const cached = await redisCache.get<{ conditionId: string; outcome: 'YES' | 'NO' }>(cacheKey);
   if (cached) return cached;
 
@@ -1107,17 +1107,24 @@ async function resolveToken(tokenId: string): Promise<{ conditionId: string; out
     const markets: any[] = Array.isArray(data) ? data : (data?.data ?? []);
     if (!markets.length) return null;
 
-    const market = markets[0];
-    const conditionId: string = market.condition_id ?? market.conditionId ?? '';
-    if (!conditionId) return null;
+    // Verify the returned market actually contains the token we searched for
+    for (const market of markets) {
+      const conditionId: string = market.condition_id ?? market.conditionId ?? '';
+      if (!conditionId) continue;
 
-    const tokens: any[] = market.tokens ?? [];
-    const tokenEntry = tokens.find((t: any) => t.token_id === tokenId);
-    const outcome = (tokenEntry?.outcome ?? tokens[0]?.outcome ?? 'YES').toUpperCase() as 'YES' | 'NO';
+      const tokens: any[] = market.tokens ?? [];
+      const tokenEntry = tokens.find((t: any) => t.token_id === tokenId);
+      if (!tokenEntry) continue; // This market doesn't have our token — skip
 
-    const result = { conditionId, outcome };
-    await redisCache.set(cacheKey, result, 7 * 24 * 3600);
-    return result;
+      const outcome = (tokenEntry.outcome ?? 'YES').toUpperCase() as 'YES' | 'NO';
+      const result = { conditionId, outcome };
+      await redisCache.set(cacheKey, result, 7 * 24 * 3600);
+      return result;
+    }
+
+    // Fallback: if no market matched by token, log and return null
+    logger.warn(`[copy:onchain] Token ${tokenId.slice(0, 20)}... not found in ${markets.length} returned market(s)`);
+    return null;
   } catch {
     return null;
   }
