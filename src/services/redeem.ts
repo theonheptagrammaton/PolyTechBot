@@ -11,8 +11,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, http } from 'viem';
 import { polygon } from 'viem/chains';
 
-// TTL for the "already claimed" dedup key — long enough to outlive the 45s portfolio cache
-const CLAIMED_TTL_SECONDS = 600; // 10 minutes
+// TTL for the "already claimed" dedup key — 30 days so the Data API lag never re-triggers
+const CLAIMED_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 function claimedKey(proxyAddress: string, conditionId: string): string {
   return `redeem:claimed:${proxyAddress.toLowerCase()}:${conditionId}`;
@@ -210,6 +210,25 @@ export async function autoRedeemPositions(
   } finally {
     _redeemLocks.delete(lockKey);
   }
+}
+
+/**
+ * Returns the subset of conditionIds that have already been claimed (Redis key present).
+ * Used to filter redeemed positions out of the Active Positions display.
+ */
+export async function getClaimedConditionIds(
+  proxyAddress: string,
+  conditionIds: string[],
+): Promise<Set<string>> {
+  const claimed = new Set<string>();
+  await Promise.all(
+    conditionIds.map(async (id) => {
+      const key = claimedKey(proxyAddress, id);
+      const hit = await redisCache.get<boolean>(key).catch(() => null);
+      if (hit) claimed.add(id);
+    }),
+  );
+  return claimed;
 }
 
 async function _doRedeem(

@@ -789,7 +789,7 @@ async function executeTrade(
     const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const marketQuestion = escHtml(market.question || 'Unknown Market');
     const entryPriceCents = (worstPrice * 100).toFixed(1);
-    const eventSlug = market.events?.[0]?.slug ?? market.slug;
+    const eventSlug = market.event?.slug ?? market.events?.[0]?.slug;
     const polymarketLink = eventSlug
       ? `https://polymarket.com/event/${eventSlug}`
       : `https://polymarket.com`;

@@ -1143,12 +1143,12 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
     const expiresStr = fmtDateLong(market.endDate);
 
     // ── Image (OG preview from Polymarket link share) ─────────────────────────
-    const eventSlug: string | undefined = market.events?.[0]?.slug || market.slug;
+    const eventSlug: string | undefined = market.event?.slug ?? market.events?.[0]?.slug;
     const ogImage = eventSlug
       ? await fetchOgImage(`https://polymarket.com/event/${eventSlug}`)
       : null;
     const eventImage: string | undefined =
-      ogImage || market.events?.[0]?.image || market.image || undefined;
+      ogImage || market.event?.image || market.events?.[0]?.image || market.image || undefined;
 
     // ── Message ──────────────────────────────────────────────────────────────
     const title = safeTitle(market.question, 80);
@@ -1171,7 +1171,7 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
     message += `└ Expires: ${expiresStr}`;
 
     // ── Keyboard ─────────────────────────────────────────────────────────────
-    const eventId = market.events?.[0]?.id;
+    const eventId = market.event?.id ?? market.events?.[0]?.id;
     const backBtn = eventId && /^\d+$/.test(String(eventId))
       ? Markup.button.callback('← Back to Event', `evd_mkt_${eventId}_1`)
       : Markup.button.callback('« Markets', 'show_categories');

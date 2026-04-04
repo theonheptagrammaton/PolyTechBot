@@ -28,7 +28,7 @@ import {
   ActivePosition,
   ClosedPosition,
 } from '../../services/portfolio';
-import { autoRedeemPositions } from '../../services/redeem';
+import { autoRedeemPositions, getClaimedConditionIds } from '../../services/redeem';
 
 /**
  * Shows detailed wallet page with deposit addresses
@@ -265,10 +265,21 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     // Always force-refresh when triggered by callback (Refresh button or navigation)
     const { positionListCache } = await import('./positionTrade');
     const positions = await getActivePositions(user.polymarketProxyAddress || '', !!ctx.callbackQuery);
-    positionListCache.set(telegramId, positions);
 
-    // Auto-claim any resolved/redeemable positions (fire-and-forget, notifies user)
+    // Filter out positions that are redeemable AND already claimed — move them to Closed
     const redeemable = positions.filter(p => p.redeemable);
+    let visiblePositions = positions;
+    if (redeemable.length > 0 && user.polymarketProxyAddress) {
+      const claimedIds = await getClaimedConditionIds(
+        user.polymarketProxyAddress,
+        redeemable.map(p => p.conditionId as string),
+      );
+      if (claimedIds.size > 0) {
+        visiblePositions = positions.filter(p => !p.redeemable || !claimedIds.has(p.conditionId as string));
+      }
+    }
+
+    positionListCache.set(telegramId, visiblePositions);
     if (redeemable.length > 0 && user.polymarketProxyAddress) {
       autoRedeemPositions(
         user.encryptedPrivateKey,
@@ -287,7 +298,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
     }
 
-    if (positions.length === 0) {
+    if (visiblePositions.length === 0) {
       // Check for pending open orders so user knows their trades are on the book
       let openOrdersHint = '';
       try {
@@ -319,21 +330,21 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     }
 
     const ITEMS_PER_PAGE = 1;
-    const totalPages = Math.ceil(positions.length / ITEMS_PER_PAGE);
+    const totalPages = Math.ceil(visiblePositions.length / ITEMS_PER_PAGE);
     const currentPage = Math.min(Math.max(1, page), totalPages);
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-    const pagePositions = positions.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+    const pagePositions = visiblePositions.slice(startIndex, startIndex + ITEMS_PER_PAGE);
 
     const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const botUsername = config.telegram.botUsername;
 
     // Summary header
-    const totalValue = positions.reduce((s, p) => s + p.currentValue, 0);
-    const totalPnl   = positions.reduce((s, p) => s + p.cashPnl, 0);
+    const totalValue = visiblePositions.reduce((s, p) => s + p.currentValue, 0);
+    const totalPnl   = visiblePositions.reduce((s, p) => s + p.cashPnl, 0);
     const summarySign  = totalPnl >= 0 ? '+' : '';
     const summaryEmoji = totalPnl >= 0 ? '🟢' : '🔴';
 
-    let message = `📊 <b>Active Positions</b> (${positions.length} total · page ${currentPage}/${totalPages})\n`;
+    let message = `📊 <b>Active Positions</b> (${visiblePositions.length} total · page ${currentPage}/${totalPages})\n`;
     message += `${summaryEmoji} Total Value: $${totalValue.toFixed(2)} · P&amp;L: ${summarySign}$${totalPnl.toFixed(2)}\n\n`;
 
     for (let i = 0; i < pagePositions.length; i++) {
