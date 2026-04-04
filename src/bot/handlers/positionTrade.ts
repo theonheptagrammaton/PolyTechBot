@@ -2,7 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { config } from '../../config';
-import { getActivePositions, ActivePosition } from '../../services/portfolio';
+import { getActivePositions, ActivePosition, fetchTxHashForOrder } from '../../services/portfolio';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
 import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
@@ -602,8 +602,7 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
       `✅ *Stop Loss Placed*\n\n` +
       `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
       `🛑 Trigger price: *${slCents}¢*\n` +
-      `📦 Shares: *${shares}*\n` +
-      `🆔 Order ID: \`${orderResp.orderId}\`\n\n` +
+      `📦 Shares: *${shares}*\n\n` +
       `_GTC limit sell order resting on the book. Cancel it from Open Orders if needed._`,
       {
         parse_mode: 'Markdown',
@@ -911,23 +910,53 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
         await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
       } catch {}
 
-      const msg =
-        `✅ *Sell Executed!*\n\n` +
-        `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-        `📉 Shares: *${state.size.toFixed(4)}*\n` +
-        `💰 Min price: *${(state.price * 100).toFixed(2)}¢*\n` +
-        `💵 Est. proceeds: *$${(state.size * state.price).toFixed(2)}*\n` +
-        `🆔 Order: \`${result.orderID}\`\n\n` +
-        `_Market sell executed — your position has been closed or reduced._`;
-
       const doneKeyboard = Markup.inlineKeyboard([
         [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]);
+
+      const sellSize  = state.size!;
+      const sellPrice = state.price!;
+      const buildSellMsg = (txLine: string) =>
+        `✅ *Sell Executed!*\n\n` +
+        `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
+        `📉 Shares: *${sellSize.toFixed(4)}*\n` +
+        `💰 Min price: *${(sellPrice * 100).toFixed(2)}¢*\n` +
+        `💵 Est. proceeds: *$${(sellSize * sellPrice).toFixed(2)}*\n` +
+        txLine +
+        `_Market sell executed — your position has been closed or reduced._`;
+
+      let sentMsg: any;
       try {
-        await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+        sentMsg = await ctx.editMessageText(buildSellMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...doneKeyboard });
       } catch {
-        await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+        sentMsg = await ctx.reply(buildSellMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...doneKeyboard });
+      }
+
+      // Fire-and-forget: fetch on-chain tx hash and update message
+      if (user.polymarketProxyAddress) {
+        const proxyAddr = user.polymarketProxyAddress;
+        const assetId   = state.assetId;
+        const placedAt  = Date.now() - 5_000;
+        const chatId    = ctx.chat?.id;
+        const msgId     = sentMsg?.message_id;
+        if (chatId && msgId) {
+          (async () => {
+            try {
+              const txHash = await fetchTxHashForOrder(proxyAddr, assetId, placedAt);
+              const txLine = txHash
+                ? `🔗 [Transaction Hash](https://polygonscan.com/tx/${txHash})\n`
+                : ``;
+              await ctx.telegram.editMessageText(
+                chatId, msgId, undefined,
+                buildSellMsg(txLine),
+                { parse_mode: 'Markdown', ...doneKeyboard },
+              );
+            } catch {
+              // Non-fatal
+            }
+          })();
+        }
       }
 
       // Fire-and-forget: send PNL card after successful sell
@@ -1014,24 +1043,55 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
         await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
       } catch {}
 
-      const usdAmount = state.size * state.price;
-      const msg =
-        `✅ *Buy Order Placed!*\n\n` +
-        `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-        `📈 Shares: *~${state.size.toFixed(4)}*\n` +
-        `💰 Price: *${(state.price * 100).toFixed(2)}¢*\n` +
-        `💵 USDC: *$${usdAmount.toFixed(2)}*\n` +
-        `🆔 Order: \`${result.orderID}\`\n\n` +
-        `_Order will be filled when matched._`;
+      const buySize   = state.size!;
+      const buyPrice  = state.price!;
+      const usdAmount = buySize * buyPrice;
 
-      const doneKeyboard = Markup.inlineKeyboard([
+      const buyDoneKeyboard = Markup.inlineKeyboard([
         [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
         [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
       ]);
+
+      const buildBuyMsg = (txLine: string) =>
+        `✅ *Buy Order Placed!*\n\n` +
+        `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
+        `📈 Shares: *~${buySize.toFixed(4)}*\n` +
+        `💰 Price: *${(buyPrice * 100).toFixed(2)}¢*\n` +
+        `💵 USDC: *$${usdAmount.toFixed(2)}*\n` +
+        txLine +
+        `_Order will be filled when matched._`;
+
+      let sentBuyMsg: any;
       try {
-        await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+        sentBuyMsg = await ctx.editMessageText(buildBuyMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...buyDoneKeyboard });
       } catch {
-        await ctx.reply(msg, { parse_mode: 'Markdown', ...doneKeyboard });
+        sentBuyMsg = await ctx.reply(buildBuyMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...buyDoneKeyboard });
+      }
+
+      // Fire-and-forget: fetch on-chain tx hash and update message
+      if (user.polymarketProxyAddress) {
+        const proxyAddr = user.polymarketProxyAddress;
+        const assetId   = state.assetId;
+        const placedAt  = Date.now() - 5_000;
+        const chatId    = ctx.chat?.id;
+        const msgId     = sentBuyMsg?.message_id;
+        if (chatId && msgId) {
+          (async () => {
+            try {
+              const txHash = await fetchTxHashForOrder(proxyAddr, assetId, placedAt);
+              const txLine = txHash
+                ? `🔗 [Transaction Hash](https://polygonscan.com/tx/${txHash})\n`
+                : ``;
+              await ctx.telegram.editMessageText(
+                chatId, msgId, undefined,
+                buildBuyMsg(txLine),
+                { parse_mode: 'Markdown', ...buyDoneKeyboard },
+              );
+            } catch {
+              // Non-fatal
+            }
+          })();
+        }
       }
     } catch (err: any) {
       logger.error('[positionTrade] Buy failed:', err);

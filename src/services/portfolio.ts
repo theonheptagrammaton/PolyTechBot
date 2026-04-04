@@ -351,6 +351,61 @@ export async function getPortfolioData(
 }
 
 /**
+ * Polls Data API activity feed to find the on-chain transaction hash for a recently
+ * placed market order. Retries up to `maxRetries` times with `retryDelayMs` between
+ * attempts so that newly mined Polygon transactions have time to be indexed.
+ *
+ * @param proxyAddress  - User's Polymarket proxy wallet
+ * @param assetId       - Token ID (outcome share) that was traded
+ * @param afterMs       - Only consider activity entries after this Unix timestamp (ms)
+ * @param maxRetries    - Number of poll attempts (default 4)
+ * @param retryDelayMs  - Delay between attempts in ms (default 3 000)
+ * @returns The 0x transaction hash string, or null if not found within retries
+ */
+export async function fetchTxHashForOrder(
+  proxyAddress: string,
+  assetId: string,
+  afterMs: number,
+  maxRetries = 4,
+  retryDelayMs = 3_000,
+): Promise<string | null> {
+  for (let i = 0; i < maxRetries; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, retryDelayMs));
+    try {
+      const resp = await fetch(
+        `${DATA_API}/activity?user=${proxyAddress}&limit=20`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (!resp.ok) continue;
+
+      const data: any = await resp.json();
+      const items: any[] = Array.isArray(data) ? data : (data?.data ?? []);
+
+      for (const item of items) {
+        const isTrade = item.type === 'TRADE' || item.status === 'MINED' || item.status === 'CONFIRMED';
+        if (!isTrade) continue;
+
+        // Match by asset_id / asset token ID
+        const itemAsset: string = item.asset_id ?? item.asset ?? '';
+        if (itemAsset !== assetId) continue;
+
+        // Only consider trades that happened after the order was placed
+        const rawTs = item.timestamp ?? item.match_time;
+        let ts: number;
+        if (typeof rawTs === 'number') ts = rawTs < 1e12 ? rawTs * 1000 : rawTs;
+        else ts = new Date(rawTs ?? 0).getTime();
+        if (isNaN(ts) || ts < afterMs) continue;
+
+        if (item.transaction_hash) return item.transaction_hash as string;
+      }
+    } catch (err) {
+      logger.warn(`[portfolio] fetchTxHashForOrder attempt ${i + 1} error:`, err);
+    }
+  }
+  return null;
+}
+
+/**
  * Gets user's USDC balance from Predexon API.
  * Legacy signature kept for callers; new code should pass predexonUserId.
  */

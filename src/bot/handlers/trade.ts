@@ -7,7 +7,7 @@ import { config } from '../../config';
 import { ce, EMOJI } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
 import { generatePositionPnlImage } from '../../services/pnlImage';
-import { getActivePositions, getBalance, invalidatePortfolioCache } from '../../services/portfolio';
+import { getActivePositions, getBalance, invalidatePortfolioCache, fetchTxHashForOrder } from '../../services/portfolio';
 import { fetchProfilePhoto } from '../../utils/telegram';
 import { getUserByTelegramId, ensurePredexonUser } from '../../services/user';
 import { enableTrading } from '../../services/deposit';
@@ -794,31 +794,53 @@ async function executeTrade(
       ? `https://polymarket.com/event/${eventSlug}`
       : `https://polymarket.com`;
 
-    const message =
+    const successKeyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+      [Markup.button.callback('📋 Open Orders',  'portfolio_orders_1')],
+      [tradeAgainBtn('🔄 Trade Again', marketId)],
+      [Markup.button.callback('🏠 Main Menu',    'back_to_menu')],
+    ]).reply_markup;
+
+    const buildMessage = (txLine: string) =>
       `${ce(EMOJI.cherry, '🌸')} <b>Transaction Completed</b>\n\n` +
       `📌 <b>Market:</b>\n${marketQuestion}\n` +
       `<b>Order Type:</b> 📄 Market ${outcome.toUpperCase()}\n` +
       `<b>Invested:</b> $${amount.toFixed(2)}\n` +
       `<b>Shares:</b> ~${estimatedSize}\n` +
       `<b>Entry Price:</b> ${entryPriceCents}¢\n\n` +
-      `<b>Order ID:</b> <code>${orderResponse.orderId}</code>\n\n` +
+      txLine +
       `${ce(EMOJI.marketsTitle, '🤑')} <a href="${polymarketLink}">View this market on Polymarket</a>`;
 
     await ctx.telegram.editMessageText(
-      ctx.chat!.id, progressMsg.message_id, undefined, message,
-      {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-          [Markup.button.callback('📋 Open Orders',  'portfolio_orders_1')],
-          [tradeAgainBtn('🔄 Trade Again', marketId)],
-          [Markup.button.callback('🏠 Main Menu',    'back_to_menu')],
-        ]).reply_markup,
-      }
+      ctx.chat!.id, progressMsg.message_id, undefined,
+      buildMessage(`🔗 <b>Transaction Hash:</b> <i>fetching…</i>\n\n`),
+      { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: successKeyboard }
     );
 
     logger.info(`[trade] Order placed: user=${telegramId} market=${marketId} outcome=${outcome.toUpperCase()} amount=$${amount} orderID=${orderResponse.orderId}`);
+
+    // ── Fetch on-chain tx hash and update the message (fire-and-forget) ─────
+    if (user.polymarketProxyAddress) {
+      const chatId    = ctx.chat!.id;
+      const msgId     = progressMsg.message_id;
+      const proxyAddr = user.polymarketProxyAddress;
+      const placedAt  = Date.now() - 5_000; // order was placed seconds ago
+      ;(async () => {
+        try {
+          const txHash = await fetchTxHashForOrder(proxyAddr, tokenId, placedAt);
+          const txLine = txHash
+            ? `🔗 <b>Transaction Hash:</b> <a href="https://polygonscan.com/tx/${txHash}">${txHash.slice(0, 10)}…${txHash.slice(-8)}</a>\n\n`
+            : ``;
+          await ctx.telegram.editMessageText(
+            chatId, msgId, undefined,
+            buildMessage(txLine),
+            { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: successKeyboard }
+          );
+        } catch {
+          // Non-fatal — user already sees the success message
+        }
+      })();
+    }
 
     // ── Auto-send PNL image for the just-traded position (fire-and-forget) ────
     (async () => {
@@ -1524,8 +1546,7 @@ async function executeLimitTrade(
       `💰 Amount: $${amount.toFixed(2)}\n` +
       `├ Platform fee: -$${commissionAmt.toFixed(2)}\n` +
       `└ Trade amount: $${tradeAmount.toFixed(2)}\n` +
-      `📦 Shares: ~${sharesToBuy}\n` +
-      `🆔 Order ID: \`${orderResp.orderId}\`\n\n` +
+      `📦 Shares: ~${sharesToBuy}\n\n` +
       `_GTC order — rests on the book until filled or cancelled._`;
 
     await ctx.editMessageText(message, {

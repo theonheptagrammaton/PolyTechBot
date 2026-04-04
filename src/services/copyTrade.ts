@@ -3,7 +3,7 @@ import { prisma } from '../database/prisma';
 import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { config } from '../config';
-import { getActivePositions, ActivePosition } from './portfolio';
+import { getActivePositions, ActivePosition, fetchTxHashForOrder } from './portfolio';
 import { transferCommission, COMMISSION_RATE } from './commission';
 import { placeOrder as predexonPlaceOrder } from './predexon';
 import { ensurePredexonUser } from './user';
@@ -379,23 +379,31 @@ async function executeCopyOrder(
 // ─── Market Info Cache (for notification titles) ──────────────────────────────
 
 async function fetchMarketInfo(conditionId: string): Promise<{ question: string; slug: string; eventSlug: string } | null> {
-  const cacheKey = `copy:mktinfo:${conditionId}`;
+  if (!conditionId) return null;
+  const cacheKey = `copy:mktinfo3:${conditionId}`;
   const cached = await redisCache.get<{ question: string; slug: string; eventSlug: string }>(cacheKey);
   if (cached) return cached;
   try {
-    const resp = await fetchWithRetry(
-      `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}&limit=1`
-    );
+    // Gamma API has the event slug (CLOB API only has market_slug, not event slug)
+    const gammaResp = await fetchWithRetry(`https://gamma-api.polymarket.com/markets?conditionId=${conditionId}&limit=1`);
+    if (gammaResp.ok) {
+      const gammaData = await gammaResp.json();
+      const gm = Array.isArray(gammaData) ? gammaData[0] : null;
+      if (gm) {
+        const slug = gm.slug ?? gm.marketSlug ?? '';
+        const eventSlug = gm.events?.[0]?.slug ?? gm.event?.slug ?? slug;
+        const result = { question: gm.question ?? conditionId.slice(0, 20), slug, eventSlug };
+        await redisCache.set(cacheKey, result, 3600);
+        return result;
+      }
+    }
+    // Fallback: CLOB API — event slug will equal market slug (acceptable for binary markets)
+    const resp = await fetchWithRetry(`${CLOB_BASE}/markets/${conditionId}`);
     if (!resp.ok) return null;
-    const data = await resp.json();
-    const markets: any[] = Array.isArray(data) ? data : (data?.data ?? []);
-    if (!markets.length) return null;
-    const m = markets[0];
-    const result = {
-      question: m.question ?? m.title ?? conditionId.slice(0, 20),
-      slug: m.slug ?? '',
-      eventSlug: m.event?.slug ?? m.slug ?? '',
-    };
+    const m = await resp.json();
+    if (!m || !m.condition_id) return null;
+    const slug = m.market_slug ?? '';
+    const result = { question: m.question ?? conditionId.slice(0, 20), slug, eventSlug: slug };
     await redisCache.set(cacheKey, result, 3600);
     return result;
   } catch {
@@ -738,14 +746,30 @@ async function tickForTrader(
             const shares = trade.size > 0 ? trade.size : (trade.price > 0 ? trade.sizeUsd / trade.price : 0);
             const sideLabel = effectiveSide === 'BUY' ? 'BOUGHT' : 'SOLD';
 
+            // Fetch on-chain tx hash for the copy order (non-blocking with short timeout)
+            let txLine = '';
+            if (user.polymarketProxyAddress && trade.assetId) {
+              const txHash = await fetchTxHashForOrder(
+                user.polymarketProxyAddress,
+                trade.assetId,
+                Date.now() - 30_000, // trades placed in the last 30s
+                3,   // max retries
+                3_000,
+              ).catch(() => null);
+              if (txHash) {
+                txLine = `\n🔗 <a href="https://polygonscan.com/tx/${txHash}">Transaction Hash</a>`;
+              }
+            }
+
             const msg =
               `⚡ <b>${escHtml(traderName)}</b> just <b>${sideLabel} ${effectiveOutcome}</b> for <b>${copySize.toFixed(2)} USDC</b>\n\n` +
               `📊 Market: <b>${escHtml(question)}</b>\n` +
               `🎯 Outcome: <b>${effectiveOutcome}</b>\n` +
               `💰 Price: <b>$${trade.price.toFixed(3)}</b>\n` +
               `📈 Shares: <b>${shares.toFixed(2)}</b>\n` +
-              `💵 USDC Amount: <b>${copySize.toFixed(2)} USDC</b>\n\n` +
-              `<a href="${marketUrl}">View Market</a>`;
+              `💵 USDC Amount: <b>${copySize.toFixed(2)} USDC</b>\n` +
+              txLine +
+              `\n<a href="${marketUrl}">View Market</a>`;
 
             const IMG_COPYTRADE = require('path').join(__dirname, '../bot/img/copytrade.jpg');
             await sendNotification(user.telegramId, msg, {
