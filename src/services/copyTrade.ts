@@ -293,8 +293,8 @@ async function executeCopyOrder(
         return { status: 'skipped', errorMsg: 'no matching position to sell' };
       }
 
-      const traderShares = parseFloat((trade.sizeUsd / trade.price).toFixed(4));
-      size = Math.min(traderShares, pos.size);
+      const traderShares = parseFloat((trade.sizeUsd / trade.price).toFixed(2));
+      size = parseFloat(Math.min(traderShares, pos.size).toFixed(2));
 
       if (size < 1) {
         return { status: 'skipped', errorMsg: 'sell size too small' };

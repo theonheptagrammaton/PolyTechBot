@@ -658,7 +658,7 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
       positionTradeState.set(telegramId, state);
     }
 
-    const shares = parseFloat(((pos.size * pct) / 100).toFixed(4));
+    const shares = parseFloat(((pos.size * pct) / 100).toFixed(2));
 
     if (shares < MIN_ORDER_SIZE) {
       const minPct = Math.ceil((MIN_ORDER_SIZE / pos.size) * 100);
@@ -1125,32 +1125,35 @@ async function executePositionOrder(
 
   const predexonUserId = await ensurePredexonUser(user);
 
+  // Normalize precision to avoid floating-point dust (Polymarket uses 2 decimals for size)
+  const cleanSize = parseFloat(size.toFixed(2));
+  const cleanPrice = parseFloat(price.toFixed(4));
+
   if (action === 'sell') {
     logger.info(
-      `[positionTrade] Predexon market SELL: ${size} shares assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
+      `[positionTrade] Predexon market SELL: ${cleanSize} shares assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
     );
 
-    const sellOrderResponse = await predexonPlaceOrder(predexonUserId, {
-      venue: 'polymarket',
-      tokenId: assetId,
-      side: 'sell',
-      type: 'market',
-      size: String(size),
-    });
+    let sellOrderResponse;
+    try {
+      sellOrderResponse = await predexonPlaceOrder(predexonUserId, {
+        venue: 'polymarket',
+        tokenId: assetId,
+        side: 'sell',
+        type: 'market',
+        size: String(cleanSize),
+      });
+    } catch (err: any) {
+      throw classifyOrderError(err, 'sell');
+    }
 
     if (!sellOrderResponse.orderId) {
       const errMsg = (sellOrderResponse as any).error || (sellOrderResponse as any).message || 'Sell order not filled';
-      if (errMsg.includes('no orders found') || errMsg.includes('liquidity')) {
-        throw new Error('No buy orders in the order book. The market is currently illiquid — try again later.');
-      }
-      if (errMsg.includes('balance') || errMsg.includes('allowance')) {
-        throw new Error('Insufficient token balance or allowance. Your on-chain balance may have changed.');
-      }
-      throw new Error(errMsg);
+      throw classifyOrderError(new Error(errMsg), 'sell');
     }
 
     // Transfer 1% commission from estimated sell proceeds (fire-and-forget)
-    const sellCommissionUsdc = price * size * COMMISSION_RATE;
+    const sellCommissionUsdc = cleanPrice * cleanSize * COMMISSION_RATE;
     transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, sellCommissionUsdc, user.id, user.predexonUserId ?? undefined)
       .catch((feeErr) => {
         logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);
@@ -1160,32 +1163,55 @@ async function executePositionOrder(
   }
 
   // BUY: market order via Predexon
-  const buyAmount = parseFloat((size * price).toFixed(6));
+  const buyAmount = parseFloat((cleanSize * cleanPrice).toFixed(6));
 
   logger.info(`[positionTrade] Predexon market BUY: amount=$${buyAmount} negRisk=${negRisk}`);
 
-  const buyOrderResponse = await predexonPlaceOrder(predexonUserId, {
-    venue: 'polymarket',
-    tokenId: assetId,
-    side: 'buy',
-    type: 'market',
-    amount: String(buyAmount),
-  });
+  let buyOrderResponse;
+  try {
+    buyOrderResponse = await predexonPlaceOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId: assetId,
+      side: 'buy',
+      type: 'market',
+      amount: String(buyAmount),
+    });
+  } catch (err: any) {
+    throw classifyOrderError(err, 'buy');
+  }
 
   if (!buyOrderResponse.orderId) {
     const errMsg = (buyOrderResponse as any).error || (buyOrderResponse as any).message || 'Buy order placement failed';
     logger.error(`[positionTrade] Predexon buy rejected: ${errMsg}`);
-    throw new Error(errMsg);
+    throw classifyOrderError(new Error(errMsg), 'buy');
   }
 
   // Transfer 1% commission after successful order (fire-and-forget)
-  const buyCommissionUsdc = price * size * COMMISSION_RATE;
+  const buyCommissionUsdc = cleanPrice * cleanSize * COMMISSION_RATE;
   transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, buyCommissionUsdc, user.id, user.predexonUserId ?? undefined)
     .catch((feeErr) => {
       logger.warn('[positionTrade] Commission transfer after buy failed (non-fatal):', feeErr);
     });
 
   return { orderID: buyOrderResponse.orderId };
+}
+
+/** Maps raw API / network errors to user-friendly messages */
+function classifyOrderError(err: any, side: 'buy' | 'sell'): Error {
+  const raw = String(err?.message ?? '');
+  logger.error(`[positionTrade] ${side} order failed (raw): ${raw}`);
+
+  if (/no orders found|liquidity|no matching|empty book/i.test(raw))
+    return new Error('Market is illiquid — no orders on the book. Try again later.');
+  if (/balance|allowance|insufficient/i.test(raw))
+    return new Error('Insufficient balance or allowance. Your on-chain balance may have changed.');
+  if (/order failed|order rejected|matching failed/i.test(raw))
+    return new Error('Order could not be matched — market may be illiquid or closed.');
+  if (/timed? ?out|ETIMEDOUT|ECONNRESET/i.test(raw))
+    return new Error('Network timeout while placing order. Try again.');
+  // Fallback: strip "Predexon API error: ..." prefix for cleaner display
+  const cleaned = raw.replace(/^Predexon API error:\s*\d+\s*[A-Za-z ]*\s*—\s*/, '').trim();
+  return new Error(cleaned || `${side} order failed`);
 }
 
 /**
@@ -1201,27 +1227,34 @@ export async function executeCloseAllPositions(
   let failed = 0;
   const errors: string[] = [];
 
-  const results = await Promise.allSettled(
-    positions.map(async (pos) => {
-      if (pos.size < MIN_ORDER_SIZE) {
-        throw new Error(`too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
-      }
-      const price = Math.max(pos.curPrice * (1 - slippagePct / 100), 0.01);
-      await executePositionOrder(user, pos.asset, pos.conditionId, pos.negativeRisk, 'sell', price, pos.size);
-      logger.info(`[positionTrade] closeAll: closed ${pos.outcome} (${pos.size.toFixed(2)} sh)`);
-      return pos.outcome;
-    })
-  );
-
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    if (r.status === 'fulfilled') {
-      closed++;
-    } else {
+  // Process sequentially to avoid rate-limit / nonce collisions on Predexon
+  for (const pos of positions) {
+    if (pos.size < MIN_ORDER_SIZE) {
       failed++;
-      const msg = (r.reason?.message ?? 'Unknown error').substring(0, 60);
-      errors.push(`${positions[i].outcome}: ${msg}`);
-      logger.warn(`[positionTrade] closeAll: failed to close ${positions[i].outcome}: ${msg}`);
+      errors.push(`${pos.outcome}: too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
+      continue;
+    }
+
+    // First attempt with user's slippage, retry with 5x slippage on failure
+    const attempts = [slippagePct, Math.min(slippagePct * 5, 50)];
+    let success = false;
+
+    for (const slip of attempts) {
+      try {
+        const price = Math.max(pos.curPrice * (1 - slip / 100), 0.01);
+        await executePositionOrder(user, pos.asset, pos.conditionId, pos.negativeRisk, 'sell', price, pos.size);
+        logger.info(`[positionTrade] closeAll: closed ${pos.outcome} (${pos.size.toFixed(2)} sh, slip=${slip}%)`);
+        closed++;
+        success = true;
+        break;
+      } catch (err: any) {
+        logger.warn(`[positionTrade] closeAll: attempt slip=${slip}% failed for ${pos.outcome}: ${err.message}`);
+      }
+    }
+
+    if (!success) {
+      failed++;
+      errors.push(`${pos.outcome}: Order could not be matched — market may be illiquid or closed.`);
     }
   }
 
