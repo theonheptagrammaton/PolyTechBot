@@ -88,7 +88,7 @@ app.get('/api/stats/overview', async (req, res) => {
     });
   } catch (err) {
     console.error('overview error:', err);
-    res.status(500).json({ error: 'Internal error' });
+    res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });
 
@@ -146,7 +146,7 @@ app.get('/api/stats/users', async (req, res) => {
     });
   } catch (err) {
     console.error('users stats error:', err);
-    res.status(500).json({ error: 'Internal error' });
+    res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });
 
@@ -200,7 +200,7 @@ app.get('/api/stats/trades', async (req, res) => {
     });
   } catch (err) {
     console.error('trades stats error:', err);
-    res.status(500).json({ error: 'Internal error' });
+    res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });
 
@@ -259,7 +259,7 @@ app.get('/api/stats/copy-trade', async (req, res) => {
     });
   } catch (err) {
     console.error('copy-trade stats error:', err);
-    res.status(500).json({ error: 'Internal error' });
+    res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });
 
@@ -317,7 +317,7 @@ app.get('/api/stats/financials', async (req, res) => {
     });
   } catch (err) {
     console.error('financials error:', err);
-    res.status(500).json({ error: 'Internal error' });
+    res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });
 
@@ -334,7 +334,7 @@ app.get('/api/feed/recent', async (req, res) => {
     res.json(trades);
   } catch (err) {
     console.error('feed error:', err);
-    res.status(500).json({ error: 'Internal error' });
+    res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });
 
