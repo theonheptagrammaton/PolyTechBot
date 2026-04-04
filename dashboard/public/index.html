@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EP-POLYTECH Dashboard</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- Login overlay -->
+  <div id="login-overlay" class="login-overlay">
+    <div class="login-box">
+      <h1 class="login-title">EP-POLYTECH</h1>
+      <p class="login-subtitle">Monitoring Dashboard</p>
+      <input type="password" id="login-token" placeholder="Enter access token" autocomplete="off">
+      <button id="login-btn" class="btn-ghost">AUTHENTICATE</button>
+      <p id="login-error" class="login-error"></p>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard" class="dashboard hidden">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="topbar-title">EP-POLYTECH</span>
+        <span class="topbar-divider">|</span>
+        <span class="topbar-label">MONITORING</span>
+      </div>
+      <div class="topbar-right">
+        <span id="live-clock" class="topbar-clock"></span>
+        <button id="logout-btn" class="btn-ghost btn-sm">LOGOUT</button>
+      </div>
+    </header>
+
+    <!-- Tabs -->
+    <nav class="tabs">
+      <a href="#overview" class="tab active" data-tab="overview">Overview</a>
+      <a href="#users" class="tab" data-tab="users">Users</a>
+      <a href="#trades" class="tab" data-tab="trades">Trades</a>
+      <a href="#copytrade" class="tab" data-tab="copytrade">Copy Trade</a>
+      <a href="#financials" class="tab" data-tab="financials">Financials</a>
+    </nav>
+
+    <!-- Period selector -->
+    <div class="period-bar">
+      <div class="period-selector">
+        <button class="period-btn" data-period="24h">24H</button>
+        <button class="period-btn" data-period="7d">7D</button>
+        <button class="period-btn active" data-period="30d">30D</button>
+        <button class="period-btn" data-period="90d">90D</button>
+        <button class="period-btn" data-period="all">ALL</button>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <main id="content" class="content"></main>
+  </div>
+
+  <script src="/js/utils.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/charts.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

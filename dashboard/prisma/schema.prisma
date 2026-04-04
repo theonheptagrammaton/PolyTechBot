@@ -1,0 +1,164 @@
+// Dashboard read-only copy of the bot's Prisma schema.
+// Dashboard never runs migrations — bot owns the schema.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String   @id @default(cuid())
+  telegramId       String   @unique
+  username         String?
+  firstName        String?
+  lastName         String?
+
+  walletAddress    String   @unique
+  encryptedPrivateKey String
+
+  predexonUserId   String?
+
+  polymarketProxyAddress String?
+
+  depositAddressEvm String?
+  depositAddressSvm String?
+  depositAddressBtc String?
+  depositAddressTvm String?
+
+  solanaAddress    String?
+  encryptedSolanaPrivateKey String?
+
+  encryptedApiKey    String
+  encryptedApiSecret String
+  encryptedPassphrase String
+
+  twoFactorSecret     String?
+  twoFactorEnabled    Boolean  @default(false)
+  backupCodes         String?
+
+  defaultTradeAmount  Int      @default(25)
+  slippageTolerance   Float    @default(1.0)
+  tradingEnabled      Boolean  @default(false)
+
+  referralCode        String?  @unique
+  referredById        String?
+  referredBy          User?    @relation("Referrals", fields: [referredById], references: [id])
+  referrals           User[]   @relation("Referrals")
+  referralClaimable   Float    @default(0)
+  referralEarnedTotal Float    @default(0)
+
+  cashbackClaimable   Float    @default(0)
+  cashbackEarnedTotal Float    @default(0)
+
+  copySubscriptions CopySubscription[]
+  copiedTrades      CopiedTrade[]
+
+  isAdmin          Boolean  @default(false)
+  isActive         Boolean  @default(true)
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([telegramId])
+  @@index([walletAddress])
+  @@index([referralCode])
+  @@map("users")
+}
+
+model CopySubscription {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  traderAddress  String
+  label          String?
+
+  fixedAmount    Float?
+  multiplier     Float?
+
+  buyMethod      String   @default("fixed")
+
+  autoStopBelowBalance Float @default(1.0)
+
+  takeProfitPct   Float?
+  stopLossPct     Float?
+  stopLossFixed   Float?
+  takeProfitFixed Float?
+
+  isPaused             Boolean @default(false)
+  notificationsEnabled Boolean @default(true)
+  slippage             Float   @default(10.0)
+  priceMin             Float?
+  priceMax             Float?
+  singleTradeMax       Float?
+  minBuyAmount         Float?
+  maxSpendPerMarket    Float?
+  maxSpendTotal        Float?
+  dailySpendMax        Float?
+
+  minTriggerPrice Float?
+  maxTriggerPrice Float?
+  maxDaysOut      Int?
+  minLiquidity    Float?
+  minVolume       Float?
+  categories      String?
+
+  followBuys     Boolean  @default(true)
+  copySells      Boolean  @default(true)
+  buyOnSells     Boolean  @default(false)
+  counterTrade   Boolean  @default(false)
+  limitMode      Boolean  @default(false)
+  copySide       String   @default("both")
+
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  copiedTrades   CopiedTrade[]
+
+  @@unique([userId, traderAddress])
+  @@index([isActive])
+  @@map("copy_subscriptions")
+}
+
+model CommissionLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  amount    Float
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
+  @@map("commission_logs")
+}
+
+model CopiedTrade {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?
+  subscription   CopySubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  traderAddress  String
+  marketId       String
+  outcome        String
+  side           String
+  sourceSize     Float
+  copiedSize     Float
+  price          Float
+  assetId        String?
+  orderID        String?
+  status         String   @default("pending")
+  tpSlStatus     String?
+  errorMsg       String?
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([traderAddress])
+  @@index([subscriptionId])
+  @@map("copied_trades")
+}

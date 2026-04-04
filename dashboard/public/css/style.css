@@ -1,0 +1,321 @@
+/* --- CSS Custom Properties --- */
+:root {
+  --bg-base: #0A0A0A;
+  --bg-surface: #111111;
+  --bg-elevated: #1A1A1A;
+  --bg-hover: #222222;
+  --border: rgba(232, 226, 217, 0.08);
+  --border-strong: rgba(232, 226, 217, 0.15);
+  --text-primary: #E8E2D9;
+  --text-secondary: rgba(232, 226, 217, 0.5);
+  --text-tertiary: rgba(232, 226, 217, 0.3);
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+/* --- Reset --- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Scrollbar --- */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); }
+
+/* --- Login --- */
+.login-overlay {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-base);
+  z-index: 1000;
+}
+.login-overlay.hidden { display: none; }
+
+.login-box {
+  width: 320px;
+  text-align: center;
+}
+.login-title {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 300;
+  letter-spacing: 4px;
+  margin-bottom: 4px;
+}
+.login-subtitle {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 32px;
+}
+.login-box input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  margin-bottom: 12px;
+}
+.login-box input:focus { border-color: var(--border-strong); }
+.login-box input::placeholder { color: var(--text-tertiary); }
+.login-error { color: #a0706e; font-size: 11px; margin-top: 8px; min-height: 16px; }
+
+/* --- Buttons --- */
+.btn-ghost {
+  display: inline-block;
+  padding: 8px 20px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  width: 100%;
+}
+.btn-ghost:hover { background: var(--bg-elevated); border-color: var(--text-secondary); }
+.btn-sm { padding: 4px 12px; width: auto; font-size: 10px; }
+
+/* --- Dashboard layout --- */
+.dashboard { display: flex; flex-direction: column; height: 100vh; }
+.dashboard.hidden { display: none; }
+
+/* --- Top bar --- */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+}
+.topbar-left { display: flex; align-items: center; gap: 10px; }
+.topbar-title {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 300;
+  letter-spacing: 3px;
+}
+.topbar-divider { color: var(--text-tertiary); }
+.topbar-label {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+}
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.topbar-clock {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  letter-spacing: 1px;
+}
+
+/* --- Tabs --- */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  background: var(--bg-surface);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+.tab {
+  padding: 10px 20px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--text-tertiary);
+  text-decoration: none;
+  text-transform: uppercase;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--text-secondary); }
+.tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+}
+
+/* --- Period bar --- */
+.period-bar {
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.period-selector { display: flex; gap: 4px; }
+.period-btn {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.period-btn:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+.period-btn.active {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+/* --- Content --- */
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+/* --- KPI grid --- */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1px;
+  background: var(--border);
+}
+.kpi-grid-4 { grid-template-columns: repeat(4, 1fr); }
+.kpi-grid-3 { grid-template-columns: repeat(3, 1fr); }
+.kpi-grid-5 { grid-template-columns: repeat(5, 1fr); }
+
+.kpi-card {
+  background: var(--bg-surface);
+  padding: 16px 20px;
+}
+.kpi-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.kpi-value {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 300;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+}
+
+/* --- Charts --- */
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+  margin-top: 16px;
+}
+.chart-box {
+  background: var(--bg-surface);
+  padding: 20px;
+}
+.chart-container { height: 240px; position: relative; }
+.chart-container-wide { height: 200px; position: relative; }
+
+/* --- Section --- */
+.section {
+  margin-top: 16px;
+  background: var(--bg-surface);
+  padding: 20px;
+}
+.section-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  margin-bottom: 16px;
+  font-weight: 400;
+}
+
+/* --- Tables --- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.data-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-tertiary);
+  font-weight: 400;
+  border-bottom: 1px solid var(--border);
+}
+.data-table td {
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.data-table tr:hover td { background: var(--bg-elevated); }
+.data-table tr:last-child td { border-bottom: none; }
+
+.mono { font-family: var(--font-mono); }
+
+/* --- Tags --- */
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  border: 1px solid var(--border-strong);
+}
+.tag-buy { color: var(--text-primary); }
+.tag-sell { color: var(--text-secondary); }
+
+/* --- Status --- */
+.status {
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.status-filled { color: var(--text-primary); }
+.status-failed { color: #a0706e; }
+.status-skipped { color: var(--text-tertiary); }
+.status-pending { color: var(--text-secondary); }
+
+/* --- Loading / empty --- */
+.loading, .empty, .error {
+  text-align: center;
+  padding: 40px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+.error { color: #a0706e; }
+
+/* --- Responsive --- */
+@media (max-width: 1200px) {
+  .kpi-grid, .kpi-grid-4, .kpi-grid-5 { grid-template-columns: repeat(3, 1fr); }
+  .chart-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 768px) {
+  .kpi-grid, .kpi-grid-3, .kpi-grid-4, .kpi-grid-5 { grid-template-columns: repeat(2, 1fr); }
+  .chart-grid { grid-template-columns: 1fr; }
+  .content { padding: 16px; }
+  .topbar { padding: 10px 16px; }
+  .tabs { padding: 0 16px; }
+  .period-bar { padding: 10px 16px; }
+  .kpi-value { font-size: 18px; }
+}

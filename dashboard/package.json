@@ -1,0 +1,17 @@
+{
+  "name": "polytech-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:generate": "npx prisma generate"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "@prisma/client": "^6.1.0"
+  },
+  "devDependencies": {
+    "prisma": "^6.1.0"
+  }
+}
