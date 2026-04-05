@@ -1226,17 +1226,18 @@ export async function handlePnl(ctx: Context): Promise<void> {
     }
 
     const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
-    const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
-    const totalPnl        = totalUnrealized + totalRealized;
+    const activeRealized  = activePositions.reduce((s, p) => s + p.realizedPnl, 0);
+    const closedRealized  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
+    const totalPnl        = totalUnrealized + activeRealized + closedRealized;
     const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
     const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
     const totalInvested   = activeInvested + closedInvested;
     const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
 
-    // All-time card stats
+    // All-time card stats — each position's total PnL = unrealized + realized
     const tradeCount = activePositions.length + closedPositions.length;
     const allPnls = [
-      ...activePositions.map(p => p.cashPnl),
+      ...activePositions.map(p => p.cashPnl + p.realizedPnl),
       ...closedPositions.map(p => p.realizedPnl),
     ];
     const bestTrade  = allPnls.length > 0 ? Math.max(...allPnls) : 0;
@@ -1425,12 +1426,13 @@ export async function handlePnlShare(ctx: Context, type: 'alltime' | 'portfolio'
 
     if (type === 'alltime') {
       const totalUnrealized = activePositions.reduce((s, p) => s + p.cashPnl, 0);
-      const totalRealized   = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
-      const totalPnl        = totalUnrealized + totalRealized;
+      const activeRealized  = activePositions.reduce((s, p) => s + p.realizedPnl, 0);
+      const closedRealized  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
+      const totalPnl        = totalUnrealized + activeRealized + closedRealized;
 
       const tradeCount = activePositions.length + closedPositions.length;
       const allPnls = [
-        ...activePositions.map(p => p.cashPnl),
+        ...activePositions.map(p => p.cashPnl + p.realizedPnl),
         ...closedPositions.map(p => p.realizedPnl),
       ];
       const bestTrade  = allPnls.length > 0 ? Math.max(...allPnls) : 0;

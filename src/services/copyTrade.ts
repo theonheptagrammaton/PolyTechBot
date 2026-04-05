@@ -230,6 +230,8 @@ interface ExecResult {
   // F4: Our execution price (worst-case limit we submitted), used as TP/SL entry price.
   // Distinct from trade.price (the trader's fill price) which could differ due to slippage.
   filledPrice?: number;
+  /** Actual USDC amount sent to exchange (after commission deduction) */
+  actualAmount?: number;
 }
 
 async function executeCopyOrder(
@@ -365,7 +367,7 @@ async function executeCopyOrder(
       );
     }
 
-    return { status: 'filled', orderID: orderResp.orderId, filledPrice: price };
+    return { status: 'filled', orderID: orderResp.orderId, filledPrice: price, actualAmount: tradeAmount };
   } catch (err: any) {
     if (isNoOrderbook(err)) {
       return { status: 'skipped', errorMsg: 'market closed/no orderbook' };
@@ -766,8 +768,14 @@ async function tickForTrader(
             const marketUrl = (mktInfo?.eventSlug || mktInfo?.slug)
               ? `https://polymarket.com/event/${mktInfo!.eventSlug || mktInfo!.slug}`
               : `https://polymarket.com/profile/${traderAddress}`;
-            const shares = trade.size > 0 ? trade.size : (trade.price > 0 ? trade.sizeUsd / trade.price : 0);
             const sideLabel = effectiveSide === 'BUY' ? 'BOUGHT' : 'SOLD';
+
+            // Use actual traded amount (post-commission) for BUY, copySize for SELL
+            const displayAmount = result.actualAmount ?? copySize;
+            // Use copy's fill price if available, otherwise leader's price
+            const displayPrice = result.filledPrice ?? trade.price;
+            // Compute shares from the copy's values
+            const shares = displayPrice > 0 ? displayAmount / displayPrice : 0;
 
             // Fetch on-chain tx hash for the copy order (non-blocking with short timeout)
             let txLine = '';
@@ -785,12 +793,12 @@ async function tickForTrader(
             }
 
             const msg =
-              `⚡ <b>${escHtml(traderName)}</b> just <b>${sideLabel} ${effectiveOutcome}</b> for <b>${copySize.toFixed(2)} USDC</b>\n\n` +
+              `⚡ <b>${escHtml(traderName)}</b> just <b>${sideLabel} ${effectiveOutcome}</b> for <b>${displayAmount.toFixed(2)} USDC</b>\n\n` +
               `📊 Market: <b>${escHtml(question)}</b>\n` +
               `🎯 Outcome: <b>${effectiveOutcome}</b>\n` +
-              `💰 Price: <b>$${trade.price.toFixed(3)}</b>\n` +
+              `💰 Price: <b>$${displayPrice.toFixed(3)}</b>\n` +
               `📈 Shares: <b>${shares.toFixed(2)}</b>\n` +
-              `💵 USDC Amount: <b>${copySize.toFixed(2)} USDC</b>\n` +
+              `💵 USDC Amount: <b>${displayAmount.toFixed(2)} USDC</b>\n` +
               txLine +
               `\n<a href="${marketUrl}">View Market</a>`;
 
