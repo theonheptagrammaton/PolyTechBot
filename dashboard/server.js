@@ -6,6 +6,7 @@ const app = express();
 const prisma = new PrismaClient();
 const PORT = process.env.PORT || 3000;
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN;
+const COMMISSION_RATE = 0.01; // 1% — volume = commission / rate
 
 if (!DASHBOARD_TOKEN) {
   console.error('DASHBOARD_TOKEN env var is required');
@@ -65,10 +66,9 @@ app.get('/api/stats/overview', async (req, res) => {
     const since = periodToDate(req.query.period);
     const dateFilter = since ? { createdAt: { gte: since } } : {};
 
-    const [totalUsers, totalTrades, volumeAgg, commissionAgg, activeSubs, filledTrades, failedTrades, skippedTrades] = await Promise.all([
+    const [totalUsers, totalTrades, commissionAgg, activeSubs, filledTrades, failedTrades, skippedTrades] = await Promise.all([
       prisma.user.count({ where: dateFilter }),
       prisma.copiedTrade.count({ where: dateFilter }),
-      prisma.copiedTrade.aggregate({ where: { ...dateFilter, status: 'filled' }, _sum: { copiedSize: true } }),
       prisma.commissionLog.aggregate({ where: dateFilter, _sum: { amount: true } }),
       prisma.copySubscription.count({ where: { isActive: true, isPaused: false } }),
       prisma.copiedTrade.count({ where: { ...dateFilter, status: 'filled' } }),
@@ -76,14 +76,16 @@ app.get('/api/stats/overview', async (req, res) => {
       prisma.copiedTrade.count({ where: { ...dateFilter, status: 'skipped' } }),
     ]);
 
+    const totalCommission = commissionAgg._sum.amount || 0;
+
     res.json({
       totalUsers,
       totalTrades,
       filledTrades,
       failedTrades,
       skippedTrades,
-      totalVolume: volumeAgg._sum.copiedSize || 0,
-      totalCommission: commissionAgg._sum.amount || 0,
+      totalVolume: totalCommission / COMMISSION_RATE,
+      totalCommission,
       activeSubs,
     });
   } catch (err) {
@@ -166,12 +168,13 @@ app.get('/api/stats/trades', async (req, res) => {
       GROUP BY date ORDER BY date
     `);
 
-    const dailyVolume = await prisma.$queryRawUnsafe(`
+    const dailyVolumeRaw = await prisma.$queryRawUnsafe(`
       SELECT DATE_TRUNC('${unit}', "createdAt") AS date,
-        COALESCE(SUM("copiedSize") FILTER (WHERE status = 'filled'), 0) AS volume
-      FROM copied_trades ${dateClause}
+        COALESCE(SUM(amount), 0) AS commission
+      FROM commission_logs ${dateClause}
       GROUP BY date ORDER BY date
     `);
+    const dailyVolume = dailyVolumeRaw.map(d => ({ date: d.date, volume: Number(d.commission) / COMMISSION_RATE }));
 
     const statusBreakdown = await prisma.$queryRawUnsafe(`
       SELECT DATE_TRUNC('${unit}', "createdAt") AS date,
