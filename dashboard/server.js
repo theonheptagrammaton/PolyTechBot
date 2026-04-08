@@ -351,6 +351,26 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`Dashboard running on port ${PORT}`);
-});
+// --- Startup with DB connection retry ---
+async function start() {
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      await prisma.$connect();
+      console.log('Database connected');
+      break;
+    } catch (err) {
+      console.error(`DB connection attempt ${attempt}/10 failed: ${err.message}`);
+      if (attempt === 10) {
+        console.error('Could not connect to database after 10 attempts, exiting');
+        process.exit(1);
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Dashboard running on port ${PORT}`);
+  });
+}
+
+start();
