@@ -418,6 +418,7 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
     });
   } catch (error) {
     logger.error('Error starting sell flow:', error);
+    await ctx.reply('❌ Could not start sell flow. Please try again.').catch(() => {});
   }
 }
 
@@ -658,7 +659,8 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
       positionTradeState.set(telegramId, state);
     }
 
-    const shares = parseFloat(((pos.size * pct) / 100).toFixed(2));
+    // Floor to 2 decimals — never sell more shares than the user owns
+    const shares = Math.floor((pos.size * pct) / 100 * 100) / 100;
 
     if (shares < MIN_ORDER_SIZE) {
       const minPct = Math.ceil((MIN_ORDER_SIZE / pos.size) * 100);
@@ -684,6 +686,7 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     await showSellConfirmation(ctx, telegramId, state, price, shares);
   } catch (error) {
     logger.error('Error in quick pct sell:', error);
+    try { await ctx.answerCbQuery('❌ An error occurred. Please try again.', { show_alert: true }); } catch {}
   }
 }
 
@@ -736,7 +739,8 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
   }
 
   if (state.action === 'sell') {
-    const shares = parseFloat(val.toFixed(4));
+    // Floor to 4 decimals — never sell more than owned
+    const shares = Math.floor(val * 10000) / 10000;
     if (shares > state.currentSize * 1.001) {
       await ctx.reply(`❌ You only have ${state.currentSize.toFixed(4)} shares. Cannot sell ${shares}.`);
       return;
@@ -1125,13 +1129,19 @@ async function executePositionOrder(
 
   const predexonUserId = await ensurePredexonUser(user);
 
-  // Normalize precision to avoid floating-point dust (Polymarket uses 2 decimals for size)
-  const cleanSize = parseFloat(size.toFixed(2));
+  // Normalize precision: floor sells to avoid exceeding actual position, round buys normally
+  const cleanSize = action === 'sell'
+    ? Math.floor(size * 100) / 100      // Floor — never sell more than owned
+    : parseFloat(size.toFixed(2));
   const cleanPrice = parseFloat(price.toFixed(4));
 
   if (action === 'sell') {
+    if (cleanSize < MIN_ORDER_SIZE) {
+      throw new Error(`Position too small to sell (${cleanSize} shares, min ${MIN_ORDER_SIZE})`);
+    }
+
     logger.info(
-      `[positionTrade] Predexon market SELL: ${cleanSize} shares assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
+      `[positionTrade] Predexon market SELL: ${cleanSize} shares (raw=${size}) assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
     );
 
     let sellOrderResponse;
