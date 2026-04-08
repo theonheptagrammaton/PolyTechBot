@@ -128,12 +128,10 @@ export async function createClobClientForUser(
  */
 export async function getActivePositions(proxyAddress: string, forceRefresh = false): Promise<ActivePosition[]> {
   const cacheKey = `portfolio:active:${proxyAddress}`;
-  if (forceRefresh) {
-    await redisCache.del(cacheKey).catch(() => {});
-  } else {
-    const cached = await redisCache.get<ActivePosition[]>(cacheKey).catch(() => null);
-    if (cached) return cached;
-  }
+
+  // Try cache first (unless forceRefresh)
+  const cached = await redisCache.get<ActivePosition[]>(cacheKey).catch(() => null);
+  if (!forceRefresh && cached) return cached;
 
   try {
     logger.info(`Fetching active positions from Data API for ${proxyAddress}`);
@@ -143,6 +141,11 @@ export async function getActivePositions(proxyAddress: string, forceRefresh = fa
 
     if (!response.ok) {
       logger.warn(`Data API /positions returned ${response.status}`);
+      // Fall back to stale cache instead of returning empty
+      if (cached) {
+        logger.info(`Returning stale cache (${cached.length} positions) after API ${response.status}`);
+        return cached;
+      }
       return [];
     }
 
@@ -155,6 +158,11 @@ export async function getActivePositions(proxyAddress: string, forceRefresh = fa
     return active;
   } catch (error) {
     logger.warn('Error fetching active positions:', error);
+    // Fall back to stale cache instead of returning empty
+    if (cached) {
+      logger.info(`Returning stale cache (${cached.length} positions) after fetch error`);
+      return cached;
+    }
     return [];
   }
 }
@@ -165,12 +173,9 @@ export async function getActivePositions(proxyAddress: string, forceRefresh = fa
  */
 export async function getClosedPositions(proxyAddress: string, forceRefresh = false): Promise<ClosedPosition[]> {
   const cacheKey = `portfolio:closed:${proxyAddress}`;
-  if (forceRefresh) {
-    await redisCache.del(cacheKey).catch(() => {});
-  } else {
-    const cached = await redisCache.get<ClosedPosition[]>(cacheKey).catch(() => null);
-    if (cached) return cached;
-  }
+
+  const cached = await redisCache.get<ClosedPosition[]>(cacheKey).catch(() => null);
+  if (!forceRefresh && cached) return cached;
 
   try {
     logger.info(`Fetching closed positions from Data API for ${proxyAddress}`);
@@ -180,6 +185,7 @@ export async function getClosedPositions(proxyAddress: string, forceRefresh = fa
 
     if (!response.ok) {
       logger.warn(`Data API /closed-positions returned ${response.status}`);
+      if (cached) return cached;
       return [];
     }
 
@@ -192,6 +198,7 @@ export async function getClosedPositions(proxyAddress: string, forceRefresh = fa
     return positions;
   } catch (error) {
     logger.warn('Error fetching closed positions:', error);
+    if (cached) return cached;
     return [];
   }
 }
