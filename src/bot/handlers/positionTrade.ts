@@ -381,6 +381,20 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
       return;
     }
 
+    // Redeemable positions (resolved markets) can't be sold — they need to be claimed
+    if (pos.redeemable && pos.size <= 0) {
+      await ctx.reply(
+        `✅ *Market Resolved*\n\n*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
+        `This position is awaiting automatic claim. Your USDC.e will be returned shortly.\n\n` +
+        `_Go to Active Positions to trigger the claim._`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('📊 Active Positions', 'portfolio_open_1')]]),
+        }
+      );
+      return;
+    }
+
     positionTradeState.set(telegramId, {
       action: 'sell',
       assetId: pos.asset,
@@ -1232,7 +1246,9 @@ export async function executeCloseAllPositions(
   user: any,
   slippagePct: number = 1.0,
 ): Promise<{ closed: number; failed: number; errors: string[] }> {
-  const positions = await getActivePositions(user.polymarketProxyAddress);
+  const allPositions = await getActivePositions(user.polymarketProxyAddress);
+  // Skip redeemable positions (resolved markets) — they need claiming, not selling
+  const positions = allPositions.filter(pos => pos.size > 0 && !pos.redeemable);
   let closed = 0;
   let failed = 0;
   const errors: string[] = [];

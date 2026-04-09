@@ -151,7 +151,8 @@ export async function getActivePositions(proxyAddress: string, forceRefresh = fa
 
     const data = await response.json();
     const positions: ActivePosition[] = Array.isArray(data) ? data : [];
-    const active = positions.filter((p) => p.size > 0);
+    // Keep positions with shares OR redeemable (resolved markets may have size=0 but still need claiming)
+    const active = positions.filter((p) => p.size > 0 || p.redeemable);
 
     await redisCache.set(cacheKey, active, ACTIVE_POSITIONS_TTL).catch(() => {});
     logger.info(`Fetched ${active.length} active positions`);

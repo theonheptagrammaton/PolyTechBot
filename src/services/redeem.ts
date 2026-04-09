@@ -257,10 +257,11 @@ async function _doRedeem(
   for (const pos of pending) {
     try {
       const key = claimedKey(proxyAddress, pos.conditionId);
-      await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
 
       const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position: pos, predexonUserId });
       if (result.success) {
+        // Set dedup key ONLY after successful claim — prevents lost funds on failed attempts
+        await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
         claimed++;
         logger.info(`[redeem] Claimed: ${pos.outcome} / ${pos.title.slice(0, 40)}`);
         if (notifyFn) {
@@ -272,7 +273,6 @@ async function _doRedeem(
           ).catch(() => {});
         }
       } else {
-        await redisCache.del(key).catch(() => {});
         logger.warn(`[redeem] Failed to claim ${pos.outcome}: ${result.error}`);
       }
     } catch (err: any) {

@@ -163,15 +163,23 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
       return;
     }
 
+    // Force-refresh when navigated via callback so portfolio and active positions stay in sync
+    const forceRefresh = !!ctx.callbackQuery;
     const [activePositions, closedPositions, balance] = await Promise.all([
-      getActivePositions(user.polymarketProxyAddress || '').catch(() => [] as ActivePosition[]),
-      getClosedPositions(user.polymarketProxyAddress || '').catch(() => [] as ClosedPosition[]),
+      getActivePositions(user.polymarketProxyAddress || '', forceRefresh).catch(() => [] as ActivePosition[]),
+      getClosedPositions(user.polymarketProxyAddress || '', forceRefresh).catch(() => [] as ClosedPosition[]),
       getBalance(
         user.encryptedPrivateKey, user.encryptedApiKey,
         user.encryptedApiSecret, user.encryptedPassphrase,
         user.predexonUserId ?? undefined
       ).catch(() => '0.00'),
     ]);
+
+    // Sync positionListCache so active positions page & sell/view actions use the same data
+    if (activePositions.length > 0) {
+      const { positionListCache } = await import('./positionTrade');
+      positionListCache.set(telegramId, activePositions);
+    }
 
     // Auto-claim any resolved/redeemable positions (fire-and-forget)
     const redeemable = activePositions.filter(p => p.redeemable);
