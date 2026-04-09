@@ -184,7 +184,11 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
         redeemable.map(p => p.conditionId as string),
       );
       if (claimedIds.size > 0) {
-        visiblePositions = activePositions.filter(p => !p.redeemable || !claimedIds.has(p.conditionId as string));
+        visiblePositions = activePositions.filter(p =>
+          p.size > 0 ||                           // on-chain proof: not yet settled
+          !p.redeemable ||                         // not redeemable → always show
+          !claimedIds.has(p.conditionId as string)  // no claimed key → show
+        );
         logger.info(`[portfolio] Filtered ${activePositions.length - visiblePositions.length} claimed positions (${claimedIds.size} claimed keys)`);
       }
     }
@@ -287,7 +291,9 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     const { positionListCache } = await import('./positionTrade');
     const positions = await getActivePositions(user.polymarketProxyAddress || '', !!ctx.callbackQuery);
 
-    // Filter out positions that are redeemable AND already claimed — move them to Closed
+    // Filter out positions that are redeemable AND already claimed AND have no shares left.
+    // Positions with size > 0 are ALWAYS shown — even if Redis has a claimed key, the on-chain
+    // state (size > 0) proves the claim hasn't actually settled yet.
     const redeemable = positions.filter(p => p.redeemable);
     let visiblePositions = positions;
     logger.info(`[openPositions] user=${telegramId} api=${positions.length} redeemable=${redeemable.length}`);
@@ -297,7 +303,11 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
         redeemable.map(p => p.conditionId as string),
       );
       if (claimedIds.size > 0) {
-        visiblePositions = positions.filter(p => !p.redeemable || !claimedIds.has(p.conditionId as string));
+        visiblePositions = positions.filter(p =>
+          p.size > 0 ||                           // on-chain proof: not yet settled
+          !p.redeemable ||                         // not redeemable → always show
+          !claimedIds.has(p.conditionId as string)  // no claimed key → show
+        );
         logger.info(`[openPositions] user=${telegramId} claimed=${claimedIds.size} visible=${visiblePositions.length}`);
       }
     }
