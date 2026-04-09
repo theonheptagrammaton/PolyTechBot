@@ -231,6 +231,25 @@ export async function getClaimedConditionIds(
   return claimed;
 }
 
+/**
+ * Manually redeems a single resolved position. Called when user presses "Redeem It" button.
+ * Returns { success, txHash?, error? }
+ */
+export async function manualRedeem(
+  encryptedPrivateKey: string,
+  proxyAddress: string,
+  position: ActivePosition,
+  predexonUserId?: string,
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position, predexonUserId });
+  if (result.success) {
+    const key = claimedKey(proxyAddress, position.conditionId);
+    await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
+    logger.info(`[redeem] Manual claim success: ${position.outcome} / ${position.title.slice(0, 40)}`);
+  }
+  return result;
+}
+
 async function _doRedeem(
   encryptedPrivateKey: string,
   proxyAddress: string,

@@ -28,7 +28,7 @@ import {
   ActivePosition,
   ClosedPosition,
 } from '../../services/portfolio';
-import { autoRedeemPositions, getClaimedConditionIds } from '../../services/redeem';
+import { getClaimedConditionIds } from '../../services/redeem';
 
 /**
  * Shows detailed wallet page with deposit addresses
@@ -199,22 +199,6 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
       positionListCache.set(telegramId, visiblePositions);
     }
 
-    // Auto-claim any resolved/redeemable positions (fire-and-forget)
-    if (redeemable.length > 0 && user.polymarketProxyAddress) {
-      autoRedeemPositions(
-        user.encryptedPrivateKey,
-        user.polymarketProxyAddress,
-        redeemable,
-        async (msg) => {
-          const sent = await ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => null);
-          if (sent) setTimeout(() => ctx.telegram.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 5000);
-        },
-        user.predexonUserId ?? undefined,
-      ).then(claimed => {
-        if (claimed > 0) invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
-      }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
-    }
-
     const totalInvested     = visiblePositions.reduce((s, p) => s + (p.initialValue), 0);
     const totalCurrentValue = visiblePositions.reduce((s, p) => s + p.currentValue, 0);
     const totalUnrealizedPnl = visiblePositions.reduce((s, p) => s + p.cashPnl, 0);
@@ -313,23 +297,6 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     }
 
     positionListCache.set(telegramId, visiblePositions);
-    if (redeemable.length > 0 && user.polymarketProxyAddress) {
-      autoRedeemPositions(
-        user.encryptedPrivateKey,
-        user.polymarketProxyAddress,
-        redeemable,
-        async (msg) => {
-          const sent = await ctx.reply(msg, { parse_mode: 'Markdown' }).catch(() => null);
-          if (sent) setTimeout(() => ctx.telegram.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 5000);
-        },
-        user.predexonUserId ?? undefined,
-      ).then(claimed => {
-        if (claimed > 0) {
-          // Invalidate cache so refreshed positions page shows updated balances
-          invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
-        }
-      }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
-    }
 
     if (visiblePositions.length === 0) {
       // Check for pending open orders so user knows their trades are on the book
@@ -406,9 +373,13 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
         const rSign = pos.realizedPnl >= 0 ? '+' : '';
         entry += `   ├ 💵 Realized: ${rSign}$${pos.realizedPnl.toFixed(2)}\n`;
       }
-      const redeemLine = pos.redeemable ? ' · ✅ Redeemable' : '';
-      entry += `   ├ 📅 Ends: ${endDate}${redeemLine}\n`;
-      entry += `   └ <a href="${viewLink}">👁 View</a> · <a href="${buyLink}">📈 Buy</a> · <a href="${sellLink}">📉 Sell</a> · <a href="${pnlLink}">📊 P&amp;L</a>\n\n`;
+      entry += `   ├ 📅 Ends: ${endDate}\n`;
+      if (pos.redeemable) {
+        const redeemLink = `https://t.me/${botUsername}?start=pr_${idx}`;
+        entry += `   └ <a href="${redeemLink}">💰 Redeem It</a> · <a href="${viewLink}">👁 View</a> · <a href="${pnlLink}">📊 P&amp;L</a>\n\n`;
+      } else {
+        entry += `   └ <a href="${viewLink}">👁 View</a> · <a href="${buyLink}">📈 Buy</a> · <a href="${sellLink}">📉 Sell</a> · <a href="${pnlLink}">📊 P&amp;L</a>\n\n`;
+      }
 
       message += entry;
     }

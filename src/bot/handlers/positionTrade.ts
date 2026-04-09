@@ -173,18 +173,26 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
     msg += `├ ROI: ${pnlSign}${pos.percentPnl.toFixed(1)}%\n`;
     msg += `└ Realized: $${pos.realizedPnl.toFixed(2)}\n\n`;
     msg += `⏰ Market ends: ${endDate}\n`;
-    if (pos.redeemable) msg += `✅ _Redeemable_\n`;
+    if (pos.redeemable) msg += `✅ _Market Resolved — Claim your USDC below_\n`;
+
+    const detailButtons = pos.redeemable
+      ? [
+          [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
+          [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
+          [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+        ]
+      : [
+          [
+            Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
+            Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+          ],
+          [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
+          [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+        ];
 
     await sendPage(ctx, msg, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
-          Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
-        ],
-        [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
-        [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
-      ]),
+      ...Markup.inlineKeyboard(detailButtons),
     });
   } catch (error) {
     logger.error('Error showing position view:', error);
@@ -382,14 +390,16 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
     }
 
     // Redeemable positions (resolved markets) can't be sold — they need to be claimed
-    if (pos.redeemable && pos.size <= 0) {
+    if (pos.redeemable) {
       await ctx.reply(
         `✅ *Market Resolved*\n\n*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-        `This position is awaiting automatic claim. Your USDC.e will be returned shortly.\n\n` +
-        `_Go to Active Positions to trigger the claim._`,
+        `This market has resolved. Use the Redeem button to claim your USDC.`,
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('📊 Active Positions', 'portfolio_open_1')]]),
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
+            [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+          ]),
         }
       );
       return;
@@ -433,6 +443,90 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
   } catch (error) {
     logger.error('Error starting sell flow:', error);
     await ctx.reply('❌ Could not start sell flow. Please try again.').catch(() => {});
+  }
+}
+
+// ─── Manual redeem flow ───────────────────────────────────────────────────
+
+export async function handlePositionRedeem(ctx: Context, idx: number): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Claiming...').catch(() => {});
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const pos = await getPosOrFetch(telegramId, idx);
+    if (!pos) {
+      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      return;
+    }
+
+    if (!pos.redeemable) {
+      await ctx.reply('⚠️ This position is not redeemable yet. The market has not resolved.');
+      return;
+    }
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user || !user.polymarketProxyAddress) {
+      await ctx.reply('❌ User or wallet not found.');
+      return;
+    }
+
+    // Show claiming in progress
+    const loadingMsg = await ctx.reply(
+      `${ce(EMOJI.loading, '⏳')} *Claiming position...*\n\n*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n_This may take up to 60 seconds._`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => null);
+
+    const { manualRedeem } = await import('../../services/redeem');
+    const result = await manualRedeem(
+      user.encryptedPrivateKey,
+      user.polymarketProxyAddress,
+      pos,
+      user.predexonUserId ?? undefined,
+    );
+
+    // Delete loading message
+    if (loadingMsg) await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id).catch(() => {});
+
+    if (result.success) {
+      // Invalidate caches
+      positionListCache.delete(telegramId);
+      const { invalidatePortfolioCache } = await import('../../services/portfolio');
+      await invalidatePortfolioCache(user.polymarketProxyAddress);
+
+      const truncTitle = pos.title.length > 50 ? pos.title.slice(0, 50) + '…' : pos.title;
+      await ctx.reply(
+        `✅ *Position Claimed!*\n\n` +
+        `*${pos.outcome}* — ${truncTitle}\n\n` +
+        `💵 USDC.e has been returned to your wallet.` +
+        (result.txHash ? `\n\n🔗 [View Transaction](https://polygonscan.com/tx/${result.txHash})` : ''),
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          ]),
+        }
+      );
+    } else {
+      await ctx.reply(
+        `❌ *Claim Failed*\n\n` +
+        `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
+        `${result.error || 'Unknown error'}\n\n_Please try again._`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Try Again', `pos_redeem_${idx}`)],
+            [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+          ]),
+        }
+      );
+    }
+  } catch (error) {
+    logger.error('Error in manual redeem:', error);
+    await ctx.reply('❌ An error occurred while claiming. Please try again.', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]),
+    }).catch(() => {});
   }
 }
 

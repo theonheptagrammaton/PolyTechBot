@@ -116,6 +116,7 @@ import {
   handlePositionExecuteStopLoss,
   handlePositionPnl,
   handlePositionPnlShare,
+  handlePositionRedeem,
   positionTradeState,
 } from './handlers/positionTrade';
 import {
@@ -503,7 +504,7 @@ export class TelegramBot {
     // Position full list
     this.bot.action('portfolio_open_full', handleOpenPositionsFull);
 
-    // Position actions: view / sell / buy
+    // Position actions: view / sell / buy / redeem
     this.bot.action(/^pos_view_(\d+)$/, async (ctx) => {
       await handlePositionView(ctx, parseInt(ctx.match[1], 10));
     });
@@ -512,6 +513,9 @@ export class TelegramBot {
     });
     this.bot.action(/^pos_buy_(\d+)$/, async (ctx) => {
       await handlePositionBuy(ctx, parseInt(ctx.match[1], 10));
+    });
+    this.bot.action(/^pos_redeem_(\d+)$/, async (ctx) => {
+      await handlePositionRedeem(ctx, parseInt(ctx.match[1], 10));
     });
 
     // Quick % sell (pos_pct_idx_pct)

@@ -172,6 +172,14 @@ export async function handleStart(ctx: Context): Promise<void> {
       // The referral application happens after user creation
     }
 
+    if (startParam?.startsWith('pr_')) {
+      // Deep link: manual redeem a resolved position
+      const idx = parseInt(startParam.split('_')[1], 10);
+      const { handlePositionRedeem } = await import('./positionTrade');
+      await handlePositionRedeem(ctx, idx);
+      return;
+    }
+
     if (startParam?.startsWith('pb_') || startParam?.startsWith('ps_') || startParam?.startsWith('pv_') || startParam?.startsWith('pp_')) {
       // Deep link from active positions page: buy/sell/view a position by index
       const parts = startParam.split('_');
@@ -237,18 +245,26 @@ export async function handleStart(ctx: Context): Promise<void> {
         msg += `├ ROI: ${pnlSign}${pos.percentPnl.toFixed(1)}%\n`;
         msg += `└ Realized: $${pos.realizedPnl.toFixed(2)}\n\n`;
         msg += `⏰ Market ends: ${endDate}`;
-        if (pos.redeemable) msg += `\n✅ _Redeemable_`;
+        if (pos.redeemable) msg += `\n✅ _Market Resolved — Claim your USDC below_`;
+
+        const viewButtons = pos.redeemable
+          ? [
+              [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
+              [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
+              [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+            ]
+          : [
+              [
+                Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
+                Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+              ],
+              [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
+              [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+            ];
 
         await ctx.reply(msg, {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [
-              Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
-              Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
-            ],
-            [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
-            [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
-          ]),
+          ...Markup.inlineKeyboard(viewButtons),
         });
       } else {
         // ── Buy or Sell flow ──
