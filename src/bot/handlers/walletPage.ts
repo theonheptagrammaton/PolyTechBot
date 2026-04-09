@@ -175,14 +175,27 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
       ).catch(() => '0.00'),
     ]);
 
+    // Apply same claimed-filter as handleOpenPositions so counts are consistent
+    const redeemable = activePositions.filter(p => p.redeemable);
+    let visiblePositions = activePositions;
+    if (redeemable.length > 0 && user.polymarketProxyAddress) {
+      const claimedIds = await getClaimedConditionIds(
+        user.polymarketProxyAddress,
+        redeemable.map(p => p.conditionId as string),
+      );
+      if (claimedIds.size > 0) {
+        visiblePositions = activePositions.filter(p => !p.redeemable || !claimedIds.has(p.conditionId as string));
+        logger.info(`[portfolio] Filtered ${activePositions.length - visiblePositions.length} claimed positions (${claimedIds.size} claimed keys)`);
+      }
+    }
+
     // Sync positionListCache so active positions page & sell/view actions use the same data
-    if (activePositions.length > 0) {
+    if (visiblePositions.length > 0) {
       const { positionListCache } = await import('./positionTrade');
-      positionListCache.set(telegramId, activePositions);
+      positionListCache.set(telegramId, visiblePositions);
     }
 
     // Auto-claim any resolved/redeemable positions (fire-and-forget)
-    const redeemable = activePositions.filter(p => p.redeemable);
     if (redeemable.length > 0 && user.polymarketProxyAddress) {
       autoRedeemPositions(
         user.encryptedPrivateKey,
@@ -198,9 +211,9 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
       }).catch((err) => logger.warn('[redeem] Auto-redeem background error:', err));
     }
 
-    const totalInvested     = activePositions.reduce((s, p) => s + (p.initialValue), 0);
-    const totalCurrentValue = activePositions.reduce((s, p) => s + p.currentValue, 0);
-    const totalUnrealizedPnl = activePositions.reduce((s, p) => s + p.cashPnl, 0);
+    const totalInvested     = visiblePositions.reduce((s, p) => s + (p.initialValue), 0);
+    const totalCurrentValue = visiblePositions.reduce((s, p) => s + p.currentValue, 0);
+    const totalUnrealizedPnl = visiblePositions.reduce((s, p) => s + p.cashPnl, 0);
     const totalRealizedPnl  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
     const totalClosedInvested = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
 
@@ -212,8 +225,8 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
     let message = '📊 *Portfolio Overview*\n\n';
     message += `💰 Available Balance: *$${balance}*\n\n`;
 
-    if (activePositions.length > 0) {
-      message += `📦 *${activePositions.length} Active Position${activePositions.length !== 1 ? 's' : ''}*\n`;
+    if (visiblePositions.length > 0) {
+      message += `📦 *${visiblePositions.length} Active Position${visiblePositions.length !== 1 ? 's' : ''}*\n`;
       message += `├ Invested: $${totalInvested.toFixed(2)}\n`;
       message += `├ Current Value: $${totalCurrentValue.toFixed(2)}\n`;
       message += `└ ${unPnlEmoji} Unrealized P&L: ${unPnlSign}$${totalUnrealizedPnl.toFixed(2)}\n\n`;
@@ -277,6 +290,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
     // Filter out positions that are redeemable AND already claimed — move them to Closed
     const redeemable = positions.filter(p => p.redeemable);
     let visiblePositions = positions;
+    logger.info(`[openPositions] user=${telegramId} api=${positions.length} redeemable=${redeemable.length}`);
     if (redeemable.length > 0 && user.polymarketProxyAddress) {
       const claimedIds = await getClaimedConditionIds(
         user.polymarketProxyAddress,
@@ -284,6 +298,7 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       );
       if (claimedIds.size > 0) {
         visiblePositions = positions.filter(p => !p.redeemable || !claimedIds.has(p.conditionId as string));
+        logger.info(`[openPositions] user=${telegramId} claimed=${claimedIds.size} visible=${visiblePositions.length}`);
       }
     }
 
