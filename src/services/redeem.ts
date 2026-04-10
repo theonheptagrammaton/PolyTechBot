@@ -19,13 +19,18 @@ function claimedKey(proxyAddress: string, conditionId: string): string {
 }
 
 // Polymarket contract addresses (from official docs)
-const CTF_ADDRESS         = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const USDC_E_POLYGON      = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e (bridged)
-const NATIVE_USDC_POLYGON = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Native USDC
+const CTF_ADDRESS            = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const NEG_RISK_ADAPTER       = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296';
+const USDC_E_POLYGON         = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e (bridged)
+const NATIVE_USDC_POLYGON    = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Native USDC
 
 const CTF_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external',
   'function balanceOf(address owner, uint256 id) view returns (uint256)',
+];
+
+const NEG_RISK_ADAPTER_ABI = [
+  'function redeemPositions(bytes32 conditionId, uint256[] amounts) external',
 ];
 
 // Polymarket Builder Relayer (gasless proxy transactions)
@@ -134,13 +139,120 @@ async function redeemPosition(params: {
     logger.info(`[redeem] On-chain CTF balance is 0 for ${params.position.asset.slice(0, 20)}... — position already redeemed, skipping`);
     return { success: false, error: 'Position already redeemed (on-chain balance is 0)' };
   }
-  logger.info(`[redeem] On-chain CTF balance: ${onChainBalance.toString()} for ${params.position.asset.slice(0, 20)}...`);
+  logger.info(`[redeem] On-chain CTF balance: ${onChainBalance.toString()} for ${params.position.asset.slice(0, 20)}... negRisk=${params.position.negativeRisk}`);
 
   const privateKey  = decrypt(params.encryptedPrivateKey);
-  const iface       = new ethers.utils.Interface(CTF_ABI);
   const conditionId = params.position.conditionId as string;
 
-  // Try USDC.e first (legacy positions), then native USDC (post-migration positions)
+  // Negative risk (spread/multi-outcome) markets use NegRiskAdapter, not CTF directly
+  if (params.position.negativeRisk) {
+    return redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance);
+  }
+
+  return redeemStandard(privateKey, params.proxyAddress, params.position, onChainBalance);
+}
+
+/**
+ * Redeems a negative risk (spread/multi-outcome) position via NegRiskAdapter.
+ * NegRiskAdapter.redeemPositions(conditionId, amounts) handles CTF internally and returns USDC.
+ */
+async function redeemNegRisk(
+  privateKey: string,
+  proxyAddress: string,
+  position: ActivePosition,
+  onChainBalance: ethers.BigNumber,
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  const iface = new ethers.utils.Interface(NEG_RISK_ADAPTER_ABI);
+  const conditionId = position.conditionId;
+
+  // amounts[outcomeIndex] = balance, amounts[otherIndex] = 0
+  // Binary market: 2 outcomes (index 0 and 1)
+  const amounts = position.outcomeIndex === 0
+    ? [onChainBalance, ethers.BigNumber.from(0)]
+    : [ethers.BigNumber.from(0), onChainBalance];
+
+  const callData = iface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+  const txPayload = [{ to: NEG_RISK_ADAPTER, data: callData, value: '0' }];
+
+  for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
+    try {
+      logger.info(`[redeem] Trying ${txType}/NegRiskAdapter: conditionId=${conditionId.slice(0, 18)}... outcome=${position.outcome} amounts=[${amounts[0].toString()},${amounts[1].toString()}]`);
+
+      const relayClient = createRelayClient(privateKey, txType);
+
+      const response = await Promise.race([
+        relayClient.execute(txPayload),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('relay execute timeout')), 30_000)
+        ),
+      ]);
+
+      if (!response) {
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: no response from relayer`);
+        continue;
+      }
+
+      logger.info(`[redeem] ${txType}/NegRiskAdapter response: id=${response.transactionID} state=${response.state} hash=${response.transactionHash || 'none'}`);
+
+      const result = await Promise.race([
+        response.wait(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('confirmation timeout')), 60_000)
+        ),
+      ]);
+
+      if (!result) {
+        try {
+          const txInfo = await response.getTransaction();
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter STATE_FAILED: ${JSON.stringify(txInfo).slice(0, 400)}`);
+        } catch { /* ignore */ }
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: relay tx failed (STATE_FAILED)`);
+        continue;
+      }
+
+      const txHash = result.transactionHash;
+      if (!txHash) {
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: result has no transactionHash, state=${result.state}`);
+        continue;
+      }
+
+      const verified = await verifyTxOnChain(txHash);
+      if (!verified) {
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx ${txHash} on-chain verification FAILED`);
+        continue;
+      }
+
+      // Verify CTF tokens were actually burned
+      const balanceAfter = await getOnChainTokenBalance(proxyAddress, position.asset);
+      if (balanceAfter.gte(onChainBalance)) {
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx succeeded but CTF balance unchanged (${balanceAfter.toString()})`);
+        continue;
+      }
+
+      logger.info(`[redeem] Confirmed via ${txType}/NegRiskAdapter: ${txHash} (balance: ${onChainBalance.toString()} → ${balanceAfter.toString()})`);
+      return { success: true, txHash };
+    } catch (error: any) {
+      logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed: ${error?.message?.slice(0, 200)}`);
+      continue;
+    }
+  }
+
+  return { success: false, error: 'NegRiskAdapter redemption failed with all tx types' };
+}
+
+/**
+ * Redeems a standard (non-negative-risk) position via CTF.redeemPositions.
+ * Tries USDC.e first (legacy), then native USDC (post-migration).
+ */
+async function redeemStandard(
+  privateKey: string,
+  proxyAddress: string,
+  position: ActivePosition,
+  onChainBalance: ethers.BigNumber,
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  const iface       = new ethers.utils.Interface(CTF_ABI);
+  const conditionId = position.conditionId;
+
   for (const collateralToken of [USDC_E_POLYGON, NATIVE_USDC_POLYGON]) {
     const callData = iface.encodeFunctionData('redeemPositions', [
       collateralToken,
@@ -154,7 +266,7 @@ async function redeemPosition(params: {
     for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
       try {
         logger.info(
-          `[redeem] Trying ${txType}/${tokenLabel}: conditionId=${conditionId.slice(0, 18)}... outcome=${params.position.outcome}`
+          `[redeem] Trying ${txType}/${tokenLabel}: conditionId=${conditionId.slice(0, 18)}... outcome=${position.outcome}`
         );
 
         const relayClient = createRelayClient(privateKey, txType);
@@ -197,7 +309,6 @@ async function redeemPosition(params: {
           continue;
         }
 
-        // Verify the transaction actually succeeded on-chain
         const verified = await verifyTxOnChain(txHash);
         if (!verified) {
           logger.warn(`[redeem] ${txType}/${tokenLabel}: relayer returned tx ${txHash} but on-chain verification FAILED`);
@@ -205,8 +316,7 @@ async function redeemPosition(params: {
         }
 
         // Verify CTF tokens were actually burned (balance decreased)
-        // If balance didn't change, this was a no-op (wrong collateral token) — try next
-        const balanceAfter = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
+        const balanceAfter = await getOnChainTokenBalance(proxyAddress, position.asset);
         if (balanceAfter.gte(onChainBalance)) {
           logger.warn(`[redeem] ${txType}/${tokenLabel}: tx succeeded but CTF balance unchanged (${balanceAfter.toString()}) — wrong collateral token, trying next`);
           break; // break inner loop (txType), continue outer loop (collateralToken)
@@ -219,7 +329,6 @@ async function redeemPosition(params: {
         continue;
       }
     }
-    // Both tx types failed or wrong collateral for this token — try next
     logger.info(`[redeem] ${tokenLabel} did not redeem, trying next collateral token...`);
   }
 
