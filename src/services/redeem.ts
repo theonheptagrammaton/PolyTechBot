@@ -27,6 +27,7 @@ const NATIVE_USDC_POLYGON    = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // 
 const CTF_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external',
   'function balanceOf(address owner, uint256 id) view returns (uint256)',
+  'function setApprovalForAll(address operator, bool approved) external',
 ];
 
 const NEG_RISK_ADAPTER_ABI = [
@@ -173,7 +174,8 @@ async function redeemNegRisk(
   position: ActivePosition,
   onChainBalance: ethers.BigNumber,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  const iface = new ethers.utils.Interface(NEG_RISK_ADAPTER_ABI);
+  const negIface = new ethers.utils.Interface(NEG_RISK_ADAPTER_ABI);
+  const ctfIface = new ethers.utils.Interface(CTF_ABI);
   const conditionId = position.conditionId;
 
   // amounts[outcomeIndex] = balance, amounts[otherIndex] = 0
@@ -182,8 +184,13 @@ async function redeemNegRisk(
     ? [onChainBalance, ethers.BigNumber.from(0)]
     : [ethers.BigNumber.from(0), onChainBalance];
 
-  const callData = iface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
-  const txPayload = [{ to: NEG_RISK_ADAPTER, data: callData, value: '0' }];
+  // Batch: approve NegRiskAdapter on CTF (no-op if already approved) + redeem
+  const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
+  const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+  const txPayload = [
+    { to: CTF_ADDRESS, data: approveData, value: '0' },
+    { to: NEG_RISK_ADAPTER, data: redeemData, value: '0' },
+  ];
 
   for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
     try {
