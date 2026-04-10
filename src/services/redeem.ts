@@ -204,15 +204,23 @@ async function redeemPosition(params: {
           continue;
         }
 
-        logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash}`);
+        // Verify CTF tokens were actually burned (balance decreased)
+        // If balance didn't change, this was a no-op (wrong collateral token) — try next
+        const balanceAfter = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
+        if (balanceAfter.gte(onChainBalance)) {
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: tx succeeded but CTF balance unchanged (${balanceAfter.toString()}) — wrong collateral token, trying next`);
+          break; // break inner loop (txType), continue outer loop (collateralToken)
+        }
+
+        logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash} (balance: ${onChainBalance.toString()} → ${balanceAfter.toString()})`);
         return { success: true, txHash };
       } catch (error: any) {
         logger.warn(`[redeem] ${txType}/${tokenLabel} attempt failed: ${error?.message?.slice(0, 200)}`);
         continue;
       }
     }
-    // Both tx types failed for this collateral token — try next token
-    logger.info(`[redeem] All tx types failed with ${tokenLabel}, trying next collateral token...`);
+    // Both tx types failed or wrong collateral for this token — try next
+    logger.info(`[redeem] ${tokenLabel} did not redeem, trying next collateral token...`);
   }
 
   return { success: false, error: 'Redemption failed with all collateral token variants' };
