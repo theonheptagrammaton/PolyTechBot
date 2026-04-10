@@ -6,7 +6,7 @@ import { getActivePositions, ActivePosition, fetchTxHashForOrder } from '../../s
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
 import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
-import { ce, EMOJI } from '../../utils/customEmoji';
+import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { generatePositionPnlImage } from '../../services/pnlImage';
 import { RedisBackedState } from '../../utils/redisState';
 
@@ -473,8 +473,8 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
 
     // Show claiming in progress
     const loadingMsg = await ctx.reply(
-      `${ce(EMOJI.loading, '⏳')} *Claiming position...*\n\n*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n_This may take up to 60 seconds._`,
-      { parse_mode: 'Markdown' }
+      `${ce(EMOJI.loading, '⏳')} <b>Claiming position...</b>\n\n<b>${esc(pos.outcome)}</b> — ${esc(truncate(pos.title, 50))}\n\n<i>This may take up to 60 seconds.</i>`,
+      { parse_mode: 'HTML' }
     ).catch(() => null);
 
     const { manualRedeem } = await import('../../services/redeem');
@@ -498,8 +498,7 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
       await ctx.reply(
         `✅ *Position Claimed!*\n\n` +
         `*${pos.outcome}* — ${truncTitle}\n\n` +
-        `💵 USDC.e has been returned to your wallet.` +
-        (result.txHash ? `\n\n🔗 [View Transaction](https://polygonscan.com/tx/${result.txHash})` : ''),
+        `💵 USDC.e has been returned to your wallet.`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
