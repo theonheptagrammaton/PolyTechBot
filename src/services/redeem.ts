@@ -28,6 +28,7 @@ const CTF_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external',
   'function balanceOf(address owner, uint256 id) view returns (uint256)',
   'function setApprovalForAll(address operator, bool approved) external',
+  'function payoutDenominator(bytes32 conditionId) view returns (uint256)',
 ];
 
 const NEG_RISK_ADAPTER_ABI = [
@@ -142,6 +143,23 @@ async function redeemPosition(params: {
   }
   logger.info(`[redeem] On-chain CTF balance: ${onChainBalance.toString()} for ${params.position.asset.slice(0, 20)}... negRisk=${params.position.negativeRisk}`);
 
+  // Check if the condition is actually resolved on-chain
+  // payoutDenominator > 0 means the oracle has resolved the condition
+  try {
+    const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, polygonProvider);
+    const payoutDenom = await Promise.race([
+      ctf.payoutDenominator(params.position.conditionId),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
+    ]);
+    logger.info(`[redeem] payoutDenominator for ${params.position.conditionId.slice(0, 18)}... = ${payoutDenom.toString()}`);
+    if (payoutDenom.isZero()) {
+      logger.warn(`[redeem] Condition NOT resolved on-chain yet (payoutDenominator=0) — Data API says redeemable but oracle hasn't resolved`);
+      return { success: false, error: 'Condition not yet resolved on-chain (oracle pending)' };
+    }
+  } catch (err: any) {
+    logger.warn(`[redeem] Failed to check payoutDenominator: ${err?.message} — proceeding anyway`);
+  }
+
   const privateKey  = decrypt(params.encryptedPrivateKey);
 
   // If Data API says negativeRisk, go straight to NegRiskAdapter
@@ -157,7 +175,6 @@ async function redeemPosition(params: {
   // so try NegRiskAdapter as fallback
   const balanceNow = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
   if (balanceNow.isZero()) {
-    // Standard path actually worked but we didn't detect it (edge case)
     return stdResult;
   }
   logger.info(`[redeem] Standard CTF redeem failed, trying NegRiskAdapter as fallback (balance still ${balanceNow.toString()})`);
