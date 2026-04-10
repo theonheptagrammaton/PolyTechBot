@@ -23,8 +23,9 @@ const CTF_ADDRESS         = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 const USDC_E_POLYGON      = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e (bridged)
 const NATIVE_USDC_POLYGON = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Native USDC
 
-const CTF_REDEEM_ABI = [
+const CTF_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external',
+  'function balanceOf(address owner, uint256 id) view returns (uint256)',
 ];
 
 // Polymarket Builder Relayer (gasless proxy transactions)
@@ -37,6 +38,27 @@ const polygonProvider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
 
 // Global lock: prevents parallel redeem sessions for the same proxy
 const _redeemLocks = new Set<string>();
+
+/**
+ * Checks on-chain CTF token balance for a given proxy wallet and token (asset) ID.
+ * Returns the balance as a BigNumber. If the balance is 0, the position is already redeemed.
+ */
+async function getOnChainTokenBalance(proxyAddress: string, tokenId: string): Promise<ethers.BigNumber> {
+  try {
+    const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, polygonProvider);
+    const balance = await Promise.race([
+      ctf.balanceOf(proxyAddress, tokenId),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('balanceOf timeout')), 10_000)
+      ),
+    ]);
+    return balance;
+  } catch (err: any) {
+    logger.warn(`[redeem] Failed to check on-chain balance for ${tokenId.slice(0, 20)}...: ${err?.message}`);
+    // Return a non-zero value so we don't skip redeem on RPC failures
+    return ethers.BigNumber.from(1);
+  }
+}
 
 /**
  * Verifies a transaction was actually mined and succeeded on-chain.
@@ -106,8 +128,16 @@ async function redeemPosition(params: {
   proxyAddress: string;
   position: ActivePosition;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  // Check on-chain balance before wasting a relayer tx
+  const onChainBalance = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
+  if (onChainBalance.isZero()) {
+    logger.info(`[redeem] On-chain CTF balance is 0 for ${params.position.asset.slice(0, 20)}... — position already redeemed, skipping`);
+    return { success: false, error: 'Position already redeemed (on-chain balance is 0)' };
+  }
+  logger.info(`[redeem] On-chain CTF balance: ${onChainBalance.toString()} for ${params.position.asset.slice(0, 20)}...`);
+
   const privateKey  = decrypt(params.encryptedPrivateKey);
-  const iface       = new ethers.utils.Interface(CTF_REDEEM_ABI);
+  const iface       = new ethers.utils.Interface(CTF_ABI);
   const conditionId = params.position.conditionId as string;
 
   // Try USDC.e first (legacy positions), then native USDC (post-migration positions)
