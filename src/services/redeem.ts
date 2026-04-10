@@ -142,14 +142,25 @@ async function redeemPosition(params: {
   logger.info(`[redeem] On-chain CTF balance: ${onChainBalance.toString()} for ${params.position.asset.slice(0, 20)}... negRisk=${params.position.negativeRisk}`);
 
   const privateKey  = decrypt(params.encryptedPrivateKey);
-  const conditionId = params.position.conditionId as string;
 
-  // Negative risk (spread/multi-outcome) markets use NegRiskAdapter, not CTF directly
+  // If Data API says negativeRisk, go straight to NegRiskAdapter
   if (params.position.negativeRisk) {
     return redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance);
   }
 
-  return redeemStandard(privateKey, params.proxyAddress, params.position, onChainBalance);
+  // Try standard CTF path first (USDC.e, then native USDC)
+  const stdResult = await redeemStandard(privateKey, params.proxyAddress, params.position, onChainBalance);
+  if (stdResult.success) return stdResult;
+
+  // Standard path failed — Data API negativeRisk flag can be unreliable,
+  // so try NegRiskAdapter as fallback
+  const balanceNow = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
+  if (balanceNow.isZero()) {
+    // Standard path actually worked but we didn't detect it (edge case)
+    return stdResult;
+  }
+  logger.info(`[redeem] Standard CTF redeem failed, trying NegRiskAdapter as fallback (balance still ${balanceNow.toString()})`);
+  return redeemNegRisk(privateKey, params.proxyAddress, params.position, balanceNow);
 }
 
 /**
