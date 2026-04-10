@@ -216,25 +216,31 @@ async function redeemSingle(params: {
       );
       const match = predexonPositions.find(
         p => p.status === 'redeemable' &&
-             (p.tokenId === params.position.asset || p.positionId === params.position.conditionId)
+             (p.tokenId === params.position.asset || p.marketIdentifier === params.position.conditionId)
       );
-      if (match?.positionId) {
-        logger.info(`[redeem] Using Predexon API for positionId=${match.positionId} (matched by ${match.tokenId === params.position.asset ? 'tokenId' : 'positionId'})`);
-        const result = await redeemPositionPredexon(params.predexonUserId, match.positionId);
+      if (match?.tokenId) {
+        logger.info(`[redeem] Using Predexon API for tokenId=${match.tokenId} venue=${match.venue} (matched by ${match.tokenId === params.position.asset ? 'tokenId' : 'marketIdentifier'})`);
+        const result = await redeemPositionPredexon(params.predexonUserId, match.tokenId, match.venue || 'polymarket');
         logger.info(`[redeem] Predexon redeem response: ${JSON.stringify(result).slice(0, 400)}`);
 
-        if (result.transactionHash) {
+        if (result.status === 'completed' && result.transactionHash) {
           // Verify the transaction actually succeeded on-chain
           const verified = await verifyTxOnChain(result.transactionHash);
           if (verified) {
+            logger.info(`[redeem] Predexon redeem completed: amountRedeemed=${result.amountRedeemed} sizeRedeemed=${result.sizeRedeemed} result=${result.result}`);
             return { success: true, txHash: result.transactionHash };
           }
           logger.warn(`[redeem] Predexon returned tx ${result.transactionHash} but on-chain verification FAILED`);
-        } else if (result.status === 'success') {
-          // Predexon says success but no tx hash — this is suspicious, don't trust it
-          logger.warn(`[redeem] Predexon returned status=success but NO transactionHash — treating as failed`);
+        } else if (result.transactionHash) {
+          // Has tx hash but status is not 'completed'
+          const verified = await verifyTxOnChain(result.transactionHash);
+          if (verified) {
+            logger.info(`[redeem] Predexon redeem status=${result.status} but tx verified on-chain`);
+            return { success: true, txHash: result.transactionHash };
+          }
+          logger.warn(`[redeem] Predexon returned tx ${result.transactionHash} with status=${result.status}, on-chain verification FAILED`);
         } else {
-          logger.warn(`[redeem] Predexon redeem returned unexpected status: ${result.status}`);
+          logger.warn(`[redeem] Predexon redeem returned status=${result.status} with no transactionHash`);
         }
       } else {
         logger.info(`[redeem] No matching redeemable position found in Predexon (checked ${predexonPositions.length} positions), falling back to relayer`);

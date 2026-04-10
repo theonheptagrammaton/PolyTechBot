@@ -98,6 +98,13 @@ export interface PredexonWithdrawResult {
 export interface PredexonRedeemResult {
   status: string;
   transactionHash?: string;
+  venue?: string;
+  tokenId?: string;
+  title?: string;
+  outcome?: string;
+  sizeRedeemed?: string;
+  result?: string;
+  amountRedeemed?: string;
   [key: string]: unknown;
 }
 
@@ -302,11 +309,12 @@ export async function withdraw(
 
 export async function redeemPosition(
   userId: string,
-  positionId: string,
+  tokenId: string,
+  venue: string = 'polymarket',
 ): Promise<PredexonRedeemResult> {
   return predexonFetch<PredexonRedeemResult>(
-    `${TRADE_URL()}/api/users/${userId}/positions/${positionId}/redeem`,
-    { method: 'POST' },
+    `${TRADE_URL()}/api/users/${userId}/redeem`,
+    { method: 'POST', body: JSON.stringify({ venue, tokenId }) },
   );
 }
 
