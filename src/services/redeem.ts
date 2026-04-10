@@ -32,8 +32,40 @@ const POLYGON_RPC  = 'https://polygon-bor-rpc.publicnode.com';
 const RELAYER_URL  = 'https://relayer-v2.polymarket.com';
 const CHAIN_ID     = 137;
 
+// Polygon RPC provider for verifying tx receipts on-chain
+const polygonProvider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
+
 // Global lock: prevents parallel redeem sessions for the same proxy
 const _redeemLocks = new Set<string>();
+
+/**
+ * Verifies a transaction was actually mined and succeeded on-chain.
+ * Returns true only if the receipt exists and status === 1 (success).
+ */
+async function verifyTxOnChain(txHash: string): Promise<boolean> {
+  try {
+    const receipt = await Promise.race([
+      polygonProvider.getTransactionReceipt(txHash),
+      new Promise<null>((_, reject) =>
+        setTimeout(() => reject(new Error('receipt fetch timeout')), 15_000)
+      ),
+    ]);
+    if (!receipt) {
+      logger.warn(`[redeem] No receipt found for tx ${txHash} — tx may be pending or dropped`);
+      return false;
+    }
+    if (receipt.status === 0) {
+      logger.warn(`[redeem] Tx ${txHash} was REVERTED on-chain (status=0)`);
+      return false;
+    }
+    logger.info(`[redeem] Tx ${txHash} confirmed on-chain: block=${receipt.blockNumber} status=${receipt.status}`);
+    return true;
+  } catch (err: any) {
+    logger.warn(`[redeem] Failed to verify tx ${txHash}: ${err?.message}`);
+    // If we can't verify, don't assume success
+    return false;
+  }
+}
 
 /**
  * Creates a RelayClient for the user's proxy wallet.
@@ -135,6 +167,13 @@ async function redeemPosition(params: {
           continue;
         }
 
+        // Verify the transaction actually succeeded on-chain
+        const verified = await verifyTxOnChain(txHash);
+        if (!verified) {
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: relayer returned tx ${txHash} but on-chain verification FAILED`);
+          continue;
+        }
+
         logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash}`);
         return { success: true, txHash };
       } catch (error: any) {
@@ -161,18 +200,44 @@ async function redeemSingle(params: {
   if (params.predexonUserId) {
     try {
       const predexonPositions = await getPositions(params.predexonUserId, 'polymarket');
+      logger.info(
+        `[redeem] Predexon positions (${predexonPositions.length}): ${JSON.stringify(
+          predexonPositions.map(p => ({
+            positionId: p.positionId,
+            tokenId: p.tokenId,
+            status: p.status,
+            outcome: p.outcome,
+            size: p.size,
+          }))
+        ).slice(0, 800)}`
+      );
+      logger.info(
+        `[redeem] Looking for asset=${params.position.asset} or conditionId=${params.position.conditionId}`
+      );
       const match = predexonPositions.find(
         p => p.status === 'redeemable' &&
              (p.tokenId === params.position.asset || p.positionId === params.position.conditionId)
       );
       if (match?.positionId) {
-        logger.info(`[redeem] Using Predexon API for positionId=${match.positionId}`);
+        logger.info(`[redeem] Using Predexon API for positionId=${match.positionId} (matched by ${match.tokenId === params.position.asset ? 'tokenId' : 'positionId'})`);
         const result = await redeemPositionPredexon(params.predexonUserId, match.positionId);
-        if (result.status === 'success' || result.transactionHash) {
-          return { success: true, txHash: result.transactionHash };
+        logger.info(`[redeem] Predexon redeem response: ${JSON.stringify(result).slice(0, 400)}`);
+
+        if (result.transactionHash) {
+          // Verify the transaction actually succeeded on-chain
+          const verified = await verifyTxOnChain(result.transactionHash);
+          if (verified) {
+            return { success: true, txHash: result.transactionHash };
+          }
+          logger.warn(`[redeem] Predexon returned tx ${result.transactionHash} but on-chain verification FAILED`);
+        } else if (result.status === 'success') {
+          // Predexon says success but no tx hash — this is suspicious, don't trust it
+          logger.warn(`[redeem] Predexon returned status=success but NO transactionHash — treating as failed`);
+        } else {
+          logger.warn(`[redeem] Predexon redeem returned unexpected status: ${result.status}`);
         }
       } else {
-        logger.debug(`[redeem] No matching redeemable position found in Predexon, falling back`);
+        logger.info(`[redeem] No matching redeemable position found in Predexon (checked ${predexonPositions.length} positions), falling back to relayer`);
       }
     } catch (err: any) {
       logger.warn(`[redeem] Predexon redeem failed, falling back to relayer: ${err?.message}`);
