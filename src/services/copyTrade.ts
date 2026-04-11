@@ -8,6 +8,7 @@ import { transferCommission, COMMISSION_RATE } from './commission';
 import { placeOrder as predexonPlaceOrder } from './predexon';
 import { ensurePredexonUser } from './user';
 import { createManagedWsProvider, ManagedWsProvider } from '../utils/wsProvider';
+import { manualRedeem } from './redeem';
 
 const CLOB_BASE = 'https://clob.polymarket.com';
 const DATA_API_BASE = 'https://data-api.polymarket.com';
@@ -224,7 +225,7 @@ async function fetchNewTradesForTrader(traderAddress: string): Promise<DetectedT
 // ─── Order Execution ──────────────────────────────────────────────────────────
 
 interface ExecResult {
-  status: 'filled' | 'failed' | 'skipped';
+  status: 'filled' | 'failed' | 'skipped' | 'redeemed';
   orderID?: string;
   errorMsg?: string;
   // F4: Our execution price (worst-case limit we submitted), used as TP/SL entry price.
@@ -232,6 +233,8 @@ interface ExecResult {
   filledPrice?: number;
   /** Actual USDC amount sent to exchange (after commission deduction) */
   actualAmount?: number;
+  /** Set when status === 'redeemed' — on-chain redeem tx hash */
+  txHash?: string;
 }
 
 async function executeCopyOrder(
@@ -290,6 +293,33 @@ async function executeCopyOrder(
       // For SELL: find user's position for this token and determine sell size proportionally
       const positions = await getActivePositions(user.polymarketProxyAddress);
       const pos = positions.find((p) => p.asset === tokenId);
+
+      // Market resolved → no orderbook exists. Auto-redeem instead of selling.
+      if (pos?.redeemable) {
+        logger.info(`[copy] Market resolved for ${tokenId.slice(0, 20)}... — auto-redeeming for user ${user.telegramId}`);
+        const redeemRes = await manualRedeem(
+          user.encryptedPrivateKey,
+          user.polymarketProxyAddress,
+          pos,
+          predexonUserId,
+        );
+        if (redeemRes.success) {
+          // Mark all open copied BUYs for this asset as redeemed so the periodic
+          // checks (TP/SL + redeemable scan) don't retry.
+          await prisma.copiedTrade.updateMany({
+            where: {
+              userId: user.id,
+              assetId: tokenId,
+              side: 'BUY',
+              status: 'filled',
+              tpSlStatus: null,
+            },
+            data: { tpSlStatus: 'redeemed' },
+          });
+          return { status: 'redeemed', txHash: redeemRes.txHash };
+        }
+        return { status: 'failed', errorMsg: redeemRes.error || 'auto-redeem failed' };
+      }
 
       if (!pos || pos.size <= 0) {
         return { status: 'skipped', errorMsg: 'no matching position to sell' };
@@ -813,6 +843,21 @@ async function tickForTrader(
                 [{ text: '× Close', callback_data: 'close_notif' }],
               ],
             });
+          } else if (result.status === 'redeemed' && !alreadyNotified) {
+            notifiedThisTick.add(tradeKey);
+            const mktInfo = await fetchMarketInfo(trade.marketId, trade.assetId).catch(() => null);
+            const question = mktInfo?.question ?? trade.marketId.slice(0, 40);
+            const txLine = result.txHash
+              ? `\n🔗 <a href="https://polygonscan.com/tx/${result.txHash}">Transaction Hash</a>`
+              : '';
+            await sendNotification(
+              user.telegramId,
+              `🏆 <b>Position Redeemed</b>\n\n` +
+              `Trader: <code>${shortAddr}</code> sold but the market is already resolved.\n\n` +
+              `📊 Market: <b>${escHtml(question)}</b>\n` +
+              `🎯 Outcome: <b>${effectiveOutcome}</b>\n` +
+              `💵 USDC has been returned to your wallet.${txLine}`
+            );
           } else if (result.status === 'failed' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
             // Suppress duplicate failure notifications for the same sub+market within 1 hour
@@ -866,6 +911,127 @@ async function tickForTrader(
         logger.error(`[copy] TP/SL check error for ${sub.userId}: ${err?.message}`)
       );
     }
+  }
+
+  // Auto-redeem check — for any open copied BUY whose market has resolved,
+  // claim the payout instead of waiting for a (impossible) leader SELL.
+  for (const sub of subs) {
+    await checkRedeemableCopiedPositions(
+      sub.user,
+      { subscriptionId: sub.id, traderAddress: sub.traderAddress },
+      sendNotification,
+    ).catch((err) =>
+      logger.error(`[copy] Auto-redeem check error for ${sub.userId}: ${err?.message}`)
+    );
+  }
+}
+
+// ─── Auto-Redeem Check ────────────────────────────────────────────────────────
+
+/**
+ * Scans open copied BUY positions for a (user, subscription) pair and auto-redeems
+ * any whose market has been resolved on Polymarket. Sends a notification on success.
+ *
+ * Runs each tick after the TP/SL check. Uses `tpSlStatus = 'redeemed'` as the dedup
+ * marker so a successfully redeemed position is not re-checked on later ticks.
+ */
+async function checkRedeemableCopiedPositions(
+  user: {
+    id: string;
+    telegramId: string;
+    encryptedPrivateKey: string;
+    encryptedApiKey: string;
+    encryptedApiSecret: string;
+    encryptedPassphrase: string;
+    polymarketProxyAddress: string | null;
+    slippageTolerance: number;
+    predexonUserId?: string | null;
+  },
+  sub: { subscriptionId: string; traderAddress: string },
+  sendNotification: (telegramId: string, msg: string, extra?: NotificationExtra) => Promise<void>,
+): Promise<void> {
+  if (!user.polymarketProxyAddress) return;
+
+  const openPositions = await prisma.copiedTrade.findMany({
+    where: {
+      subscriptionId: sub.subscriptionId,
+      userId: user.id,
+      traderAddress: sub.traderAddress,
+      side: 'BUY',
+      status: 'filled',
+      tpSlStatus: null,
+      assetId: { not: null },
+    },
+  });
+
+  if (openPositions.length === 0) return;
+
+  let activePositions: ActivePosition[];
+  try {
+    activePositions = await getActivePositions(user.polymarketProxyAddress);
+  } catch (err: any) {
+    logger.warn(`[copy] Auto-redeem: failed to fetch positions for ${user.telegramId}: ${err?.message}`);
+    return;
+  }
+
+  // One redeem call per (assetId) — multiple copied trades can share the same asset.
+  const handledAssets = new Set<string>();
+
+  for (const pos of openPositions) {
+    if (!pos.assetId || handledAssets.has(pos.assetId)) continue;
+    const active = activePositions.find((p) => p.asset === pos.assetId);
+    if (!active?.redeemable) continue;
+
+    handledAssets.add(pos.assetId);
+    logger.info(
+      `[copy] Auto-redeem triggered for user ${user.id} sub ${sub.subscriptionId} ` +
+      `asset=${pos.assetId.slice(0, 20)}... title="${active.title.slice(0, 40)}"`
+    );
+
+    let result: { success: boolean; txHash?: string; error?: string };
+    try {
+      result = await manualRedeem(
+        user.encryptedPrivateKey,
+        user.polymarketProxyAddress,
+        active,
+        user.predexonUserId ?? undefined,
+      );
+    } catch (err: any) {
+      logger.error(`[copy] Auto-redeem threw for ${pos.assetId}: ${err?.message}`);
+      continue;
+    }
+
+    if (!result.success) {
+      logger.warn(`[copy] Auto-redeem failed for ${pos.assetId.slice(0, 20)}...: ${result.error}`);
+      continue;
+    }
+
+    // Mark all open copied BUYs for this asset as redeemed so they're not retried.
+    await prisma.copiedTrade.updateMany({
+      where: {
+        subscriptionId: sub.subscriptionId,
+        userId: user.id,
+        assetId: pos.assetId,
+        side: 'BUY',
+        status: 'filled',
+        tpSlStatus: null,
+      },
+      data: { tpSlStatus: 'redeemed' },
+    });
+
+    const shortAddr = `${sub.traderAddress.slice(0, 6)}...${sub.traderAddress.slice(-4)}`;
+    const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const txLine = result.txHash
+      ? `\n🔗 <a href="https://polygonscan.com/tx/${result.txHash}">Transaction Hash</a>`
+      : '';
+    await sendNotification(
+      user.telegramId,
+      `🏆 <b>Position Auto-Redeemed</b>\n\n` +
+      `Trader: <code>${shortAddr}</code>\n` +
+      `📊 Market: <b>${escHtml(active.title)}</b>\n` +
+      `🎯 Outcome: <b>${pos.outcome}</b>\n` +
+      `💵 USDC has been returned to your wallet.${txLine}`
+    );
   }
 }
 
