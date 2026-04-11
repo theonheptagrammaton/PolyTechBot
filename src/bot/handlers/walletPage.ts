@@ -1108,12 +1108,18 @@ export async function handleCloseAllConfirm(ctx: Context): Promise<void> {
       return;
     }
 
-    const totalValue = positions.reduce((sum, p) => sum + p.currentValue, 0);
+    const sellableCount   = positions.filter(p => !p.redeemable).length;
+    const redeemableCount = positions.filter(p =>  p.redeemable).length;
+    const totalValue      = positions.reduce((sum, p) => sum + p.currentValue, 0);
+
+    const breakdownLines: string[] = [];
+    if (sellableCount > 0)   breakdownLines.push(`• Sell *${sellableCount}* open position${sellableCount > 1 ? 's' : ''} at market price`);
+    if (redeemableCount > 0) breakdownLines.push(`• Redeem *${redeemableCount}* resolved position${redeemableCount > 1 ? 's' : ''}`);
 
     await sendPage(ctx,
       `⚠️ *Close All Positions*\n\n` +
       `You have *${positions.length} active position${positions.length > 1 ? 's' : ''}* worth ~*$${totalValue.toFixed(2)}*.\n\n` +
-      `This will sell ALL positions immediately at market price.\n` +
+      `${breakdownLines.join('\n')}\n\n` +
       `Illiquid positions may fail individually.\n\n` +
       `⚠️ This action cannot be undone.`,
       {
@@ -1157,11 +1163,13 @@ export async function handleCloseAllExecute(ctx: Context): Promise<void> {
 
     await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
 
-    const summary = result.closed > 0
-      ? `✅ <b>${result.closed} position${result.closed > 1 ? 's' : ''} closed successfully.</b>`
-      : `ℹ️ No positions were closed.`;
+    const lines: string[] = [];
+    if (result.closed > 0)   lines.push(`✅ <b>${result.closed} position${result.closed > 1 ? 's' : ''} sold</b> at market price.`);
+    if (result.redeemed > 0) lines.push(`💵 <b>${result.redeemed} resolved position${result.redeemed > 1 ? 's' : ''} redeemed</b> — USDC.e returned to your wallet.`);
+    if (lines.length === 0)  lines.push(`ℹ️ No positions were closed.`);
+    const summary = lines.join('\n');
     const failLine = result.failed > 0
-      ? `\n⚠️ ${result.failed} could not be closed (illiquid or too small):\n` +
+      ? `\n\n⚠️ ${result.failed} could not be closed (illiquid, too small, or redeem failed):\n` +
         result.errors.slice(0, 3).map(e => `• ${esc(e)}`).join('\n')
       : '';
 
@@ -1177,7 +1185,7 @@ export async function handleCloseAllExecute(ctx: Context): Promise<void> {
       }
     );
 
-    logger.info(`[walletPage] closeAll user=${telegramId}: closed=${result.closed} failed=${result.failed}`);
+    logger.info(`[walletPage] closeAll user=${telegramId}: closed=${result.closed} redeemed=${result.redeemed} failed=${result.failed}`);
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     logger.error('Error closing all positions:', error);

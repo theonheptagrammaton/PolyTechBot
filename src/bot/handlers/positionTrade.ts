@@ -1343,22 +1343,24 @@ function classifyOrderError(err: any, side: 'buy' | 'sell'): Error {
 }
 
 /**
- * Closes all active positions by selling 100% at market price.
+ * Closes all active positions: sells open positions at market price and
+ * redeems any resolved (redeemable) positions in a single bulk action.
  * Called from the "Close All Positions" bulk action.
  */
 export async function executeCloseAllPositions(
   user: any,
   slippagePct: number = 1.0,
-): Promise<{ closed: number; failed: number; errors: string[] }> {
+): Promise<{ closed: number; redeemed: number; failed: number; errors: string[] }> {
   const allPositions = await getActivePositions(user.polymarketProxyAddress);
-  // Skip redeemable positions (resolved markets) — they need claiming, not selling
-  const positions = allPositions.filter(pos => pos.size > 0 && !pos.redeemable);
+  const sellable   = allPositions.filter(pos => pos.size > 0 && !pos.redeemable);
+  const redeemable = allPositions.filter(pos => pos.size > 0 &&  pos.redeemable);
   let closed = 0;
+  let redeemed = 0;
   let failed = 0;
   const errors: string[] = [];
 
-  // Process sequentially to avoid rate-limit / nonce collisions on Predexon
-  for (const pos of positions) {
+  // 1) Sell open positions sequentially (avoid rate-limit / nonce collisions on Predexon)
+  for (const pos of sellable) {
     if (pos.size < MIN_ORDER_SIZE) {
       failed++;
       errors.push(`${pos.outcome}: too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
@@ -1388,5 +1390,32 @@ export async function executeCloseAllPositions(
     }
   }
 
-  return { closed, failed, errors };
+  // 2) Redeem resolved positions sequentially
+  if (redeemable.length > 0) {
+    const { manualRedeem } = await import('../../services/redeem');
+    for (const pos of redeemable) {
+      try {
+        const result = await manualRedeem(
+          user.encryptedPrivateKey,
+          user.polymarketProxyAddress,
+          pos,
+          user.predexonUserId ?? undefined,
+        );
+        if (result.success) {
+          logger.info(`[positionTrade] closeAll: redeemed ${pos.outcome} / ${pos.title.slice(0, 40)}`);
+          redeemed++;
+        } else {
+          logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
+          failed++;
+          errors.push(`${pos.outcome}: redeem failed — ${result.error || 'unknown error'}`);
+        }
+      } catch (err: any) {
+        logger.warn(`[positionTrade] closeAll: redeem threw for ${pos.outcome}: ${err?.message}`);
+        failed++;
+        errors.push(`${pos.outcome}: redeem error — ${err?.message || 'unknown error'}`);
+      }
+    }
+  }
+
+  return { closed, redeemed, failed, errors };
 }
