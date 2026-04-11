@@ -175,10 +175,15 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
     msg += `⏰ Market ends: ${endDate}\n`;
     if (pos.redeemable) msg += `✅ _Market Resolved — Claim your USDC below_\n`;
 
+    const viewMarketUrl = (pos.eventSlug || pos.slug)
+      ? `https://polymarket.com/event/${pos.eventSlug || pos.slug}`
+      : '';
+
     const detailButtons = pos.redeemable
       ? [
           [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
           [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
+          ...(viewMarketUrl ? [[Markup.button.url('🔗 View on Polymarket', viewMarketUrl)]] : []),
           [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
         ]
       : [
@@ -187,6 +192,7 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
             Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
           ],
           [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
+          ...(viewMarketUrl ? [[Markup.button.url('🔗 View on Polymarket', viewMarketUrl)]] : []),
           [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
         ];
 
@@ -239,6 +245,10 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
       }
     } catch { /* proceed without share button */ }
 
+    const marketUrl = (pos.eventSlug || pos.slug)
+      ? `https://polymarket.com/event/${pos.eventSlug || pos.slug}`
+      : '';
+
     const pnlKeyboard = Markup.inlineKeyboard([
       [
         Markup.button.callback('📈 Buy', `pos_buy_${idx}`),
@@ -248,6 +258,7 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
         Markup.button.callback('🔄 Refresh', `pos_pnl_${idx}`),
         ...(shareUrl ? [Markup.button.url('📤 Share', shareUrl)] : []),
       ],
+      ...(marketUrl ? [[Markup.button.url('🔗 View on Polymarket', marketUrl)]] : []),
       [Markup.button.callback('🛑 Stop Loss', `pos_sl_${idx}`)],
       [Markup.button.callback('« Back', `pos_view_${idx}`)],
     ]);
