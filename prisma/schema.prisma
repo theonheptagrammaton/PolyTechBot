@@ -54,6 +54,7 @@ model User {
 
   // Referral system
   referralCode        String?  @unique        // User's referral code (username or random)
+  customReferralPct   Float?                  // Admin-set custom Tier 1 referral % (null = default 25%)
   referredById        String?                 // ID of the user who referred this user
   referredBy          User?    @relation("Referrals", fields: [referredById], references: [id])
   referrals           User[]   @relation("Referrals")

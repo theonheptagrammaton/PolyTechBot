@@ -16,6 +16,11 @@ import {
   handleResetMe,
   handleResetMeConfirmed,
   handleResetMeCancel,
+  handleUserDetail,
+  handleEditRefRate,
+  handleRefRateInput,
+  handleResetRefRate,
+  adminRefRateState,
 } from './handlers/admin';
 import {
   handleShowCategories,
@@ -130,6 +135,9 @@ import {
 import {
   handleReferralHub,
   handleReferralClaim,
+  handleReferralEditName,
+  handleReferralEditInput,
+  referralEditState,
 } from './handlers/referral';
 import {
   handleCashbackPage,
@@ -603,6 +611,24 @@ export class TelegramBot {
       await handleDeleteUserConfirmed(ctx, userId);
     });
 
+    this.bot.action(/^admin_user_detail_(.+)$/, async (ctx) => {
+      const userId = ctx.match[1];
+      // Clear ref rate edit state if returning to detail
+      const tid = ctx.from?.id.toString();
+      if (tid) adminRefRateState.delete(tid);
+      await handleUserDetail(ctx, userId);
+    });
+
+    this.bot.action(/^admin_edit_ref_rate_(.+)$/, async (ctx) => {
+      const userId = ctx.match[1];
+      await handleEditRefRate(ctx, userId);
+    });
+
+    this.bot.action(/^admin_reset_ref_rate_(.+)$/, async (ctx) => {
+      const userId = ctx.match[1];
+      await handleResetRefRate(ctx, userId);
+    });
+
     // 2FA handlers
     this.bot.action('2fa_menu', handleTwoFactorMenu);
     this.bot.action('2fa_enable', handleEnableTwoFactor);
@@ -642,8 +668,14 @@ export class TelegramBot {
     });
 
     // Referral handlers
-    this.bot.action('referral_hub', handleReferralHub);
+    this.bot.action('referral_hub', (ctx) => {
+      // Cancel edit state if returning to hub
+      const tid = ctx.from?.id.toString();
+      if (tid) referralEditState.delete(tid);
+      return handleReferralHub(ctx);
+    });
     this.bot.action('referral_claim', handleReferralClaim);
+    this.bot.action('referral_edit_name', handleReferralEditName);
     this.bot.action('cashback_page', handleCashbackPage);
     this.bot.action('cashback_claim', handleCashbackClaim);
 
@@ -933,6 +965,20 @@ export class TelegramBot {
         return;
       }
 
+      // Check if admin is editing a user's referral rate
+      const refRateData = await adminRefRateState.get(telegramId);
+      if (refRateData) {
+        await handleRefRateInput(ctx, text);
+        return;
+      }
+
+      // Check if user is editing their referral name
+      const refEditData = await referralEditState.get(telegramId);
+      if (refEditData) {
+        await handleReferralEditInput(ctx, text);
+        return;
+      }
+
       // Check if user is in a 2FA flow
       const state = await userState.get(telegramId);
 
@@ -971,7 +1017,9 @@ export class TelegramBot {
         copyEditState.has(telegramId) ||
         await settingsAmountState.hasAsync(telegramId) ||
         await settingsSlippageState.hasAsync(telegramId) ||
-        await userState.hasAsync(telegramId);
+        await userState.hasAsync(telegramId) ||
+        await referralEditState.hasAsync(telegramId) ||
+        await adminRefRateState.hasAsync(telegramId);
       if (!text.startsWith('/') && !hasActiveFlow) {
         await handleKeywordSearch(ctx, text);
         return;

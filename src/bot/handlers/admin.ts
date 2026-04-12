@@ -5,6 +5,12 @@ import { getAdminStats, formatStatsMessage } from '../../services/adminStats';
 import { logger } from '../../utils/logger';
 import { sendPage } from '../../utils/telegram';
 import { ce, EMOJI } from '../../utils/customEmoji';
+import { prisma } from '../../database/prisma';
+import { RedisBackedState } from '../../utils/redisState';
+import { REFERRAL_TIER1_PCT } from '../../services/referral';
+
+// State for admin editing a user's referral rate — stores target userId, TTL 5 min
+export const adminRefRateState = new RedisBackedState<{ targetUserId: string; timestamp: number }>('adminRefRate', 300);
 
 export async function handleStats(ctx: Context): Promise<void> {
   try {
@@ -156,16 +162,18 @@ export async function handleUsers(ctx: Context, page: number = 1): Promise<void>
     // Build buttons
     const buttons: any[] = [];
 
-    // User action buttons (Delete buttons)
+    // User action buttons (Detail + Delete)
     pageUsers.forEach((u, index) => {
       const number = startIndex + index + 1;
       const name = u.firstName || u.username || 'Unknown';
+      const row: any[] = [
+        Markup.button.callback(`👤 ${number}. ${name}`, `admin_user_detail_${u.id}`),
+      ];
       // Don't allow deleting admins
       if (!u.isAdmin) {
-        buttons.push([
-          Markup.button.callback(`🗑 Delete ${number}. ${name}`, `admin_delete_user_${u.id}`),
-        ]);
+        row.push(Markup.button.callback(`🗑`, `admin_delete_user_${u.id}`));
       }
+      buttons.push(row);
     });
 
     // Pagination buttons
@@ -469,5 +477,202 @@ export async function handleResetMeCancel(ctx: Context): Promise<void> {
     });
   } catch (error) {
     logger.error('Error cancelling reset:', error);
+  }
+}
+
+/**
+ * Shows user detail view for admin
+ */
+export async function handleUserDetail(ctx: Context, userId: string): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) {
+      await ctx.reply('❌ Unauthorized');
+      return;
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      await sendPage(ctx, '❌ User not found.');
+      return;
+    }
+
+    const name = user.firstName || user.username || 'Unknown';
+    const refPct = user.customReferralPct != null ? user.customReferralPct : REFERRAL_TIER1_PCT * 100;
+
+    // Count direct referrals
+    const refCount = await prisma.user.count({ where: { referredById: userId } });
+
+    let msg = `👤 <b>User Detail</b>\n\n`;
+    msg += `<b>Name:</b> ${name}\n`;
+    msg += `<b>Username:</b> ${user.username ? '@' + user.username : '—'}\n`;
+    msg += `<b>Telegram ID:</b> <code>${user.telegramId}</code>\n`;
+    msg += `<b>Wallet:</b> <code>${user.walletAddress}</code>\n`;
+    msg += `<b>Status:</b> ${user.isActive ? '✅ Active' : '❌ Inactive'}\n`;
+    msg += `<b>Admin:</b> ${user.isAdmin ? '🔐 Yes' : 'No'}\n`;
+    msg += `<b>Created:</b> ${user.createdAt.toLocaleDateString()}\n\n`;
+    msg += `━━━━━━━━━━━━━━━\n`;
+    msg += `<b>Referral Info</b>\n\n`;
+    msg += `<b>Ref Code:</b> <code>${user.referralCode || '—'}</code>\n`;
+    msg += `<b>Tier 1 Rate:</b> <b>${refPct}%</b>${user.customReferralPct != null ? ' (custom)' : ' (default)'}\n`;
+    msg += `<b>Direct Referrals:</b> ${refCount}\n`;
+    msg += `<b>Claimable:</b> $${user.referralClaimable.toFixed(2)}\n`;
+    msg += `<b>Total Earned:</b> $${user.referralEarnedTotal.toFixed(2)}\n`;
+
+    await sendPage(ctx, msg, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback(`✏️ Edit Ref Rate (${refPct}%)`, `admin_edit_ref_rate_${userId}`)],
+        user.customReferralPct != null
+          ? [Markup.button.callback('🔄 Reset to Default (25%)', `admin_reset_ref_rate_${userId}`)]
+          : [],
+        [Markup.button.callback('👥 Back to Users', 'admin_view_users')],
+      ].filter(row => row.length > 0)),
+    });
+  } catch (error) {
+    logger.error('Error in handleUserDetail:', error);
+    await ctx.reply('❌ An error occurred.');
+  }
+}
+
+/**
+ * Prompts admin to enter a new referral rate for a user
+ */
+export async function handleEditRefRate(ctx: Context, userId: string): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, username: true, customReferralPct: true },
+    });
+    if (!user) {
+      await sendPage(ctx, '❌ User not found.');
+      return;
+    }
+
+    const name = user.firstName || user.username || 'Unknown';
+    const currentPct = user.customReferralPct != null ? user.customReferralPct : REFERRAL_TIER1_PCT * 100;
+
+    adminRefRateState.set(telegramId, { targetUserId: userId, timestamp: Date.now() });
+
+    await sendPage(ctx,
+      `✏️ <b>Edit Referral Rate</b>\n\n` +
+      `User: <b>${name}</b>\n` +
+      `Current Tier 1 Rate: <b>${currentPct}%</b>\n\n` +
+      `Enter the new Tier 1 referral percentage (1-100):\n` +
+      `<i>Example: 40 for 40%</i>`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancel', `admin_user_detail_${userId}`)],
+        ]),
+      }
+    );
+  } catch (error) {
+    logger.error('Error in handleEditRefRate:', error);
+    await ctx.reply('❌ An error occurred.');
+  }
+}
+
+/**
+ * Handles admin text input for referral rate change
+ */
+export async function handleRefRateInput(ctx: Context, text: string): Promise<void> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const stateData = await adminRefRateState.get(telegramId);
+    if (!stateData) return;
+
+    adminRefRateState.delete(telegramId);
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    const pct = parseFloat(text.trim());
+    if (isNaN(pct) || pct < 1 || pct > 100) {
+      // Re-set state so they can try again
+      adminRefRateState.set(telegramId, stateData);
+      await sendPage(ctx,
+        `⚠️ Invalid value. Enter a number between 1 and 100.\n\n<i>Example: 40 for 40%</i>`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('❌ Cancel', `admin_user_detail_${stateData.targetUserId}`)],
+          ]),
+        }
+      );
+      return;
+    }
+
+    await prisma.user.update({
+      where: { id: stateData.targetUserId },
+      data: { customReferralPct: pct },
+    });
+
+    const user = await prisma.user.findUnique({
+      where: { id: stateData.targetUserId },
+      select: { firstName: true, username: true },
+    });
+    const name = user?.firstName || user?.username || 'Unknown';
+
+    logger.info(`[admin] ${telegramId} set referral rate for user ${stateData.targetUserId} (${name}) to ${pct}%`);
+
+    await sendPage(ctx,
+      `✅ <b>Referral Rate Updated</b>\n\n` +
+      `User: <b>${name}</b>\n` +
+      `New Tier 1 Rate: <b>${pct}%</b>`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('👤 Back to User', `admin_user_detail_${stateData.targetUserId}`)],
+          [Markup.button.callback('👥 Back to Users', 'admin_view_users')],
+        ]),
+      }
+    );
+  } catch (error) {
+    logger.error('Error in handleRefRateInput:', error);
+    await ctx.reply('❌ An error occurred.');
+  }
+}
+
+/**
+ * Resets a user's referral rate to default
+ */
+export async function handleResetRefRate(ctx: Context, userId: string): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { customReferralPct: null },
+    });
+
+    logger.info(`[admin] ${telegramId} reset referral rate to default for user ${userId}`);
+
+    // Show user detail again
+    await handleUserDetail(ctx, userId);
+  } catch (error) {
+    logger.error('Error in handleResetRefRate:', error);
+    await ctx.reply('❌ An error occurred.');
   }
 }

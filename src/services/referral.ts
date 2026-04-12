@@ -27,6 +27,7 @@ const ERC20_ABI = [
 export interface ReferralStats {
   code: string;
   inviteLink: string;
+  tier1Pct: number;     // effective Tier 1 % (custom or default)
   tier1Count: number;   // direct referrals
   tier2Count: number;   // referrals of referrals
   tier3Count: number;   // tier-3
@@ -93,6 +94,34 @@ export async function ensureReferralCode(userId: string, username?: string | nul
 }
 
 /**
+ * Updates a user's referral code to a custom name.
+ * Returns { success, error? } — fails if the code is taken or invalid.
+ */
+export async function updateReferralCode(
+  userId: string,
+  newCode: string
+): Promise<{ success: boolean; error?: string }> {
+  // Sanitise: lowercase, alphanumeric + underscore, 3-20 chars
+  const sanitised = newCode.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (sanitised.length < 3 || sanitised.length > 20) {
+    return { success: false, error: 'Referral name must be 3-20 characters (letters, numbers, underscore).' };
+  }
+
+  // Check uniqueness
+  const existing = await prisma.user.findUnique({ where: { referralCode: sanitised } });
+  if (existing) {
+    if (existing.id === userId) {
+      return { success: false, error: 'This is already your current referral name.' };
+    }
+    return { success: false, error: 'This referral name is already taken. Please choose another.' };
+  }
+
+  await prisma.user.update({ where: { id: userId }, data: { referralCode: sanitised } });
+  logger.info(`[referral] User ${userId} updated referral code to "${sanitised}"`);
+  return { success: true };
+}
+
+/**
  * Links a new user to their referrer using a referral code.
  * Returns true if successfully linked, false otherwise.
  */
@@ -128,6 +157,7 @@ export async function getReferralStats(userId: string, botUsername: string): Pro
     select: {
       username: true,
       referralCode: true,
+      customReferralPct: true,
       referralClaimable: true,
       referralEarnedTotal: true,
       referrals: {
@@ -147,7 +177,7 @@ export async function getReferralStats(userId: string, botUsername: string): Pro
   });
 
   if (!user) {
-    return { code: '', inviteLink: '', tier1Count: 0, tier2Count: 0, tier3Count: 0, claimable: 0, earnedTotal: 0 };
+    return { code: '', inviteLink: '', tier1Pct: REFERRAL_TIER1_PCT * 100, tier1Count: 0, tier2Count: 0, tier3Count: 0, claimable: 0, earnedTotal: 0 };
   }
 
   const code = user.referralCode || await ensureReferralCode(userId, user.username);
@@ -163,9 +193,12 @@ export async function getReferralStats(userId: string, botUsername: string): Pro
   const tier2 = tier1.flatMap((u: typeof tier1[0]) => u.referrals);
   const tier3 = tier2.flatMap((u: typeof tier2[0]) => u.referrals);
 
+  const tier1Pct = user.customReferralPct != null ? user.customReferralPct : REFERRAL_TIER1_PCT * 100;
+
   return {
     code,
     inviteLink,
+    tier1Pct,
     tier1Count: tier1.length,
     tier2Count: tier2.length,
     tier3Count: tier3.length,
@@ -189,6 +222,7 @@ export async function creditReferralCommission(traderId: string, commissionUsd: 
         referredBy: {
           select: {
             id: true,
+            customReferralPct: true,
             referredBy: {
               select: {
                 id: true,
@@ -210,7 +244,9 @@ export async function creditReferralCommission(traderId: string, commissionUsd: 
 
     const updates: Array<{ id: string; amount: number }> = [];
 
-    const t1Amt = commissionUsd * REFERRAL_TIER1_PCT;
+    // Use custom percentage if admin has set one, otherwise default
+    const tier1Rate = tier1.customReferralPct != null ? tier1.customReferralPct / 100 : REFERRAL_TIER1_PCT;
+    const t1Amt = commissionUsd * tier1Rate;
     updates.push({ id: tier1.id, amount: t1Amt });
 
     if (tier2) {
