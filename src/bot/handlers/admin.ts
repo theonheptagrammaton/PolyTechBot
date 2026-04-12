@@ -12,6 +12,9 @@ import { REFERRAL_TIER1_PCT } from '../../services/referral';
 // State for admin editing a user's referral rate — stores target userId, TTL 5 min
 export const adminRefRateState = new RedisBackedState<{ targetUserId: string; timestamp: number }>('adminRefRate', 300);
 
+// State for admin searching users — TTL 5 min
+export const adminSearchUserState = new RedisBackedState<{ timestamp: number }>('adminSearchUser', 300);
+
 export async function handleStats(ctx: Context): Promise<void> {
   try {
     const telegramId = ctx.from?.id.toString();
@@ -188,7 +191,8 @@ export async function handleUsers(ctx: Context, page: number = 1): Promise<void>
       buttons.push(navRow);
     }
 
-    // Back button
+    // Search + Back buttons
+    buttons.push([Markup.button.callback('🔍 Search User', 'admin_search_user')]);
     buttons.push([Markup.button.callback('« Back to Stats', 'admin_back_to_stats')]);
 
     await sendPage(ctx, message, {
@@ -645,6 +649,136 @@ export async function handleRefRateInput(ctx: Context, text: string): Promise<vo
     );
   } catch (error) {
     logger.error('Error in handleRefRateInput:', error);
+    await ctx.reply('❌ An error occurred.');
+  }
+}
+
+/**
+ * Prompts admin to enter a username to search
+ */
+export async function handleSearchUser(ctx: Context): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    adminSearchUserState.set(telegramId, { timestamp: Date.now() });
+
+    await sendPage(ctx,
+      `🔍 <b>Search User</b>\n\n` +
+      `Enter a username, first name, or Telegram ID to search:\n` +
+      `<i>Example: eray</i>`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancel', 'admin_view_users')],
+        ]),
+      }
+    );
+  } catch (error) {
+    logger.error('Error in handleSearchUser:', error);
+    await ctx.reply('❌ An error occurred.');
+  }
+}
+
+/**
+ * Handles admin text input for user search
+ */
+export async function handleSearchUserInput(ctx: Context, text: string): Promise<void> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const stateData = await adminSearchUserState.get(telegramId);
+    if (!stateData) return;
+
+    adminSearchUserState.delete(telegramId);
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    const query = text.trim().toLowerCase();
+    if (!query) {
+      adminSearchUserState.set(telegramId, stateData);
+      await sendPage(ctx, '⚠️ Please enter a search term.', {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancel', 'admin_view_users')],
+        ]),
+      });
+      return;
+    }
+
+    const allUsers = await getAllUsers();
+    const results = allUsers.filter(u => {
+      const firstName = (u.firstName || '').toLowerCase();
+      const username = (u.username || '').toLowerCase();
+      const tgId = u.telegramId.toLowerCase();
+      return firstName.includes(query) || username.includes(query) || tgId.includes(query);
+    });
+
+    if (results.length === 0) {
+      await sendPage(ctx,
+        `🔍 <b>Search Results</b>\n\n` +
+        `No users found for "<b>${text.trim()}</b>".`,
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔍 Search Again', 'admin_search_user')],
+            [Markup.button.callback('👥 Back to Users', 'admin_view_users')],
+          ]),
+        }
+      );
+      return;
+    }
+
+    let message = `🔍 <b>Search Results</b>\n\n`;
+    message += `Query: "<b>${text.trim()}</b>"\n`;
+    message += `Found: ${results.length} user(s)\n\n`;
+
+    results.slice(0, 10).forEach((u, index) => {
+      const status = u.isActive ? '✅' : '❌';
+      const adminBadge = u.isAdmin ? '🔐 ADMIN' : '';
+      const name = u.firstName || u.username || 'Unknown';
+
+      message += `<b>${index + 1}. ${name}</b> ${status} ${adminBadge}\n`;
+      message += `├ TG ID: <code>${u.telegramId}</code>\n`;
+      message += `├ Wallet: <code>${u.walletAddress.slice(0, 10)}...</code>\n`;
+      message += `└ Created: ${u.createdAt.toLocaleDateString()}\n\n`;
+    });
+
+    if (results.length > 10) {
+      message += `<i>...and ${results.length - 10} more. Try a more specific search.</i>\n`;
+    }
+
+    const buttons: any[] = [];
+
+    results.slice(0, 10).forEach((u, index) => {
+      const name = u.firstName || u.username || 'Unknown';
+      const row: any[] = [
+        Markup.button.callback(`👤 ${index + 1}. ${name}`, `admin_user_detail_${u.id}`),
+      ];
+      if (!u.isAdmin) {
+        row.push(Markup.button.callback(`🗑`, `admin_delete_user_${u.id}`));
+      }
+      buttons.push(row);
+    });
+
+    buttons.push([Markup.button.callback('🔍 Search Again', 'admin_search_user')]);
+    buttons.push([Markup.button.callback('👥 Back to Users', 'admin_view_users')]);
+
+    await sendPage(ctx, message, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard(buttons),
+    });
+
+    logger.info(`Admin ${telegramId} searched users with query: "${query}", found ${results.length} results`);
+  } catch (error) {
+    logger.error('Error in handleSearchUserInput:', error);
     await ctx.reply('❌ An error occurred.');
   }
 }

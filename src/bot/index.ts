@@ -21,6 +21,9 @@ import {
   handleRefRateInput,
   handleResetRefRate,
   adminRefRateState,
+  handleSearchUser,
+  handleSearchUserInput,
+  adminSearchUserState,
 } from './handlers/admin';
 import {
   handleShowCategories,
@@ -594,6 +597,7 @@ export class TelegramBot {
     this.bot.action('admin_back_to_stats', handleBackToStats);
     this.bot.action('admin_reset_me_confirmed', handleResetMeConfirmed);
     this.bot.action('admin_reset_me_cancel', handleResetMeCancel);
+    this.bot.action('admin_search_user', handleSearchUser);
 
     // Admin user management
     this.bot.action(/^admin_users_page_(\d+)$/, async (ctx) => {
@@ -962,6 +966,13 @@ export class TelegramBot {
       const slippageStateData = await settingsSlippageState.get(telegramId);
       if (slippageStateData) {
         await handleCustomSlippageInput(ctx, text);
+        return;
+      }
+
+      // Check if admin is searching for a user
+      const searchData = await adminSearchUserState.get(telegramId);
+      if (searchData) {
+        await handleSearchUserInput(ctx, text);
         return;
       }
 
