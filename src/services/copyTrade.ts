@@ -410,15 +410,25 @@ async function executeCopyOrder(
 
 // ─── Market Info Cache (for notification titles) ──────────────────────────────
 
+interface MarketInfo {
+  question: string;
+  slug: string;
+  eventSlug: string;
+  liquidity?: number;
+  volume?: number;
+  endDate?: string;   // ISO date string
+  tags?: string[];     // category tags
+}
+
 async function fetchMarketInfo(
   conditionId: string,
   assetId?: string,
-): Promise<{ question: string; slug: string; eventSlug: string } | null> {
+): Promise<MarketInfo | null> {
   if (!conditionId && !assetId) return null;
 
   // Cache by assetId (always unique) when available; fall back to conditionId
-  const cacheKey = `copy:mktinfo4:${assetId || conditionId}`;
-  const cached = await redisCache.get<{ question: string; slug: string; eventSlug: string }>(cacheKey);
+  const cacheKey = `copy:mktinfo5:${assetId || conditionId}`;
+  const cached = await redisCache.get<MarketInfo>(cacheKey);
   if (cached) return cached;
 
   try {
@@ -454,10 +464,14 @@ async function fetchMarketInfo(
     if (!m) return null;
 
     const slug = m.market_slug ?? '';
-    const result = {
+    const result: MarketInfo = {
       question: m.question ?? (conditionId || assetId || '').slice(0, 20),
       slug,
       eventSlug: slug,
+      liquidity: typeof m.liquidity === 'number' ? m.liquidity : (parseFloat(m.liquidity) || undefined),
+      volume: typeof m.volume === 'number' ? m.volume : (parseFloat(m.volume) || undefined),
+      endDate: m.end_date_iso ?? m.end_date ?? undefined,
+      tags: Array.isArray(m.tags) ? m.tags.map((t: any) => typeof t === 'string' ? t : (t.label ?? t.slug ?? '')) : undefined,
     };
     await redisCache.set(cacheKey, result, 3600);
     return result;
@@ -724,6 +738,65 @@ async function tickForTrader(
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
             if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped — Daily Limit</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
             continue;
+          }
+        }
+
+        // ── Filter: trigger price range (BUY only — minTriggerPrice/maxTriggerPrice in cents) ──
+        if (effectiveSide === 'BUY') {
+          const priceCents = trade.price * 100;
+          if (sub.minTriggerPrice != null && priceCents < sub.minTriggerPrice) {
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below trigger min ${sub.minTriggerPrice}c` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &lt; trigger min ${sub.minTriggerPrice}¢`);
+            continue;
+          }
+          if (sub.maxTriggerPrice != null && priceCents > sub.maxTriggerPrice) {
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above trigger max ${sub.maxTriggerPrice}c` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &gt; trigger max ${sub.maxTriggerPrice}¢`);
+            continue;
+          }
+        }
+
+        // ── Filters requiring market metadata (liquidity, volume, days out, categories) ──
+        const needsMarketFilters = sub.minLiquidity != null || sub.minVolume != null || sub.maxDaysOut != null || (sub.categories != null && sub.categories.trim() !== '');
+        if (needsMarketFilters && effectiveSide === 'BUY') {
+          const mktMeta = await fetchMarketInfo(trade.marketId, trade.assetId).catch(() => null);
+
+          // ── Filter: min liquidity ─────────────────────────────────────────────
+          if (sub.minLiquidity != null && mktMeta?.liquidity != null && mktMeta.liquidity < sub.minLiquidity) {
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `liquidity $${mktMeta.liquidity.toFixed(0)} below min $${sub.minLiquidity}` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Liquidity $${mktMeta.liquidity.toFixed(0)} &lt; min $${sub.minLiquidity}`);
+            continue;
+          }
+
+          // ── Filter: min volume ────────────────────────────────────────────────
+          if (sub.minVolume != null && mktMeta?.volume != null && mktMeta.volume < sub.minVolume) {
+            await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `volume $${mktMeta.volume.toFixed(0)} below min $${sub.minVolume}` } });
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Volume $${mktMeta.volume.toFixed(0)} &lt; min $${sub.minVolume}`);
+            continue;
+          }
+
+          // ── Filter: max days out ──────────────────────────────────────────────
+          if (sub.maxDaysOut != null && mktMeta?.endDate) {
+            const endMs = new Date(mktMeta.endDate).getTime();
+            const nowMs = Date.now();
+            const daysOut = Math.ceil((endMs - nowMs) / (24 * 3600 * 1000));
+            if (daysOut > sub.maxDaysOut) {
+              await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `market expires in ${daysOut} days (max ${sub.maxDaysOut})` } });
+              if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Market expires in ${daysOut} days &gt; max ${sub.maxDaysOut}`);
+              continue;
+            }
+          }
+
+          // ── Filter: categories ────────────────────────────────────────────────
+          if (sub.categories != null && sub.categories.trim() !== '') {
+            const allowedCats = new Set(sub.categories.split(',').map(c => c.trim().toLowerCase()).filter(Boolean));
+            const marketTags = (mktMeta?.tags ?? []).map(t => t.toLowerCase());
+            const hasMatch = marketTags.some(tag => allowedCats.has(tag));
+            if (!hasMatch) {
+              await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `market category not in allowed list` } });
+              if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Category not in filter list`);
+              continue;
+            }
           }
         }
 
