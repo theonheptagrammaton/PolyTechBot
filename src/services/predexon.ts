@@ -161,7 +161,7 @@ export async function getPredexonUser(userId: string): Promise<PredexonUser> {
  */
 export async function createAndWaitForUser(maxWaitMs = 180_000): Promise<PredexonUser> {
   const user = await createPredexonUser();
-  logger.info(`[predexon] User created: ${user.userId} (status: ${user.status})`);
+  logger.info(`[predexon] User created: ${user.userId} (status: ${user.status}). Full response: ${JSON.stringify(user)}`);
 
   if (user.status === 'ready') return user;
 
@@ -177,6 +177,7 @@ export async function createAndWaitForUser(maxWaitMs = 180_000): Promise<Predexo
       return current;
     }
     if (current.status === 'failed') {
+      logger.error(`[predexon] User ${user.userId} provisioning failed. Full response: ${JSON.stringify(current)}`);
       throw new Error(`Predexon user provisioning failed for ${user.userId}`);
     }
     logger.debug(`[predexon] User ${user.userId} still provisioning...`);
