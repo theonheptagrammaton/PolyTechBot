@@ -6,7 +6,12 @@ import { esc } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
 import { UPDOWN_COIN_MAP } from '../../services/market';
 
-// ─── Constants ──────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** sendPage wrapper that forces HTML parse mode */
+function sendHtml(ctx: Context, text: string, markup?: any) {
+  return sendPage(ctx, text, { ...(markup ?? {}), parse_mode: 'HTML' });
+}
 
 const MAX_STRATEGIES = 20;
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -136,46 +141,50 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
   });
 
   const lines: string[] = [
-    `📊 <b>Up/Down Strategies</b>`,
+    `🤖 <b>Auto Trade — Up/Down</b>`,
     ``,
   ];
 
   if (strategies.length === 0) {
-    lines.push(`No strategies yet. Create one to get started.`);
+    lines.push(`No up-down strategies yet.`);
+    lines.push(`Tap <b>➕ Add</b> to create your first strategy, or use a <b>📋 Template</b>.`);
   } else {
     const running = strategies.filter(s => s.isActive && !s.isPaused).length;
-    lines.push(`⚡ ${running}/${strategies.length} active\n`);
-    lines.push(`━━━━━━━━━━━━━━━━━━━━\n`);
 
     for (let i = 0; i < strategies.length; i++) {
       const s = strategies[i];
       const statusDot = s.isActive && !s.isPaused ? '🟢' : '🔴';
       const name = s.label || `AFK ${i + 1}`;
       const ce = coinEmoji(s.coin);
-      const dirStr = s.direction === 'up' ? '🟢 UP' : '🔴 DOWN';
+      const dirStr = s.direction === 'up' ? '🟢 Buy UP' : '🔴 Buy DOWN';
       const orderStr = s.orderType === 'limit' && s.limitPrice
         ? `Limit ${s.limitPrice}` : 'Market';
 
+      // Calculate PnL from trades
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
       const wins = filledTrades.filter(t => t.tpSlStatus === 'tp_triggered').length;
       const losses = filledTrades.filter(t => t.tpSlStatus === 'sl_triggered').length;
 
-      const trigTime = `${s.timeRangeStart}–${s.timeRangeEnd}`;
-      const trigUp = `${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}`;
+      // Triggers line
+      const trigTime = `⏱ ${s.timeRangeStart}–${s.timeRangeEnd}`;
+      const trigUp = `📈 UP ${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}`;
       const trigChange = s.priceChangeMin > -9999 || s.priceChangeMax < 9999
-        ? `\n│  🪙 ${s.coin} Change: $${s.priceChangeMin} – $${s.priceChangeMax}`
+        ? ` | 🪙 ${s.coin} $${s.priceChangeMin}–$${s.priceChangeMax}`
         : '';
 
       lines.push(
-        `${statusDot} ${ce} <b>${esc(name)}</b>\n` +
-        `│  ${dirStr} · ${orderStr} · $${s.amount.toFixed(2)}\n` +
-        `│  ⏱ ${trigTime}  📈 ${trigUp}${trigChange}\n` +
-        `│  ${wins}W / ${losses}L · ${s.roundsExecuted}/${s.maxRounds} rounds\n` +
-        `└  $${totalSpent.toFixed(2)} spent`
+        `${i + 1}. ${statusDot} ${ce} <b>${esc(name)}</b>\n` +
+        `├ Mode: ${dirStr} · ${orderStr} · <b>$${s.amount.toFixed(2)}</b>\n` +
+        `├ Triggers: ${trigTime} | ${trigUp}${trigChange}\n` +
+        `├ PnL: ${wins}W/${losses}L\n` +
+        `├ Rounds: ${s.roundsExecuted}/${s.maxRounds}\n` +
+        `└ Spent: <b>$${totalSpent.toFixed(2)}</b>`
       );
       lines.push(``);
     }
+
+    lines.push(`⚡ Status: ${running}/${strategies.length} tasks running.`);
   }
 
   const buttons: any[][] = [];
@@ -211,11 +220,11 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
   }
 
   buttons.push([
-    Markup.button.callback('🔙 Auto Strategies', 'auto_strategies'),
-    Markup.button.callback('✖️ Close', 'ud_close'),
+    Markup.button.callback('← Auto Strategies', 'auto_strategies'),
+    Markup.button.callback('× Close', 'ud_close'),
   ]);
 
-  await sendPage(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
 }
 
 // ─── Start / Stop All ───────────────────────────────────────────────────────
@@ -252,8 +261,8 @@ export async function handleStopAll(ctx: Context): Promise<void> {
 
 export async function handleDeleteAllConfirm(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await sendPage(ctx,
-    `⚠️ This will permanently delete all your up-down strategies.\n\nAre you sure?`,
+  await sendHtml(ctx,
+    `⚠️ <b>Delete All Up-Down Strategies</b>\n\nThis will permanently delete all your up-down strategies. Are you sure?`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('🗑 Yes, Delete All', 'ud_del_all_do'),
@@ -297,8 +306,8 @@ export async function handleRemovePrompt(ctx: Context): Promise<void> {
   ]);
   buttons.push([Markup.button.callback('← Back', 'updown_list')]);
 
-  await sendPage(ctx,
-    `Select a strategy to remove:`,
+  await sendHtml(ctx,
+    `🗑 <b>Remove Strategy</b>\n\nSelect a strategy to remove:`,
     Markup.inlineKeyboard(buttons),
   );
 }
@@ -325,21 +334,21 @@ export async function handleHistory(ctx: Context, limit: number): Promise<void> 
   });
 
   if (trades.length === 0) {
-    await sendPage(ctx,
-      `📜 No trades yet.`,
+    await sendHtml(ctx,
+      `📜 <b>Up-Down Trade History</b>\n\nNo trades yet.`,
       Markup.inlineKeyboard([[Markup.button.callback('← Back', 'updown_list')]]),
     );
     return;
   }
 
-  const lines = [`📜 Trade History (last ${trades.length})\n`];
+  const lines = [`📜 <b>Up-Down Trade History</b> (last ${trades.length})\n`];
   for (const t of trades) {
     const icon = t.status === 'filled' ? '✅' : t.status === 'failed' ? '❌' : t.status === 'cancelled' ? '⏹' : '⏳';
     const dir = t.direction === 'up' ? '🟢UP' : '🔴DN';
     lines.push(`${icon} ${coinEmoji(t.coin)} ${t.coin} ${dir} · $${t.amount.toFixed(2)} @ ${t.triggerPrice.toFixed(2)}`);
   }
 
-  await sendPage(ctx,
+  await sendHtml(ctx,
     lines.join('\n'),
     Markup.inlineKeyboard([[Markup.button.callback('← Back', 'updown_list')]]),
   );
@@ -430,15 +439,17 @@ export async function handleTemplateList(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
 
   const lines = [
-    `📋 Templates\n`,
-    `Quick-start with a proven setup:\n`,
+    `📋 <b>Strategy Templates</b>`,
+    ``,
+    `Choose a battle-tested template:`,
+    ``,
   ];
 
   for (const t of TEMPLATES) {
     lines.push(
       `${t.emoji} <b>${t.name}</b>`,
-      `<i>${t.description}</i>`,
-      `⏱ ${t.timeRangeStart}–${t.timeRangeEnd}  📈 ${t.upPriceMin}–${t.upPriceMax}  🪙 $${t.priceChangeMin} – $${t.priceChangeMax}`,
+      `${t.description}`,
+      `⏱ ${t.timeRangeStart}–${t.timeRangeEnd} | 📈 UP ${t.upPriceMin}–${t.upPriceMax} | 🪙 BTC $${t.priceChangeMin}–$${t.priceChangeMax}`,
       ``,
     );
   }
@@ -448,7 +459,7 @@ export async function handleTemplateList(ctx: Context): Promise<void> {
   ]);
   buttons.push([Markup.button.callback('← Back', 'updown_list')]);
 
-  await sendPage(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
 }
 
 export async function handleTemplateUse(ctx: Context, templateId: string): Promise<void> {
@@ -506,8 +517,8 @@ export async function handleStartAdd(ctx: Context): Promise<void> {
 
   updownAddState.set(telegramId, { step: 'coin', timestamp: Date.now() });
 
-  await sendPage(ctx,
-    `Step 1/5 · <b>Select Coin</b>\n\n` +
+  await sendHtml(ctx,
+    `₿ <b>Step 1/5: Select Coin</b>\n\n` +
     `Which cryptocurrency do you want to trade?`,
     Markup.inlineKeyboard([
       [
@@ -533,8 +544,8 @@ export async function handleAddCoin(ctx: Context, coin: string): Promise<void> {
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
 
-  await sendPage(ctx,
-    `Step 2/5 · <b>Timeframe</b>\n\n` +
+  await sendHtml(ctx,
+    `⏱ <b>Step 2/5: Timeframe</b>\n\n` +
     `Select market timeframe:`,
     Markup.inlineKeyboard([
       [
@@ -561,8 +572,8 @@ export async function handleAddTimeframe(ctx: Context, tf: string): Promise<void
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
 
-  await sendPage(ctx,
-    `Step 3/5 · <b>Direction</b>\n\n` +
+  await sendHtml(ctx,
+    `🎯 <b>Step 3/5: Direction & Amount</b>\n\n` +
     `Which direction do you want to bet?`,
     Markup.inlineKeyboard([
       [
@@ -587,9 +598,9 @@ export async function handleAddDirection(ctx: Context, dir: string): Promise<voi
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
 
-  await sendPage(ctx,
-    `Step 3/5 · <b>Amount</b>\n\n` +
-    `How much per trade?`,
+  await sendHtml(ctx,
+    `💰 <b>Amount Per Trade</b>\n\n` +
+    `Enter USD amount per trade (e.g. 25, 50, 100):`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('$10', 'ud_add_amt_10'),
@@ -620,13 +631,15 @@ async function showTriggersTimeStep(ctx: Context, state: UpDownAddState, telegra
   state.step = 'triggers_time';
   updownAddState.set(telegramId, state);
 
-  await sendPage(ctx,
-    `Step 4/5 · <b>Time Range</b>\n\n` +
-    `When during the round should the bot enter?\n` +
-    `Format: <code>mm:ss, mm:ss</code>\n\n` +
-    `<code>00:00, 14:55</code> — entire round\n` +
-    `<code>13:00, 14:55</code> — last 2 min\n` +
-    `<code>00:30, 01:00</code> — first 30s`,
+  await sendHtml(ctx,
+    `⏱ <b>Step 4/5: Triggers</b>\n\n` +
+    `<b>Time Range</b> — When during the round should the bot look for entries?\n` +
+    `Enter as <code>mm:ss, mm:ss</code> (start, end)\n\n` +
+    `Examples:\n` +
+    `• <code>00:00, 14:55</code> — entire round\n` +
+    `• <code>13:00, 14:55</code> — last 2 minutes only\n` +
+    `• <code>00:30, 01:00</code> — first 30 seconds\n\n` +
+    `Or pick a preset:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('Full Round', 'ud_add_tr_full'),
@@ -667,10 +680,11 @@ async function showTriggersUpPriceStep(ctx: Context, state: UpDownAddState, tele
   state.step = 'triggers_up_price';
   updownAddState.set(telegramId, state);
 
-  await sendPage(ctx,
-    `Step 4/5 · <b>UP Price Range</b>\n\n` +
-    `Trigger only when UP token is within this range.\n` +
-    `Format: <code>min, max</code> (e.g. <code>0.70, 0.90</code>)`,
+  await sendHtml(ctx,
+    `📈 <b>UP Price Range</b>\n\n` +
+    `Only trigger when UP token price is within this range.\n` +
+    `Enter as <code>min, max</code> (e.g. <code>0.70, 0.90</code>)\n\n` +
+    `Or pick a preset:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('Any (0.01–0.99)', 'ud_add_up_any'),
@@ -711,10 +725,11 @@ async function showTriggersPriceChangeStep(ctx: Context, state: UpDownAddState, 
   updownAddState.set(telegramId, state);
 
   const coin = state.coin || 'BTC';
-  await sendPage(ctx,
-    `Step 4/5 · <b>${coin} Price Change</b>\n\n` +
-    `Trigger only when ${coin} spot change (vs round open) is within range.\n` +
-    `Format: <code>min, max</code> in USD (e.g. <code>-100, 9999</code>)`,
+  await sendHtml(ctx,
+    `🪙 <b>${coin} Spot Price Change</b>\n\n` +
+    `Only trigger when ${coin} spot price change (vs round open) is within this range.\n` +
+    `Enter as <code>min, max</code> in USD (e.g. <code>-100, 9999</code>)\n\n` +
+    `Or pick a preset:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('Any', 'ud_add_pc_any'),
@@ -761,13 +776,16 @@ async function showReviewStep(ctx: Context, state: UpDownAddState): Promise<void
     : 'Any';
 
   const lines = [
-    `Step 5/5 · <b>Review</b>\n`,
-    `${ce} <b>${state.coin}</b> · ${state.timeframe}\n`,
-    `${dirStr} · ${orderStr} · $${state.amount ?? 25}`,
-    `⏱ ${state.timeRangeStart ?? '00:00'} – ${state.timeRangeEnd ?? '14:55'}`,
-    `📈 UP: ${(state.upPriceMin ?? 0.01).toFixed(2)} – ${(state.upPriceMax ?? 0.99).toFixed(2)}`,
-    `🪙 ${state.coin}: ${pcStr}`,
-    `🔁 ${state.maxRounds ?? 10} rounds · ⚡ ${state.slippage ?? 5}% slip`,
+    `📋 <b>Step 5/5: Review</b>\n`,
+    `${ce} <b>${state.coin}</b> · ${state.timeframe}`,
+    `🎯 Direction: ${dirStr}`,
+    `💰 Amount: $${state.amount ?? 25}`,
+    `📋 Order: ${orderStr}`,
+    `⏱ Time: ${state.timeRangeStart ?? '00:00'} – ${state.timeRangeEnd ?? '14:55'}`,
+    `📈 UP Price: ${(state.upPriceMin ?? 0.01).toFixed(2)} – ${(state.upPriceMax ?? 0.99).toFixed(2)}`,
+    `🪙 ${state.coin} Change: ${pcStr}`,
+    `🔁 Rounds: ${state.maxRounds ?? 10}`,
+    `⚡ Slippage: ${state.slippage ?? 5}%`,
   ];
 
   if (state.takeProfitPct != null) lines.push(`🏆 TP: ${state.takeProfitPct}%`);
@@ -775,9 +793,9 @@ async function showReviewStep(ctx: Context, state: UpDownAddState): Promise<void
   if (state.stopLossPct != null) lines.push(`🛑 SL: ${state.stopLossPct}%`);
   if (state.stopLossPrice != null) lines.push(`🛑 SL: @${state.stopLossPrice}`);
 
-  lines.push(`\n<i>Strategy starts paused. Start it from the manage page.</i>`);
+  lines.push(`\nStrategy starts <b>paused</b>. Start it from the manage page.`);
 
-  await sendPage(ctx,
+  await sendHtml(ctx,
     lines.join('\n'),
     Markup.inlineKeyboard([
       [
@@ -858,8 +876,8 @@ async function showAdvancedStep(ctx: Context, state: UpDownAddState, telegramId:
     case 0: // Order type
       state.step = 'adv_order_type';
       updownAddState.set(telegramId, state);
-      await sendPage(ctx,
-        `⚙️ <b>Order Type</b>\n\nSelect execution type:`,
+      await sendHtml(ctx,
+        `📋 <b>Order Type</b>\n\nSelect order execution type:`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback('📈 Market', 'ud_adv_ot_market'),
@@ -874,8 +892,8 @@ async function showAdvancedStep(ctx: Context, state: UpDownAddState, telegramId:
     case 1: // Max rounds
       state.step = 'adv_max_rounds';
       updownAddState.set(telegramId, state);
-      await sendPage(ctx,
-        `⚙️ <b>Max Rounds</b>\n\nHow many rounds? (1–100)`,
+      await sendHtml(ctx,
+        `🔁 <b>Max Rounds</b>\n\nHow many rounds should this strategy run?\n\nEnter a number (1–100):`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback('5', 'ud_adv_mr_5'),
@@ -892,8 +910,8 @@ async function showAdvancedStep(ctx: Context, state: UpDownAddState, telegramId:
     case 2: // Slippage
       state.step = 'adv_slippage';
       updownAddState.set(telegramId, state);
-      await sendPage(ctx,
-        `⚙️ <b>Slippage</b>\n\nMax slippage tolerance (0.1–50%):`,
+      await sendHtml(ctx,
+        `⚡ <b>Slippage</b>\n\nMax slippage tolerance (%).\n\nEnter a value (0.1–50):`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback('2%', 'ud_adv_sl_2'),
@@ -909,8 +927,8 @@ async function showAdvancedStep(ctx: Context, state: UpDownAddState, telegramId:
     case 3: // TP
       state.step = 'adv_tp_type';
       updownAddState.set(telegramId, state);
-      await sendPage(ctx,
-        `⚙️ <b>Take Profit</b>`,
+      await sendHtml(ctx,
+        `🏆 <b>Take Profit</b>\n\nSet TP condition:`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback('📊 % from entry', 'ud_adv_tp_pct'),
@@ -925,8 +943,8 @@ async function showAdvancedStep(ctx: Context, state: UpDownAddState, telegramId:
     case 4: // SL
       state.step = 'adv_sl_type';
       updownAddState.set(telegramId, state);
-      await sendPage(ctx,
-        `⚙️ <b>Stop Loss</b>`,
+      await sendHtml(ctx,
+        `🛑 <b>Stop Loss</b>\n\nSet SL condition:`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback('📊 % from entry', 'ud_adv_sl_pct'),
@@ -961,8 +979,8 @@ export async function handleAdvOrderType(ctx: Context, type: string): Promise<vo
   if (type === 'limit') {
     state.step = 'adv_limit_price';
     updownAddState.set(telegramId, state);
-    await sendPage(ctx,
-      `⚙️ <b>Limit Price</b>\n\nEnter price (0.01–0.99):`,
+    await sendHtml(ctx,
+      `💲 <b>Limit Price</b>\n\nEnter limit order price (0.01–0.99):`,
       Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'updown_list')]]),
     );
     return;
@@ -1017,10 +1035,10 @@ export async function handleAdvTpType(ctx: Context, type: string): Promise<void>
   updownAddState.set(telegramId, state);
 
   const prompt = type === 'pct'
-    ? `🏆 <b>TP %</b>\n\nEnter % from entry (e.g. 50 for +50%):`
+    ? `🏆 <b>TP Percentage</b>\n\nEnter TP % from entry (e.g. 50 for +50%):`
     : `🏆 <b>TP Price</b>\n\nEnter target price (0.01–0.99):`;
 
-  await sendPage(ctx,
+  await sendHtml(ctx,
     prompt,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'updown_list')]]),
   );
@@ -1040,10 +1058,10 @@ export async function handleAdvSlType(ctx: Context, type: string): Promise<void>
   updownAddState.set(telegramId, state);
 
   const prompt = type === 'pct'
-    ? `🛑 <b>SL %</b>\n\nEnter % from entry (e.g. 25 for -25%):`
-    : `🛑 <b>SL Price</b>\n\nEnter price (0.01–0.99):`;
+    ? `🛑 <b>SL Percentage</b>\n\nEnter SL % from entry (e.g. 25 for -25%):`
+    : `🛑 <b>SL Price</b>\n\nEnter stop-loss price (0.01–0.99):`;
 
-  await sendPage(ctx,
+  await sendHtml(ctx,
     prompt,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'updown_list')]]),
   );
@@ -1147,8 +1165,8 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
       state.step = 'adv_limit_ttl';
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await sendPage(ctx,
-        `⚙️ <b>Limit TTL</b>\n\nWait time for fill (10–300s):`,
+      await sendHtml(ctx,
+        `⏰ <b>Limit Order TTL</b>\n\nHow long to wait for fill (seconds)?\n\nEnter a value (10–300):`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback('30s', 'ud_adv_ttl_30'),
@@ -1294,18 +1312,19 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
     : strat.stopLossPrice != null ? `@${strat.stopLossPrice}` : '–';
 
   const lines = [
-    `${ce} <b>${esc(strat.label || 'AFK')}</b> · ${strat.coin} ${strat.timeframe}`,
-    `${statusStr}`,
+    `⚙️ <b>${esc(strat.label || 'AFK')} — ${ce} ${strat.coin} ${strat.timeframe}</b>`,
     ``,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    ``,
-    `${dirStr} · ${orderStr} · $${strat.amount.toFixed(2)}`,
-    `⏱ ${strat.timeRangeStart} – ${strat.timeRangeEnd}`,
-    `📈 UP: ${strat.upPriceMin.toFixed(2)} – ${strat.upPriceMax.toFixed(2)}`,
-    `🪙 ${strat.coin}: ${pcStr}`,
-    `🔁 ${strat.roundsExecuted}/${strat.maxRounds} rounds`,
-    `🏆 TP: ${tpStr}  🛑 SL: ${slStr}`,
-    `⚡ ${strat.slippage}% slip  🔔 ${onOff(strat.notificationsEnabled)}`,
+    `📊 Status: ${statusStr}`,
+    `🎯 Direction: ${dirStr}`,
+    `💰 Amount: $${strat.amount.toFixed(2)}`,
+    `📋 Order: ${orderStr}`,
+    `⏱ Time: ${strat.timeRangeStart} – ${strat.timeRangeEnd}`,
+    `📈 UP Price: ${strat.upPriceMin.toFixed(2)} – ${strat.upPriceMax.toFixed(2)}`,
+    `🪙 ${strat.coin} Change: ${pcStr}`,
+    `🔁 Rounds: ${strat.roundsExecuted}/${strat.maxRounds}`,
+    `🏆 TP: ${tpStr} | 🛑 SL: ${slStr}`,
+    `⚡ Slippage: ${strat.slippage}%`,
+    `🔔 Notifications: ${onOff(strat.notificationsEnabled)}`,
   ];
 
   const id = strat.id;
@@ -1339,7 +1358,7 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
     [Markup.button.callback('← Back to List', 'updown_list')],
   ];
 
-  await sendPage(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
 }
 
 // ─── Manage Actions ─────────────────────────────────────────────────────────
@@ -1392,8 +1411,8 @@ export async function handleManageOrderType(ctx: Context, stratId: string): Prom
       stratId,
       timestamp: Date.now(),
     });
-    await sendPage(ctx,
-      `Enter limit price (0.01–0.99):`,
+    await sendHtml(ctx,
+      `💲 <b>Set Limit Price</b>\n\nEnter limit order price (0.01–0.99):`,
       Markup.inlineKeyboard([[Markup.button.callback('← Cancel', `ud_task_${stratId}`)]]),
     );
   } else {
@@ -1417,15 +1436,15 @@ export async function handleManageEditPrompt(
   if (!telegramId) return;
 
   updownEditState.set(telegramId, { step, stratId, timestamp: Date.now() });
-  await sendPage(ctx, prompt,
+  await sendHtml(ctx, prompt,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', `ud_task_${stratId}`)]]),
   );
 }
 
 export async function handleManageDelete(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await sendPage(ctx,
-    `⚠️ Delete this strategy?\n\nThis cannot be undone.`,
+  await sendHtml(ctx,
+    `⚠️ <b>Delete Strategy</b>\n\nAre you sure?`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('🗑 Yes, Delete', `udm_deldo_${stratId}`),
@@ -1451,8 +1470,8 @@ export async function handleManageRename(ctx: Context, stratId: string): Promise
     stratId,
     timestamp: Date.now(),
   });
-  await sendPage(ctx,
-    `Enter a new name:`,
+  await sendHtml(ctx,
+    `✏️ <b>Rename Strategy</b>\n\nEnter a new name:`,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', `ud_task_${stratId}`)]]),
   );
 }
@@ -1460,8 +1479,8 @@ export async function handleManageRename(ctx: Context, stratId: string): Promise
 // TP/SL manage prompts
 export async function handleManageTpPrompt(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await sendPage(ctx,
-    `🏆 <b>Take Profit</b>`,
+  await sendHtml(ctx,
+    `🏆 <b>Take Profit</b>\n\nSelect TP type:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('📊 % from entry', `udm_tp_pct_${stratId}`),
@@ -1475,8 +1494,8 @@ export async function handleManageTpPrompt(ctx: Context, stratId: string): Promi
 
 export async function handleManageSlPrompt(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await sendPage(ctx,
-    `🛑 <b>Stop Loss</b>`,
+  await sendHtml(ctx,
+    `🛑 <b>Stop Loss</b>\n\nSelect SL type:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('📊 % from entry', `udm_sl_pct_${stratId}`),
@@ -1490,22 +1509,22 @@ export async function handleManageSlPrompt(ctx: Context, stratId: string): Promi
 
 export async function handleManageTpTypePct(ctx: Context, stratId: string): Promise<void> {
   await handleManageEditPrompt(ctx, stratId, 'awaiting_tp_pct',
-    `🏆 Enter TP % from entry (e.g. 50 for +50%):`);
+    `🏆 <b>TP Percentage</b>\n\nEnter TP % from entry (e.g. 50 for +50%):`);
 }
 
 export async function handleManageTpTypeFix(ctx: Context, stratId: string): Promise<void> {
   await handleManageEditPrompt(ctx, stratId, 'awaiting_tp_price',
-    `🏆 Enter target price (0.01–0.99):`);
+    `🏆 <b>TP Price</b>\n\nEnter target price (0.01–0.99):`);
 }
 
 export async function handleManageSlTypePct(ctx: Context, stratId: string): Promise<void> {
   await handleManageEditPrompt(ctx, stratId, 'awaiting_sl_pct',
-    `🛑 Enter SL % from entry (e.g. 25 for -25%):`);
+    `🛑 <b>SL Percentage</b>\n\nEnter SL % from entry (e.g. 25 for -25%):`);
 }
 
 export async function handleManageSlTypeFix(ctx: Context, stratId: string): Promise<void> {
   await handleManageEditPrompt(ctx, stratId, 'awaiting_sl_price',
-    `🛑 Enter price (0.01–0.99):`);
+    `🛑 <b>SL Price</b>\n\nEnter stop-loss price (0.01–0.99):`);
 }
 
 export async function handleManageTpClear(ctx: Context, stratId: string): Promise<void> {

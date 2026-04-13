@@ -79,6 +79,6 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
     [Markup.button.callback('🔙 Main Menu', 'back_to_menu')],
   ];
 
-  await sendPage(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
+  await sendPage(ctx, lines.join('\n'), { ...Markup.inlineKeyboard(buttons), parse_mode: 'HTML' });
 }
 

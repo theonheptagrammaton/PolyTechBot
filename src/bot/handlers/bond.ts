@@ -6,7 +6,12 @@ import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
 
-// ─── Constants ──────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** sendPage wrapper that forces HTML parse mode */
+function sendHtml(ctx: Context, text: string, markup?: any) {
+  return sendPage(ctx, text, { ...(markup ?? {}), parse_mode: 'HTML' });
+}
 
 const MAX_STRATEGIES = 20;
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -128,42 +133,49 @@ export async function handleBondList(ctx: Context): Promise<void> {
   });
 
   const lines: string[] = [
-    `🎯 <b>Bonding Strategies</b>`,
+    `🤖 <b>Auto Trade</b>`,
     ``,
   ];
 
   if (strategies.length === 0) {
-    lines.push(`No strategies yet. Create one to get started.`);
+    lines.push(`No bond strategies yet.`);
+    lines.push(`Tap <b>➕ Add</b> to create your first strategy.`);
   } else {
     const running = strategies.filter(s => s.isActive && !s.isPaused).length;
-    lines.push(`⚡ ${running}/${strategies.length} active\n`);
-    lines.push(`━━━━━━━━━━━━━━━━━━━━\n`);
 
     for (let i = 0; i < strategies.length; i++) {
       const s = strategies[i];
       const statusDot = s.isActive && !s.isPaused ? '🟢' : '🔴';
-      const name = s.label || `Strategy ${i + 1}`;
+      const name = s.label || `Strategy-${i + 1}`;
 
+      // Calculate stats from trades
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
-      const wins = filledTrades.length;
+      const wins = filledTrades.length; // filled = successful buy
+      // Estimated PnL: sum of (amount * (1/price - 1)) for resolved high-prob bonds
+      // Simplified: we show total spent and count
       const pnlEstimate = filledTrades.reduce((sum, t) => {
+        // Expected return = amount * (1 - price) (if resolves correctly)
         return sum + t.amount * (1 - t.price);
       }, 0);
       const pnlStr = pnlEstimate >= 0 ? `+$${pnlEstimate.toFixed(2)}` : `-$${Math.abs(pnlEstimate).toFixed(2)}`;
 
+      // Active sessions = today's trades count
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const activeSessions = filledTrades.filter(t => new Date(t.createdAt) >= today).length;
 
       lines.push(
-        `${statusDot} <b>${esc(name)}</b>\n` +
-        `│  📊 ${s.minProbability}%–${s.maxProbability}% · $${s.fixedAmount.toFixed(2)}\n` +
-        `│  ${pnlStr} · ${wins} trades · ${activeSessions} today\n` +
-        `└  $${totalSpent.toFixed(2)} spent`
+        `${i + 1}. ${statusDot} 🎯 <b>${esc(name)}</b>\n` +
+        `├ Mode: 📊 ${s.minProbability}%–${s.maxProbability}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
+        `├ PnL: <b>${pnlStr}</b> (${wins}W/0L)\n` +
+        `├ Active Sessions: <b>${activeSessions}</b>\n` +
+        `└ Spent: <b>$${totalSpent.toFixed(2)}</b>`
       );
       lines.push(``);
     }
+
+    lines.push(`⚡ Status: ${running}/${strategies.length} tasks running.`);
   }
 
   const buttons: any[][] = [];
@@ -200,12 +212,12 @@ export async function handleBondList(ctx: Context): Promise<void> {
   }
 
   buttons.push([
-    Markup.button.callback('🔙 Auto Strategies', 'auto_strategies'),
-    Markup.button.callback('✖️ Close', 'bond_close'),
+    Markup.button.callback('← Auto Strategies', 'auto_strategies'),
+    Markup.button.callback('× Close', 'bond_close'),
   ]);
 
   const keyboard = Markup.inlineKeyboard(buttons);
-  await sendPage(ctx, lines.join('\n'), keyboard);
+  await sendHtml(ctx, lines.join('\n'), keyboard);
 }
 
 // ─── Start / Stop All ───────────────────────────────────────────────────────
@@ -243,14 +255,14 @@ export async function handleBondStopAll(ctx: Context): Promise<void> {
 export async function handleBondDeleteAllConfirm(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
 
-  const text = `⚠️ This will permanently delete all your bonding strategies.\n\nAre you sure?`;
+  const text = `⚠️ <b>Delete All Strategies</b>\n\nThis will permanently delete all your bond strategies. Are you sure?`;
   const keyboard = Markup.inlineKeyboard([
     [
       Markup.button.callback('🗑 Yes, Delete All', 'bond_del_all_do'),
       Markup.button.callback('← Cancel', 'bond_list'),
     ],
   ]);
-  await sendPage(ctx, text, keyboard);
+  await sendHtml(ctx, text, keyboard);
 }
 
 export async function handleBondDeleteAllExecute(ctx: Context): Promise<void> {
@@ -291,8 +303,8 @@ export async function handleBondRemovePrompt(ctx: Context): Promise<void> {
   ]);
   buttons.push([Markup.button.callback('← Back', 'bond_list')]);
 
-  await sendPage(ctx,
-    `Select a strategy to remove:`,
+  await sendHtml(ctx,
+    `🗑 <b>Remove Strategy</b>\n\nSelect a strategy to remove:`,
     Markup.inlineKeyboard(buttons),
   );
 }
@@ -319,14 +331,14 @@ export async function handleBondHistory(ctx: Context, limit: number): Promise<vo
   });
 
   if (trades.length === 0) {
-    await sendPage(ctx,
-      `📜 No trades yet.`,
+    await sendHtml(ctx,
+      `📜 <b>Bond Trade History</b>\n\nNo trades yet.`,
       Markup.inlineKeyboard([[Markup.button.callback('← Back', 'bond_list')]]),
     );
     return;
   }
 
-  const lines = [`📜 Trade History (last ${trades.length})\n`];
+  const lines = [`📜 <b>Bond Trade History</b> (last ${trades.length})\n`];
   for (const t of trades) {
     const icon = t.status === 'filled' ? '✅' : t.status === 'failed' ? '❌' : '⏳';
     const pct = (t.probability * 100).toFixed(1);
@@ -334,7 +346,7 @@ export async function handleBondHistory(ctx: Context, limit: number): Promise<vo
     lines.push(`${icon} ${esc(q)}\n   ${t.outcome} @ ${pct}% · $${t.amount.toFixed(2)}`);
   }
 
-  await sendPage(ctx,
+  await sendHtml(ctx,
     lines.join('\n'),
     Markup.inlineKeyboard([[Markup.button.callback('← Back', 'bond_list')]]),
   );
@@ -367,9 +379,9 @@ export async function handleBondStartAdd(ctx: Context): Promise<void> {
     timestamp: Date.now(),
   });
 
-  await sendPage(ctx,
-    `Step 1/6 · <b>Daily Budget</b>\n\n` +
-    `How much USDC per day?\n` +
+  await sendHtml(ctx,
+    `💰 <b>Step 1/6: Daily Budget</b>\n\n` +
+    `How much USDC per day should this strategy spend?\n\n` +
     `Enter an amount (e.g. 50, 100, 200):`,
     Markup.inlineKeyboard([
       [Markup.button.callback('← Cancel', 'bond_list')],
@@ -379,9 +391,10 @@ export async function handleBondStartAdd(ctx: Context): Promise<void> {
 
 // Step 2: Min probability
 async function showMinProbStep(ctx: Context): Promise<void> {
-  await sendPage(ctx,
-    `Step 2/6 · <b>Min Probability</b>\n\n` +
-    `Only buy when winning side is at least this likely:`,
+  await sendHtml(ctx,
+    `🎯 <b>Step 2/6: Min Probability</b>\n\n` +
+    `Only buy markets where the winning side is at least this likely.\n\n` +
+    `Choose a preset or enter custom:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('90%', 'bond_add_prob_90'),
@@ -397,9 +410,10 @@ async function showMinProbStep(ctx: Context): Promise<void> {
 
 // Step 3: Time window
 async function showTimeWindowStep(ctx: Context): Promise<void> {
-  await sendPage(ctx,
-    `Step 3/6 · <b>Time Window</b>\n\n` +
-    `Only buy markets expiring within:`,
+  await sendHtml(ctx,
+    `⏰ <b>Step 3/6: Time Window</b>\n\n` +
+    `Only buy markets that expire within this many hours.\n\n` +
+    `Choose a preset or enter custom:`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('12h', 'bond_add_hours_12'),
@@ -415,9 +429,9 @@ async function showTimeWindowStep(ctx: Context): Promise<void> {
 
 // Step 4: Max concurrent
 async function showMaxConcurrentStep(ctx: Context): Promise<void> {
-  await sendPage(ctx,
-    `Step 4/6 · <b>Max Positions</b>\n\n` +
-    `Max open positions at once:`,
+  await sendHtml(ctx,
+    `📊 <b>Step 4/6: Max Concurrent Positions</b>\n\n` +
+    `Maximum number of open bond positions at once.`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('2', 'bond_add_conc_2'),
@@ -432,9 +446,9 @@ async function showMaxConcurrentStep(ctx: Context): Promise<void> {
 
 // Step 5: Market types
 async function showMarketsFilterStep(ctx: Context): Promise<void> {
-  await sendPage(ctx,
-    `Step 5/6 · <b>Market Types</b>\n\n` +
-    `Include sports and/or crypto up/down?`,
+  await sendHtml(ctx,
+    `🏈 <b>Step 5/6: Market Types</b>\n\n` +
+    `Include sports and/or short-term crypto up/down markets?`,
     Markup.inlineKeyboard([
       [Markup.button.callback('Neither', 'bond_add_mkt_none')],
       [Markup.button.callback('🏈 Sports Only', 'bond_add_mkt_sports')],
@@ -448,23 +462,28 @@ async function showMarketsFilterStep(ctx: Context): Promise<void> {
 // Step 6: Review
 async function showReviewStep(ctx: Context, state: BondAddState): Promise<void> {
   const lines = [
-    `Step 6/6 · <b>Review</b>\n`,
-    `$${state.dailyBudget ?? 100}/day · $${state.fixedAmount ?? 25}/trade`,
-    `📊 ${state.minProbability ?? 95}%–${state.maxProbability ?? 99}%`,
-    `⏰ ${state.maxHoursOut ?? 48}h window · ${state.maxConcurrent ?? 5} max pos`,
-    `🏈 Sports: ${state.includeSports ? '✅' : '❌'}  ₿ Crypto: ${state.includeCryptoUpDown ? '✅' : '❌'}`,
-    `⚡ ${state.slippage ?? 5}% slip · 📡 ${state.scanInterval ?? 5}min · 🎲 ${state.outcomeSide ?? 'auto'}`,
+    `📋 <b>Step 6/6: Review</b>\n`,
+    `💰 Daily Budget: $${state.dailyBudget ?? 100}`,
+    `💵 Amount/Trade: $${state.fixedAmount ?? 25}`,
+    `🎯 Min Probability: ${state.minProbability ?? 95}%`,
+    `🎯 Max Probability: ${state.maxProbability ?? 99}%`,
+    `⏰ Time Window: ${state.maxHoursOut ?? 48}h`,
+    `📊 Max Positions: ${state.maxConcurrent ?? 5}`,
+    `🏈 Sports: ${state.includeSports ? '✅' : '❌'}  |  ₿ Crypto: ${state.includeCryptoUpDown ? '✅' : '❌'}`,
+    `⚡ Slippage: ${state.slippage ?? 5}%`,
+    `📡 Scan: ${state.scanInterval ?? 5}min`,
+    `🎲 Side: ${state.outcomeSide ?? 'auto'}`,
   ];
 
-  if (state.minLiquidity != null) lines.push(`💧 Min Liq: $${state.minLiquidity}`);
-  if (state.minVolume != null) lines.push(`📊 Min Vol: $${state.minVolume}`);
-  if (state.maxSpendPerMarket != null) lines.push(`💸 Per Market: $${state.maxSpendPerMarket}`);
-  if (state.maxSpendTotal != null) lines.push(`💸 Total: $${state.maxSpendTotal}`);
-  if (state.maxDailyLoss != null) lines.push(`📅 Loss Limit: $${state.maxDailyLoss}`);
+  if (state.minLiquidity != null) lines.push(`💧 Min Liquidity: $${state.minLiquidity}`);
+  if (state.minVolume != null) lines.push(`📊 Min Volume: $${state.minVolume}`);
+  if (state.maxSpendPerMarket != null) lines.push(`💸 Per Market Max: $${state.maxSpendPerMarket}`);
+  if (state.maxSpendTotal != null) lines.push(`💸 Total Max: $${state.maxSpendTotal}`);
+  if (state.maxDailyLoss != null) lines.push(`📅 Max Daily Loss: $${state.maxDailyLoss}`);
 
-  lines.push(`\n<i>Strategy starts paused. Start it from the manage page.</i>`);
+  lines.push(`\nStrategy starts <b>paused</b>. Start it from the manage page.`);
 
-  await sendPage(ctx,
+  await sendHtml(ctx,
     lines.join('\n'),
     Markup.inlineKeyboard([
       [
@@ -501,8 +520,8 @@ export async function handleAddProbCustom(ctx: Context): Promise<void> {
   state.step = 'min_prob_custom';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
-  await sendPage(ctx,
-    `Enter min probability (90–99):`,
+  await sendHtml(ctx,
+    `🎯 <b>Custom Min Probability</b>\n\nEnter a value between 90 and 99:`,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
   );
 }
@@ -530,8 +549,8 @@ export async function handleAddHoursCustom(ctx: Context): Promise<void> {
   state.step = 'time_window_custom';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
-  await sendPage(ctx,
-    `Enter hours (1–168):`,
+  await sendHtml(ctx,
+    `⏰ <b>Custom Time Window</b>\n\nEnter hours (1–168):`,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
   );
 }
@@ -559,8 +578,8 @@ export async function handleAddConcCustom(ctx: Context): Promise<void> {
   state.step = 'max_concurrent_custom';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
-  await sendPage(ctx,
-    `Enter max positions (1–50):`,
+  await sendHtml(ctx,
+    `📊 <b>Custom Max Positions</b>\n\nEnter a number (1–50):`,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
   );
 }
@@ -590,16 +609,16 @@ const ADV_STEPS = [
 ] as const;
 
 const ADV_PROMPTS: Record<string, string> = {
-  adv_amount: '⚙️ <b>Amount Per Trade</b>\n\nUSDC per trade (default: $25):',
-  adv_slippage: '⚙️ <b>Slippage</b>\n\nMax tolerance (default: 5%):',
-  adv_min_liq: '⚙️ <b>Min Liquidity</b>\n\nMin liquidity in USD (default: none):',
-  adv_min_vol: '⚙️ <b>Min Volume</b>\n\n24h volume in USD (default: none):',
-  adv_max_spend_market: '⚙️ <b>Max Per Market</b>\n\nMax USD per market (default: none):',
-  adv_max_spend_total: '⚙️ <b>Max Total Spend</b>\n\nLifetime cap in USD (default: none):',
-  adv_max_daily_loss: '⚙️ <b>Daily Loss Limit</b>\n\nPause if exceeded (default: none):',
-  adv_max_prob: '⚙️ <b>Max Probability</b>\n\nUpper cap (default: 99%):',
-  adv_scan_interval: '⚙️ <b>Scan Interval</b>\n\n1–10 minutes (default: 5):',
-  adv_outcome_side: '⚙️ <b>Outcome Side</b>\n\nWhich side to buy?',
+  adv_amount: '💵 <b>Amount Per Trade</b>\n\nUSDC to spend per trade (default: $25).\nEnter amount or ⏭ Skip:',
+  adv_slippage: '⚡ <b>Slippage %</b>\n\nMax slippage tolerance (default: 5%).\nEnter % or ⏭ Skip:',
+  adv_min_liq: '💧 <b>Min Liquidity</b>\n\nMinimum liquidity in USD (default: none).\nEnter amount or ⏭ Skip:',
+  adv_min_vol: '📊 <b>Min Volume</b>\n\nMinimum 24h volume in USD (default: none).\nEnter amount or ⏭ Skip:',
+  adv_max_spend_market: '💸 <b>Max Spend Per Market</b>\n\nMax USD per single market (default: none).\nEnter amount or ⏭ Skip:',
+  adv_max_spend_total: '💸 <b>Max Total Spend</b>\n\nLifetime max spend in USD (default: none).\nEnter amount or ⏭ Skip:',
+  adv_max_daily_loss: '📅 <b>Max Daily Loss</b>\n\nPause strategy if daily loss exceeds this (default: none).\nEnter amount or ⏭ Skip:',
+  adv_max_prob: '🎯 <b>Max Probability</b>\n\nUpper probability cap (default: 99%).\nEnter % or ⏭ Skip:',
+  adv_scan_interval: '📡 <b>Scan Interval</b>\n\nMinutes between scans, 1–10 (default: 5).\nEnter number or ⏭ Skip:',
+  adv_outcome_side: '🎲 <b>Outcome Side</b>\n\nWhich side to buy?',
 };
 
 export async function handleAddAdvanced(ctx: Context): Promise<void> {
@@ -620,7 +639,7 @@ async function showAdvStep(ctx: Context, step: string): Promise<void> {
   const prompt = ADV_PROMPTS[step] || 'Enter value:';
 
   if (step === 'adv_outcome_side') {
-    await sendPage(ctx, prompt, Markup.inlineKeyboard([
+    await sendHtml(ctx, prompt, Markup.inlineKeyboard([
       [
         Markup.button.callback('Auto', 'bond_add_side_auto'),
         Markup.button.callback('YES', 'bond_add_side_yes'),
@@ -631,7 +650,7 @@ async function showAdvStep(ctx: Context, step: string): Promise<void> {
     return;
   }
 
-  await sendPage(ctx, prompt, Markup.inlineKeyboard([
+  await sendHtml(ctx, prompt, Markup.inlineKeyboard([
     [Markup.button.callback('⏭ Skip', 'bond_add_adv_skip')],
     [Markup.button.callback('← Cancel', 'bond_list')],
   ]));
@@ -900,19 +919,24 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
   const name = strat.label || strat.id.slice(0, 8);
 
   const lines = [
-    `🎯 <b>${esc(name)}</b>`,
-    `${statusStr}`,
-    ``,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    ``,
-    `$${strat.dailyBudget}/day · $${strat.fixedAmount}/trade`,
-    `📊 ${strat.minProbability}%–${strat.maxProbability}% · ⏰ ${strat.maxHoursOut}h`,
-    `📊 ${strat.maxConcurrent} max pos · 🎲 ${strat.outcomeSide}`,
-    `🏈 Sports: ${strat.includeSports ? '✅' : '❌'}  ₿ Crypto: ${strat.includeCryptoUpDown ? '✅' : '❌'}`,
-    `⚡ ${strat.slippage}% slip · 📡 ${strat.scanInterval}min`,
-    `💧 Liq: ${fmtVal(strat.minLiquidity)} · 📊 Vol: ${fmtVal(strat.minVolume)}`,
-    `💸 Per Mkt: ${fmtVal(strat.maxSpendPerMarket)} · Total: ${fmtVal(strat.maxSpendTotal)}`,
-    `📅 Loss Limit: ${fmtVal(strat.maxDailyLoss)} · 🔔 ${onOff(strat.notificationsEnabled)}`,
+    `⚙️ <b>Strategy: ${esc(name)}</b>\n`,
+    `📊 Status: ${statusStr}`,
+    `💰 Daily Budget: $${strat.dailyBudget}`,
+    `💵 Amount/Trade: $${strat.fixedAmount}`,
+    `🎯 Min Probability: ${strat.minProbability}%`,
+    `🎯 Max Probability: ${strat.maxProbability}%`,
+    `⏰ Time Window: ${strat.maxHoursOut}h`,
+    `📊 Max Positions: ${strat.maxConcurrent}`,
+    `🏈 Sports: ${strat.includeSports ? '✅' : '❌'}  |  ₿ Crypto: ${strat.includeCryptoUpDown ? '✅' : '❌'}`,
+    `⚡ Slippage: ${strat.slippage}%`,
+    `📡 Scan: ${strat.scanInterval}min`,
+    `🎲 Side: ${strat.outcomeSide}`,
+    `💧 Min Liquidity: ${fmtVal(strat.minLiquidity)}`,
+    `📊 Min Volume: ${fmtVal(strat.minVolume)}`,
+    `💸 Per Market Max: ${fmtVal(strat.maxSpendPerMarket)}`,
+    `💸 Total Max: ${fmtVal(strat.maxSpendTotal)}`,
+    `📅 Max Daily Loss: ${fmtVal(strat.maxDailyLoss)}`,
+    `🔔 Notifications: ${onOff(strat.notificationsEnabled)}`,
   ];
 
   const id = strat.id;
@@ -959,7 +983,7 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
     [Markup.button.callback('← Back to List', 'bond_list')],
   ];
 
-  await sendPage(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
 }
 
 // ─── Manage Page Actions ────────────────────────────────────────────────────
@@ -1024,7 +1048,7 @@ export async function handleManageEditPrompt(
 
   bondEditState.set(telegramId, { step, stratId: id, timestamp: Date.now() });
 
-  await sendPage(ctx, prompt, Markup.inlineKeyboard([
+  await sendHtml(ctx, prompt, Markup.inlineKeyboard([
     [Markup.button.callback('← Cancel', `bond_task_${id}`)],
   ]));
 }
@@ -1032,8 +1056,8 @@ export async function handleManageEditPrompt(
 // Delete
 export async function handleManageDelete(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await sendPage(ctx,
-    `⚠️ Delete this strategy?\n\nThis cannot be undone.`,
+  await sendHtml(ctx,
+    `⚠️ <b>Delete Strategy</b>\n\nAre you sure? This cannot be undone.`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback('🗑 Yes, Delete', `bpm_deldo_${id}`),
@@ -1052,7 +1076,7 @@ export async function handleManageDeleteExecute(ctx: Context, id: string): Promi
 // Rename prompt
 export async function handleManageRename(ctx: Context, id: string): Promise<void> {
   await handleManageEditPrompt(ctx, id, 'awaiting_rename',
-    `Enter a new name:`);
+    `✏️ <b>Rename Strategy</b>\n\nEnter a new name:`);
 }
 
 // ─── Edit Text Input Handler ────────────────────────────────────────────────
