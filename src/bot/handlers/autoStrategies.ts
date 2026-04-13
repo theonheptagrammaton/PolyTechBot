@@ -60,15 +60,11 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
     `👛 <code>${shortWallet}</code>`,
     `⚡ ${totalRunning}/${totalStrats} active strategies`,
     ``,
-    `━━━━━━━━━━━━━━━━━━━━`,
-    ``,
     `🎯 <b>Bonding</b>`,
     `└ ${bondStatus}`,
     ``,
     `📊 <b>Up-Down</b>`,
     `└ ${updownStatus}`,
-    ``,
-    `━━━━━━━━━━━━━━━━━━━━`,
   ];
 
   const buttons = [
