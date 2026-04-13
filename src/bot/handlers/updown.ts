@@ -141,50 +141,44 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
   });
 
   const lines: string[] = [
-    `🤖 <b>Auto Trade — Up/Down</b>`,
+    `<b>Up/Down Strategies</b>`,
     ``,
   ];
 
   if (strategies.length === 0) {
-    lines.push(`No up-down strategies yet.`);
-    lines.push(`Tap <b>➕ Add</b> to create your first strategy, or use a <b>📋 Template</b>.`);
+    lines.push(`No strategies yet.`);
+    lines.push(`Tap <b>Add</b> or use a <b>Template</b> to get started.`);
   } else {
     const running = strategies.filter(s => s.isActive && !s.isPaused).length;
+    lines.push(`${running}/${strategies.length} active\n`);
 
     for (let i = 0; i < strategies.length; i++) {
       const s = strategies[i];
       const statusDot = s.isActive && !s.isPaused ? '🟢' : '🔴';
       const name = s.label || `AFK ${i + 1}`;
-      const ce = coinEmoji(s.coin);
-      const dirStr = s.direction === 'up' ? '🟢 Buy UP' : '🔴 Buy DOWN';
+      const dirStr = s.direction === 'up' ? 'UP' : 'DOWN';
       const orderStr = s.orderType === 'limit' && s.limitPrice
         ? `Limit ${s.limitPrice}` : 'Market';
+      const tfShort = s.timeframe === '5-Minute' ? '5m' : s.timeframe === '15-Minute' ? '15m' : '1h';
 
-      // Calculate PnL from trades
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
       const wins = filledTrades.filter(t => t.tpSlStatus === 'tp_triggered').length;
       const losses = filledTrades.filter(t => t.tpSlStatus === 'sl_triggered').length;
 
-      // Triggers line
-      const trigTime = `⏱ ${s.timeRangeStart}–${s.timeRangeEnd}`;
-      const trigUp = `📈 UP ${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}`;
       const trigChange = s.priceChangeMin > -9999 || s.priceChangeMax < 9999
-        ? ` | 🪙 ${s.coin} $${s.priceChangeMin}–$${s.priceChangeMax}`
+        ? `\n│  ${s.coin} change: $${s.priceChangeMin}–$${s.priceChangeMax}`
         : '';
 
       lines.push(
-        `${i + 1}. ${statusDot} ${ce} <b>${esc(name)}</b>\n` +
-        `├ Mode: ${dirStr} · ${orderStr} · <b>$${s.amount.toFixed(2)}</b>\n` +
-        `├ Triggers: ${trigTime} | ${trigUp}${trigChange}\n` +
-        `├ PnL: ${wins}W/${losses}L\n` +
-        `├ Rounds: ${s.roundsExecuted}/${s.maxRounds}\n` +
-        `└ Spent: <b>$${totalSpent.toFixed(2)}</b>`
+        `${statusDot} <b>${esc(name)}</b>\n` +
+        `│  ${s.coin} · ${tfShort} · ${dirStr} · ${orderStr} · $${s.amount.toFixed(2)}\n` +
+        `│  ${s.timeRangeStart}–${s.timeRangeEnd} · UP ${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}${trigChange}\n` +
+        `│  ${wins}W/${losses}L · ${s.roundsExecuted}/${s.maxRounds} rounds\n` +
+        `└  $${totalSpent.toFixed(2)} spent`
       );
       lines.push(``);
     }
-
-    lines.push(`⚡ Status: ${running}/${strategies.length} tasks running.`);
   }
 
   const buttons: any[][] = [];
@@ -203,9 +197,9 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
   }
 
   buttons.push([
-    Markup.button.callback('➕ Add', 'ud_start_add'),
-    Markup.button.callback('📋 Templates', 'udt_list'),
-    Markup.button.callback('🗑 Remove', 'ud_remove_prompt'),
+    Markup.button.callback('+ Add', 'ud_start_add'),
+    Markup.button.callback('Templates', 'udt_list'),
+    Markup.button.callback('Remove', 'ud_remove_prompt'),
   ]);
 
   if (strategies.length > 0) {
@@ -214,14 +208,13 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       Markup.button.callback('⏹ Stop All', 'ud_stop_all'),
     ]);
     buttons.push([
-      Markup.button.callback('📜 History', 'ud_history_10'),
-      Markup.button.callback('🗑 Delete All', 'ud_del_all_cfm'),
+      Markup.button.callback('History', 'ud_history_10'),
+      Markup.button.callback('Delete All', 'ud_del_all_cfm'),
     ]);
   }
 
   buttons.push([
-    Markup.button.callback('← Auto Strategies', 'auto_strategies'),
-    Markup.button.callback('× Close', 'ud_close'),
+    Markup.button.callback('← Back', 'auto_strategies'),
   ]);
 
   await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
@@ -383,55 +376,55 @@ interface Template {
 
 const TEMPLATES: Template[] = [
   {
-    id: 'theta',
-    name: 'Theta Harvester',
-    emoji: '🎯',
-    description: 'Late-stage arbitrage — high win rate',
+    id: 'late_entry',
+    name: 'Late Entry',
+    emoji: '₿',
+    description: 'Buy UP in the last 2 min when price is already high',
     coin: 'BTC',
     timeframe: '15-Minute',
     direction: 'up',
     timeRangeStart: '13:00',
     timeRangeEnd: '14:55',
-    upPriceMin: 0.70,
-    upPriceMax: 0.90,
-    priceChangeMin: 40,
+    upPriceMin: 0.65,
+    upPriceMax: 0.95,
+    priceChangeMin: -9999,
     priceChangeMax: 9999,
-    amount: 50,
+    amount: 25,
     maxRounds: 10,
   },
   {
-    id: 'breakout',
-    name: 'Breakout Scalper',
-    emoji: '🚀',
-    description: 'Opening momentum capture',
+    id: 'early_scalp',
+    name: 'Early Scalp',
+    emoji: '₿',
+    description: 'Catch early momentum in the first minute',
     coin: 'BTC',
-    timeframe: '15-Minute',
+    timeframe: '5-Minute',
     direction: 'up',
-    timeRangeStart: '00:30',
+    timeRangeStart: '00:15',
     timeRangeEnd: '01:00',
-    upPriceMin: 0.01,
-    upPriceMax: 0.89,
-    priceChangeMin: 50,
+    upPriceMin: 0.40,
+    upPriceMax: 0.70,
+    priceChangeMin: -9999,
     priceChangeMax: 9999,
     amount: 25,
-    maxRounds: 5,
+    maxRounds: 10,
   },
   {
-    id: 'crash',
-    name: 'Flash Crash Rebound',
-    emoji: '💣',
-    description: 'Extreme panic buy — small lottery play',
+    id: 'dip_buyer',
+    name: 'Dip Buyer',
+    emoji: '₿',
+    description: 'Buy UP when spot drops and price is cheap',
     coin: 'BTC',
     timeframe: '15-Minute',
     direction: 'up',
-    timeRangeStart: '04:00',
-    timeRangeEnd: '11:00',
-    upPriceMin: 0.01,
-    upPriceMax: 0.15,
-    priceChangeMin: -200,
-    priceChangeMax: -10,
-    amount: 10,
-    maxRounds: 3,
+    timeRangeStart: '02:00',
+    timeRangeEnd: '12:00',
+    upPriceMin: 0.10,
+    upPriceMax: 0.40,
+    priceChangeMin: -9999,
+    priceChangeMax: -50,
+    amount: 25,
+    maxRounds: 5,
   },
 ];
 
@@ -439,23 +432,27 @@ export async function handleTemplateList(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
 
   const lines = [
-    `📋 <b>Strategy Templates</b>`,
+    `<b>Templates</b>`,
     ``,
-    `Choose a battle-tested template:`,
+    `Quick-start with a preset strategy.`,
     ``,
   ];
 
   for (const t of TEMPLATES) {
+    const pcStr = t.priceChangeMin > -9999 || t.priceChangeMax < 9999
+      ? ` · $${t.priceChangeMin > -9999 ? t.priceChangeMin : ''}–$${t.priceChangeMax < 9999 ? t.priceChangeMax : ''}`
+      : '';
+    const tfShort = t.timeframe === '5-Minute' ? '5m' : t.timeframe === '15-Minute' ? '15m' : '1h';
     lines.push(
-      `${t.emoji} <b>${t.name}</b>`,
-      `${t.description}`,
-      `⏱ ${t.timeRangeStart}–${t.timeRangeEnd} | 📈 UP ${t.upPriceMin}–${t.upPriceMax} | 🪙 BTC $${t.priceChangeMin}–$${t.priceChangeMax}`,
+      `<b>${t.name}</b>`,
+      `├ ${t.coin} · ${tfShort} · ${t.direction.toUpperCase()} · $${t.amount}`,
+      `└ ${t.timeRangeStart}–${t.timeRangeEnd} · UP ${t.upPriceMin}–${t.upPriceMax}${pcStr}`,
       ``,
     );
   }
 
   const buttons = TEMPLATES.map(t => [
-    Markup.button.callback(`${t.emoji} ${t.name}`, `udt_use_${t.id}`),
+    Markup.button.callback(t.name, `udt_use_${t.id}`),
   ]);
   buttons.push([Markup.button.callback('← Back', 'updown_list')]);
 
@@ -1299,11 +1296,11 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
     return;
   }
 
-  const ce = coinEmoji(strat.coin);
   const statusStr = strat.isActive && !strat.isPaused ? '🟢 Running' : '🔴 Paused';
-  const dirStr = strat.direction === 'up' ? '🟢 Buy UP' : '🔴 Buy DOWN';
+  const dirStr = strat.direction === 'up' ? 'UP' : 'DOWN';
   const orderStr = strat.orderType === 'limit' && strat.limitPrice
     ? `Limit @ ${strat.limitPrice} (TTL: ${strat.limitTtlSeconds}s)` : 'Market';
+  const tfShort = strat.timeframe === '5-Minute' ? '5m' : strat.timeframe === '15-Minute' ? '15m' : '1h';
   const pcStr = strat.priceChangeMin > -9999 || strat.priceChangeMax < 9999
     ? `$${strat.priceChangeMin} – $${strat.priceChangeMax}` : 'Any';
   const tpStr = strat.takeProfitPct != null ? `${strat.takeProfitPct}%`
@@ -1312,19 +1309,19 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
     : strat.stopLossPrice != null ? `@${strat.stopLossPrice}` : '–';
 
   const lines = [
-    `⚙️ <b>${esc(strat.label || 'AFK')} — ${ce} ${strat.coin} ${strat.timeframe}</b>`,
+    `<b>${esc(strat.label || 'AFK')}</b> · ${strat.coin} ${tfShort}`,
+    `${statusStr}`,
     ``,
-    `📊 Status: ${statusStr}`,
-    `🎯 Direction: ${dirStr}`,
-    `💰 Amount: $${strat.amount.toFixed(2)}`,
-    `📋 Order: ${orderStr}`,
-    `⏱ Time: ${strat.timeRangeStart} – ${strat.timeRangeEnd}`,
-    `📈 UP Price: ${strat.upPriceMin.toFixed(2)} – ${strat.upPriceMax.toFixed(2)}`,
-    `🪙 ${strat.coin} Change: ${pcStr}`,
-    `🔁 Rounds: ${strat.roundsExecuted}/${strat.maxRounds}`,
-    `🏆 TP: ${tpStr} | 🛑 SL: ${slStr}`,
-    `⚡ Slippage: ${strat.slippage}%`,
-    `🔔 Notifications: ${onOff(strat.notificationsEnabled)}`,
+    `Direction: ${dirStr}`,
+    `Amount: $${strat.amount.toFixed(2)}`,
+    `Order: ${orderStr}`,
+    `Time: ${strat.timeRangeStart} – ${strat.timeRangeEnd}`,
+    `UP Price: ${strat.upPriceMin.toFixed(2)} – ${strat.upPriceMax.toFixed(2)}`,
+    `${strat.coin} Change: ${pcStr}`,
+    `Rounds: ${strat.roundsExecuted}/${strat.maxRounds}`,
+    `TP: ${tpStr} · SL: ${slStr}`,
+    `Slippage: ${strat.slippage}%`,
+    `Notifications: ${onOff(strat.notificationsEnabled)}`,
   ];
 
   const id = strat.id;
@@ -1333,29 +1330,29 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
   const buttons: any[][] = [
     [Markup.button.callback(isRunning ? '⏹ Pause' : '▶️ Start', isRunning ? `udm_pause_${id}` : `udm_start_${id}`)],
     [
-      Markup.button.callback('🎯 Direction', `udm_dir_${id}`),
-      Markup.button.callback('💰 Amount', `udm_amt_${id}`),
-      Markup.button.callback('📋 Order Type', `udm_ot_${id}`),
+      Markup.button.callback('Direction', `udm_dir_${id}`),
+      Markup.button.callback('Amount', `udm_amt_${id}`),
+      Markup.button.callback('Order Type', `udm_ot_${id}`),
     ],
     [
-      Markup.button.callback('⏱ Time Range', `udm_time_${id}`),
-      Markup.button.callback('📈 UP Price', `udm_up_${id}`),
-      Markup.button.callback(`🪙 ${strat.coin} Change`, `udm_pc_${id}`),
+      Markup.button.callback('Time Range', `udm_time_${id}`),
+      Markup.button.callback('UP Price', `udm_up_${id}`),
+      Markup.button.callback(`${strat.coin} Change`, `udm_pc_${id}`),
     ],
     [
-      Markup.button.callback('🔁 Rounds', `udm_rnd_${id}`),
-      Markup.button.callback('⚡ Slippage', `udm_slip_${id}`),
+      Markup.button.callback('Rounds', `udm_rnd_${id}`),
+      Markup.button.callback('Slippage', `udm_slip_${id}`),
     ],
     [
-      Markup.button.callback('🏆 TP', `udm_tp_${id}`),
-      Markup.button.callback('🛑 SL', `udm_sl_${id}`),
+      Markup.button.callback('TP', `udm_tp_${id}`),
+      Markup.button.callback('SL', `udm_sl_${id}`),
     ],
     [
-      Markup.button.callback('🔔 Notify', `udm_notify_${id}`),
-      Markup.button.callback('✏️ Rename', `udm_rename_${id}`),
-      Markup.button.callback('🗑 Delete', `udm_del_${id}`),
+      Markup.button.callback('Notify', `udm_notify_${id}`),
+      Markup.button.callback('Rename', `udm_rename_${id}`),
+      Markup.button.callback('Delete', `udm_del_${id}`),
     ],
-    [Markup.button.callback('← Back to List', 'updown_list')],
+    [Markup.button.callback('← Back', 'updown_list')],
   ];
 
   await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
