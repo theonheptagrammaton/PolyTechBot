@@ -35,6 +35,41 @@ export interface NotificationExtra {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Maps internal copy-trade error strings to user-friendly messages. */
+function friendlyCopyError(raw: string): string {
+  const lc = raw.toLowerCase();
+  if (lc.includes('insufficient balance') || lc.includes('not enough balance') || lc.includes('not enough allowance'))
+    return 'Insufficient balance to execute trade';
+  if (lc.includes('no orderbook') || lc.includes('no liquidity'))
+    return 'No liquidity available in the market';
+  if (lc.includes('trade amount too small'))
+    return 'Trade amount too small';
+  if (lc.includes('slippage'))
+    return 'Price moved too much (slippage)';
+  if (lc.includes('market closed') || lc.includes('resolved') || lc.includes('not tradeable'))
+    return 'Market is closed or resolved';
+  if (lc.includes('below min after singletrade'))
+    return 'Amount below minimum after applying trade cap';
+  if (lc.includes('market spend limit'))
+    return 'Market spend limit reached';
+  if (lc.includes('total spend limit'))
+    return 'Total spend limit reached';
+  if (lc.includes('daily limit'))
+    return 'Daily spend limit reached';
+  if (lc.includes('no position found') || lc.includes('no position to sell'))
+    return 'No position found to sell';
+  if (lc.includes('below min'))
+    return 'Copy amount is below the minimum threshold';
+  if (lc.includes('category not in'))
+    return 'Market category not in your filter list';
+  if (lc.includes('price') && lc.includes('below') || lc.includes('above'))
+    return 'Price outside of your filter range';
+  // Fallback: if it's already short and clean, return as-is; otherwise generic
+  if (raw.length <= 60 && !raw.includes('Error') && !raw.includes('error'))
+    return raw;
+  return 'Trade could not be completed';
+}
+
 /**
  * Parses a Polymarket wallet address or profile URL into a normalized lowercase address.
  * Returns `{ address }` on success, `{ error }` with a user-friendly message on failure.
@@ -590,11 +625,11 @@ async function tickForTrader(
             data: { isActive: false },
           });
 
-          const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+          const escName = (sub.label || `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           await sendNotification(
             user.telegramId,
             `⚠️ <b>Copy Stopped — Low Balance</b>\n\n` +
-            `Trader: <code>${shortAddr}</code>\n` +
+            `Trader: <a href="https://polymarket.com/profile/${traderAddress}">${escName}</a>\n` +
             `Balance $${balance.toFixed(2)} &lt; Minimum $${sub.autoStopBelowBalance.toFixed(2)}\n\n` +
             `Use /deposit to top up`
           );
@@ -666,12 +701,11 @@ async function tickForTrader(
             },
           });
           if (sub.notificationsEnabled) {
-            const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
+            const escName = (sub.label || `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             await sendNotification(
               user.telegramId,
               `⏭ <b>Trade Skipped</b>\n\n` +
-              `Trader: <code>${shortAddr}</code>\n` +
-              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
+              `Trader: <a href="https://polymarket.com/profile/${traderAddress}">${escName}</a>\n` +
               `Side: ${trade.side} ${trade.outcome}\n` +
               `Reason: Copy size below minimum`
             );
@@ -684,12 +718,12 @@ async function tickForTrader(
           const priceCents = trade.price * 100;
           if (sub.priceMin != null && priceCents < sub.priceMin) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below min filter` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &lt; min ${sub.priceMin}¢`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Price ${priceCents.toFixed(1)}¢ &lt; min ${sub.priceMin}¢`);
             continue;
           }
           if (sub.priceMax != null && priceCents > sub.priceMax) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above max filter` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &gt; max ${sub.priceMax}¢`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Price ${priceCents.toFixed(1)}¢ &gt; max ${sub.priceMax}¢`);
             continue;
           }
         }
@@ -736,7 +770,7 @@ async function tickForTrader(
           const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
           if (spentToday + copySize > sub.dailySpendMax) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `daily limit reached ($${spentToday.toFixed(2)}/$${sub.dailySpendMax})` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped — Daily Limit</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped — Daily Limit</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nLimit: $${sub.dailySpendMax} · Spent: $${spentToday.toFixed(2)}`);
             continue;
           }
         }
@@ -746,12 +780,12 @@ async function tickForTrader(
           const priceCents = trade.price * 100;
           if (sub.minTriggerPrice != null && priceCents < sub.minTriggerPrice) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c below trigger min ${sub.minTriggerPrice}c` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &lt; trigger min ${sub.minTriggerPrice}¢`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Price ${priceCents.toFixed(1)}¢ &lt; trigger min ${sub.minTriggerPrice}¢`);
             continue;
           }
           if (sub.maxTriggerPrice != null && priceCents > sub.maxTriggerPrice) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `price ${priceCents.toFixed(1)}c above trigger max ${sub.maxTriggerPrice}c` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Price ${priceCents.toFixed(1)}¢ &gt; trigger max ${sub.maxTriggerPrice}¢`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Price ${priceCents.toFixed(1)}¢ &gt; trigger max ${sub.maxTriggerPrice}¢`);
             continue;
           }
         }
@@ -764,14 +798,14 @@ async function tickForTrader(
           // ── Filter: min liquidity ─────────────────────────────────────────────
           if (sub.minLiquidity != null && mktMeta?.liquidity != null && mktMeta.liquidity < sub.minLiquidity) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `liquidity $${mktMeta.liquidity.toFixed(0)} below min $${sub.minLiquidity}` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Liquidity $${mktMeta.liquidity.toFixed(0)} &lt; min $${sub.minLiquidity}`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Liquidity $${mktMeta.liquidity.toFixed(0)} &lt; min $${sub.minLiquidity}`);
             continue;
           }
 
           // ── Filter: min volume ────────────────────────────────────────────────
           if (sub.minVolume != null && mktMeta?.volume != null && mktMeta.volume < sub.minVolume) {
             await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `volume $${mktMeta.volume.toFixed(0)} below min $${sub.minVolume}` } });
-            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Volume $${mktMeta.volume.toFixed(0)} &lt; min $${sub.minVolume}`);
+            if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Volume $${mktMeta.volume.toFixed(0)} &lt; min $${sub.minVolume}`);
             continue;
           }
 
@@ -782,7 +816,7 @@ async function tickForTrader(
             const daysOut = Math.ceil((endMs - nowMs) / (24 * 3600 * 1000));
             if (daysOut > sub.maxDaysOut) {
               await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `market expires in ${daysOut} days (max ${sub.maxDaysOut})` } });
-              if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Market expires in ${daysOut} days &gt; max ${sub.maxDaysOut}`);
+              if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Market expires in ${daysOut} days &gt; max ${sub.maxDaysOut}`);
               continue;
             }
           }
@@ -794,7 +828,7 @@ async function tickForTrader(
             const hasMatch = marketTags.some(tag => allowedCats.has(tag));
             if (!hasMatch) {
               await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `market category not in allowed list` } });
-              if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <code>${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}</code>\nReason: Category not in filter list`);
+              if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Category not in filter list`);
               continue;
             }
           }
@@ -861,8 +895,9 @@ async function tickForTrader(
           const alreadyNotified = notifiedThisTick.has(tradeKey);
 
           const shortAddr = `${traderAddress.slice(0, 6)}...${traderAddress.slice(-4)}`;
-          const traderName = sub.label || shortAddr;
+          const traderDisplayName = sub.label || shortAddr;
           const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const traderLink = `<a href="https://polymarket.com/profile/${traderAddress}">${escHtml(traderDisplayName)}</a>`;
 
           if (result.status === 'filled' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
@@ -895,13 +930,15 @@ async function tickForTrader(
               }
             }
 
+            const leaderAmount = trade.sizeUsd;
+
             const msg =
-              `⚡ <b>${escHtml(traderName)}</b> just <b>${sideLabel} ${effectiveOutcome}</b> for <b>${displayAmount.toFixed(2)} USDC</b>\n\n` +
+              `⚡ ${traderLink} just <b>${sideLabel} ${effectiveOutcome}</b> for <b>$${leaderAmount.toFixed(2)} USDC</b>\n\n` +
               `📊 Market: <b>${escHtml(question)}</b>\n` +
               `🎯 Outcome: <b>${effectiveOutcome}</b>\n` +
               `💰 Price: <b>$${displayPrice.toFixed(3)}</b>\n` +
               `📈 Shares: <b>${shares.toFixed(2)}</b>\n` +
-              `💵 USDC Amount: <b>${displayAmount.toFixed(2)} USDC</b>\n` +
+              `💵 Your Copy: <b>$${displayAmount.toFixed(2)} USDC</b>\n` +
               txLine +
               `\n<a href="${marketUrl}">View Market</a>`;
 
@@ -926,7 +963,7 @@ async function tickForTrader(
             await sendNotification(
               user.telegramId,
               `🏆 <b>Position Redeemed</b>\n\n` +
-              `Trader: <code>${shortAddr}</code> sold but the market is already resolved.\n\n` +
+              `Trader: ${traderLink} sold but the market is already resolved.\n\n` +
               `📊 Market: <b>${escHtml(question)}</b>\n` +
               `🎯 Outcome: <b>${effectiveOutcome}</b>\n` +
               `💵 USDC has been returned to your wallet.${txLine}`
@@ -938,23 +975,24 @@ async function tickForTrader(
             const alreadyFailNotified = await redisCache.get<number>(failNotifKey);
             if (!alreadyFailNotified) {
               await redisCache.set(failNotifKey, 1, 3600);
+              const friendlyError = friendlyCopyError(result.errorMsg ?? 'unknown error');
               await sendNotification(
                 user.telegramId,
                 `❌ <b>Copy Failed</b>\n\n` +
-                `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
-                `Error: ${escHtml((result.errorMsg ?? 'unknown error').slice(0, 120))}\n` +
+                `Trader: ${traderLink}\n` +
+                `Reason: ${escHtml(friendlyError)}\n` +
                 `Copy size: $${copySize.toFixed(2)}`
               );
             }
           } else if (result.status === 'skipped' && !alreadyNotified) {
             notifiedThisTick.add(tradeKey);
+            const friendlySkip = friendlyCopyError(result.errorMsg ?? 'no position found');
             await sendNotification(
               user.telegramId,
               `⏭ <b>Trade Skipped</b>\n\n` +
-              `Trader: <code>${shortAddr}</code>\n` +
-              `Market: <code>${trade.marketId.slice(0, 20)}...</code>\n` +
+              `Trader: ${traderLink}\n` +
               `Side: ${effectiveSide} ${effectiveOutcome}\n` +
-              `Reason: ${escHtml(result.errorMsg ?? 'no position found')}`
+              `Reason: ${escHtml(friendlySkip)}`
             );
           }
         }
@@ -973,6 +1011,7 @@ async function tickForTrader(
         {
           subscriptionId: sub.id,
           traderAddress: sub.traderAddress,
+          label: sub.label,
           takeProfitPct: sub.takeProfitPct,
           stopLossPct: sub.stopLossPct,
           takeProfitFixed: sub.takeProfitFixed ?? null,
@@ -991,7 +1030,7 @@ async function tickForTrader(
   for (const sub of subs) {
     await checkRedeemableCopiedPositions(
       sub.user,
-      { subscriptionId: sub.id, traderAddress: sub.traderAddress },
+      { subscriptionId: sub.id, traderAddress: sub.traderAddress, label: sub.label },
       sendNotification,
     ).catch((err) =>
       logger.error(`[copy] Auto-redeem check error for ${sub.userId}: ${err?.message}`)
@@ -1020,7 +1059,7 @@ async function checkRedeemableCopiedPositions(
     slippageTolerance: number;
     predexonUserId?: string | null;
   },
-  sub: { subscriptionId: string; traderAddress: string },
+  sub: { subscriptionId: string; traderAddress: string; label?: string | null },
   sendNotification: (telegramId: string, msg: string, extra?: NotificationExtra) => Promise<void>,
 ): Promise<void> {
   if (!user.polymarketProxyAddress) return;
@@ -1092,15 +1131,16 @@ async function checkRedeemableCopiedPositions(
       data: { tpSlStatus: 'redeemed' },
     });
 
-    const shortAddr = `${sub.traderAddress.slice(0, 6)}...${sub.traderAddress.slice(-4)}`;
     const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const traderDisplayName = sub.label || `${sub.traderAddress.slice(0, 6)}...${sub.traderAddress.slice(-4)}`;
+    const traderLink = `<a href="https://polymarket.com/profile/${sub.traderAddress}">${escHtml(traderDisplayName)}</a>`;
     const txLine = result.txHash
       ? `\n🔗 <a href="https://polygonscan.com/tx/${result.txHash}">Transaction Hash</a>`
       : '';
     await sendNotification(
       user.telegramId,
       `🏆 <b>Position Auto-Redeemed</b>\n\n` +
-      `Trader: <code>${shortAddr}</code>\n` +
+      `Trader: ${traderLink}\n` +
       `📊 Market: <b>${escHtml(active.title)}</b>\n` +
       `🎯 Outcome: <b>${pos.outcome}</b>\n` +
       `💵 USDC has been returned to your wallet.${txLine}`
@@ -1129,6 +1169,7 @@ async function checkTpSlPositions(
   sub: {
     subscriptionId: string;
     traderAddress: string;
+    label?: string | null;
     takeProfitPct: number | null;
     stopLossPct: number | null;
     takeProfitFixed: number | null;
@@ -1242,6 +1283,7 @@ async function checkTpSlPositions(
 
     // Send notification
     const shortAddr = `${sub.traderAddress.slice(0, 6)}...${sub.traderAddress.slice(-4)}`;
+    const traderDisplayName = sub.label || shortAddr;
     const entryFormatted = (pos.price * 100).toFixed(0) + '¢';
     const exitFormatted  = (currentPrice * 100).toFixed(0) + '¢';
     const changePct = ((currentPrice - pos.price) / pos.price * 100).toFixed(1);
@@ -1250,16 +1292,17 @@ async function checkTpSlPositions(
     const label = triggerType === 'tp_triggered' ? 'Take Profit Triggered' : 'Stop Loss Triggered';
 
     const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const traderLink = `<a href="https://polymarket.com/profile/${sub.traderAddress}">${escHtml(traderDisplayName)}</a>`;
     const statusLine = result.status === 'filled'
       ? `✅ Sell order placed`
       : result.status === 'skipped'
-        ? `⏭ Skipped: ${escHtml(result.errorMsg ?? '')}`
-        : `❌ Error: ${escHtml(result.errorMsg ?? 'unknown')}`;
+        ? `⏭ Skipped: ${escHtml(friendlyCopyError(result.errorMsg ?? ''))}`
+        : `❌ ${escHtml(friendlyCopyError(result.errorMsg ?? 'unknown'))}`;
 
     await sendNotification(
       user.telegramId,
       `${icon} <b>${label}</b>\n\n` +
-      `Trader: <code>${shortAddr}</code>\n` +
+      `Trader: ${traderLink}\n` +
       `Entry: ${entryFormatted}  →  Exit: ${exitFormatted}\n` +
       `Change: ${changeSign}${changePct}%\n` +
       statusLine

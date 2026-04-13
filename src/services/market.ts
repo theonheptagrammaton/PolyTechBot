@@ -64,7 +64,7 @@ export interface Category {
 // ─── Up/Down Markets ──────────────────────────────────────────────────────────
 
 /** Coin metadata used to recognise and label up/down markets. */
-const UPDOWN_COIN_MAP: Record<string, { symbol: string; name: string; emoji: string }> = {
+export const UPDOWN_COIN_MAP: Record<string, { symbol: string; name: string; emoji: string }> = {
   'bitcoin':   { symbol: 'BTC',  name: 'Bitcoin',   emoji: '₿'  },
   'ethereum':  { symbol: 'ETH',  name: 'Ethereum',  emoji: 'Ξ'  },
   'solana':    { symbol: 'SOL',  name: 'Solana',    emoji: '◎'  },

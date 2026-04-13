@@ -146,6 +146,99 @@ import {
   handleCashbackPage,
   handleCashbackClaim,
 } from './handlers/cashback';
+import { handleAutoStrategies } from './handlers/autoStrategies';
+import {
+  handleUpDownCommand,
+  handleUpDownList,
+  handleStartAdd as handleUpDownStartAdd,
+  handleStartAll as handleUpDownStartAll,
+  handleStopAll as handleUpDownStopAll,
+  handleDeleteAllConfirm as handleUpDownDeleteAllConfirm,
+  handleDeleteAllExecute as handleUpDownDeleteAllExecute,
+  handleRemovePrompt as handleUpDownRemovePrompt,
+  handleRemoveExecute as handleUpDownRemoveExecute,
+  handleHistory as handleUpDownHistory,
+  handleClose as handleUpDownClose,
+  handleConfirmAdd as handleUpDownConfirmAdd,
+  handleAddCoin as handleUpDownAddCoin,
+  handleAddTimeframe as handleUpDownAddTimeframe,
+  handleAddDirection as handleUpDownAddDirection,
+  handleAddAmountPreset as handleUpDownAddAmountPreset,
+  handleAddTimeRangePreset as handleUpDownAddTimeRangePreset,
+  handleAddUpPricePreset as handleUpDownAddUpPricePreset,
+  handleAddPriceChangePreset as handleUpDownAddPriceChangePreset,
+  handleAddAdvanced as handleUpDownAddAdvanced,
+  handleAdvOrderType as handleUpDownAdvOrderType,
+  handleAdvMaxRounds as handleUpDownAdvMaxRounds,
+  handleAdvSlippage as handleUpDownAdvSlippage,
+  handleAdvTpType as handleUpDownAdvTpType,
+  handleAdvSlType as handleUpDownAdvSlType,
+  handleAdvSkip as handleUpDownAdvSkip,
+  handleAdvTtlPreset as handleUpDownAdvTtlPreset,
+  handleAddInput as handleUpDownAddInput,
+  handleEditInput as handleUpDownEditInput,
+  handleManage as handleUpDownManage,
+  handleManageStart as handleUpDownManageStart,
+  handleManagePause as handleUpDownManagePause,
+  handleManageToggleDirection as handleUpDownManageDirection,
+  handleManageToggleNotify as handleUpDownManageNotify,
+  handleManageOrderType as handleUpDownManageOT,
+  handleManageEditPrompt as handleUpDownManageEditPrompt,
+  handleManageDelete as handleUpDownManageDelete,
+  handleManageDeleteExecute as handleUpDownManageDeleteExec,
+  handleManageRename as handleUpDownManageRename,
+  handleManageTpPrompt as handleUpDownManageTpPrompt,
+  handleManageSlPrompt as handleUpDownManageSlPrompt,
+  handleManageTpTypePct as handleUpDownManageTpTypePct,
+  handleManageTpTypeFix as handleUpDownManageTpTypeFix,
+  handleManageSlTypePct as handleUpDownManageSlTypePct,
+  handleManageSlTypeFix as handleUpDownManageSlTypeFix,
+  handleManageTpClear as handleUpDownManageTpClear,
+  handleManageSlClear as handleUpDownManageSlClear,
+  handleTemplateList as handleUpDownTemplateList,
+  handleTemplateUse as handleUpDownTemplateUse,
+  updownAddState,
+  updownEditState,
+} from './handlers/updown';
+import {
+  handleBondCommand,
+  handleBondList,
+  handleBondStartAdd,
+  handleBondStartAll,
+  handleBondStopAll,
+  handleBondDeleteAllConfirm,
+  handleBondDeleteAllExecute,
+  handleBondRemovePrompt,
+  handleBondRemoveExecute,
+  handleBondHistory,
+  handleBondClose,
+  handleBondConfirmAdd,
+  handleBondManage,
+  handleBondAddInput,
+  handleBondEditInput,
+  handleAddProbPreset,
+  handleAddProbCustom,
+  handleAddHoursPreset,
+  handleAddHoursCustom,
+  handleAddConcPreset,
+  handleAddConcCustom,
+  handleAddMarketType,
+  handleAddAdvanced,
+  handleAddAdvSkip,
+  handleAddSidePreset,
+  handleManageStart as handleBondManageStart,
+  handleManagePause as handleBondManagePause,
+  handleManageToggleSports,
+  handleManageToggleCrypto,
+  handleManageToggleNotify,
+  handleManageCycleSide,
+  handleManageEditPrompt as handleBondManageEditPrompt,
+  handleManageDelete as handleBondManageDelete,
+  handleManageDeleteExecute as handleBondManageDeleteExec,
+  handleManageRename as handleBondManageRename,
+  bondAddState,
+  bondEditState,
+} from './handlers/bond';
 import {
   handleCopyCommand,
   handleCopyList,
@@ -208,6 +301,8 @@ import {
   handleCopyDeleteAllExecute,
 } from './handlers/copyTrade';
 import { startCopyTradeMonitor, NotificationExtra } from '../services/copyTrade';
+import { startBondMonitor, stopBondMonitor } from '../services/bond';
+import { startUpDownMonitor, stopUpDownMonitor } from '../services/updown';
 import { prepareImageBuffer } from '../utils/telegram';
 import { enqueueNotification, startNotificationWorker, closeNotificationWorker } from '../utils/notificationQueue';
 
@@ -381,6 +476,12 @@ export class TelegramBot {
       const arg = text.replace(/^\/copy\s*/, '').trim() || undefined;
       await handleCopyCommand(ctx, arg);
     });
+
+    // Bond trading command
+    this.bot.command('bond', handleBondCommand);
+
+    // Up-Down auto trade command
+    this.bot.command('afk', handleUpDownCommand);
 
     // Group membership check callback (used during new user onboarding)
     this.bot.action('check_membership', handleCheckMembership);
@@ -876,6 +977,291 @@ export class TelegramBot {
       await handleCopyShare(ctx, ctx.match[1].toLowerCase());
     });
 
+    // ── Auto Strategies / Bond Trading ─────────────────────────────────────
+    this.bot.action('auto_strategies', handleAutoStrategies);
+    this.bot.action('bond_list', handleBondList);
+    this.bot.action('bond_start_add', handleBondStartAdd);
+    this.bot.action('bond_start_all', handleBondStartAll);
+    this.bot.action('bond_stop_all', handleBondStopAll);
+    this.bot.action('bond_del_all_cfm', handleBondDeleteAllConfirm);
+    this.bot.action('bond_del_all_do', handleBondDeleteAllExecute);
+    this.bot.action('bond_remove_prompt', handleBondRemovePrompt);
+    this.bot.action('bond_close', handleBondClose);
+    this.bot.action('bond_add_confirm', handleBondConfirmAdd);
+    this.bot.action('bond_add_advanced', handleAddAdvanced);
+    this.bot.action('bond_add_adv_skip', handleAddAdvSkip);
+
+    // Bond remove single
+    this.bot.action(/^bond_rm_(.+)$/, async (ctx) => {
+      await handleBondRemoveExecute(ctx, ctx.match[1]);
+    });
+
+    // Bond history
+    this.bot.action(/^bond_history_(\d+)$/, async (ctx) => {
+      await handleBondHistory(ctx, parseInt(ctx.match[1], 10));
+    });
+
+    // Bond task manage
+    this.bot.action(/^bond_task_(.+)$/, async (ctx) => {
+      await handleBondManage(ctx, ctx.match[1]);
+    });
+
+    // Bond add flow: probability presets
+    this.bot.action('bond_add_prob_90', async (ctx) => handleAddProbPreset(ctx, 90));
+    this.bot.action('bond_add_prob_93', async (ctx) => handleAddProbPreset(ctx, 93));
+    this.bot.action('bond_add_prob_95', async (ctx) => handleAddProbPreset(ctx, 95));
+    this.bot.action('bond_add_prob_97', async (ctx) => handleAddProbPreset(ctx, 97));
+    this.bot.action('bond_add_prob_custom', handleAddProbCustom);
+
+    // Bond add flow: hours presets
+    this.bot.action('bond_add_hours_12', async (ctx) => handleAddHoursPreset(ctx, 12));
+    this.bot.action('bond_add_hours_24', async (ctx) => handleAddHoursPreset(ctx, 24));
+    this.bot.action('bond_add_hours_48', async (ctx) => handleAddHoursPreset(ctx, 48));
+    this.bot.action('bond_add_hours_72', async (ctx) => handleAddHoursPreset(ctx, 72));
+    this.bot.action('bond_add_hours_custom', handleAddHoursCustom);
+
+    // Bond add flow: concurrent presets
+    this.bot.action('bond_add_conc_2', async (ctx) => handleAddConcPreset(ctx, 2));
+    this.bot.action('bond_add_conc_5', async (ctx) => handleAddConcPreset(ctx, 5));
+    this.bot.action('bond_add_conc_10', async (ctx) => handleAddConcPreset(ctx, 10));
+    this.bot.action('bond_add_conc_custom', handleAddConcCustom);
+
+    // Bond add flow: market type
+    this.bot.action('bond_add_mkt_none', async (ctx) => handleAddMarketType(ctx, 'none'));
+    this.bot.action('bond_add_mkt_sports', async (ctx) => handleAddMarketType(ctx, 'sports'));
+    this.bot.action('bond_add_mkt_crypto', async (ctx) => handleAddMarketType(ctx, 'crypto'));
+    this.bot.action('bond_add_mkt_both', async (ctx) => handleAddMarketType(ctx, 'both'));
+
+    // Bond add flow: outcome side
+    this.bot.action('bond_add_side_auto', async (ctx) => handleAddSidePreset(ctx, 'auto'));
+    this.bot.action('bond_add_side_yes', async (ctx) => handleAddSidePreset(ctx, 'yes'));
+    this.bot.action('bond_add_side_no', async (ctx) => handleAddSidePreset(ctx, 'no'));
+
+    // Bond manage page actions
+    this.bot.action(/^bpm_start_(.+)$/, async (ctx) => handleBondManageStart(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_pause_(.+)$/, async (ctx) => handleBondManagePause(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_sports_(.+)$/, async (ctx) => handleManageToggleSports(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_crypto_(.+)$/, async (ctx) => handleManageToggleCrypto(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_notify_(.+)$/, async (ctx) => handleManageToggleNotify(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_side_(.+)$/, async (ctx) => handleManageCycleSide(ctx, ctx.match[1]));
+
+    // Bond manage: edit field prompts
+    this.bot.action(/^bpm_budget_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_budget',
+        `💰 <b>Edit Daily Budget</b>\n\nEnter new daily budget in USD:`);
+    });
+    this.bot.action(/^bpm_amount_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_amount',
+        `💵 <b>Edit Amount Per Trade</b>\n\nEnter new amount in USD:`);
+    });
+    this.bot.action(/^bpm_prob_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_prob',
+        `🎯 <b>Edit Min Probability</b>\n\nEnter new min probability (50–99):`);
+    });
+    this.bot.action(/^bpm_window_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_window',
+        `⏰ <b>Edit Time Window</b>\n\nEnter hours (1–168):`);
+    });
+    this.bot.action(/^bpm_maxpos_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_pos',
+        `📊 <b>Edit Max Positions</b>\n\nEnter number (1–50):`);
+    });
+    this.bot.action(/^bpm_slip_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_slippage',
+        `⚡ <b>Edit Slippage</b>\n\nEnter slippage % (0.1–50):`);
+    });
+    this.bot.action(/^bpm_interval_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_interval',
+        `📡 <b>Edit Scan Interval</b>\n\nEnter minutes (1–10):`);
+    });
+    this.bot.action(/^bpm_liq_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_liq',
+        `💧 <b>Edit Min Liquidity</b>\n\nEnter minimum liquidity in USD:`);
+    });
+    this.bot.action(/^bpm_vol_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_vol',
+        `📊 <b>Edit Min Volume</b>\n\nEnter minimum volume in USD:`);
+    });
+    this.bot.action(/^bpm_mktmax_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_mkt_max',
+        `💸 <b>Max Spend Per Market</b>\n\nEnter max USD per market:`);
+    });
+    this.bot.action(/^bpm_totmax_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_total_max',
+        `💸 <b>Max Total Spend</b>\n\nEnter lifetime max spend in USD:`);
+    });
+    this.bot.action(/^bpm_loss_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_loss_limit',
+        `📅 <b>Max Daily Loss</b>\n\nEnter max daily loss in USD:`);
+    });
+
+    // Bond manage: rename / delete
+    this.bot.action(/^bpm_rename_(.+)$/, async (ctx) => handleBondManageRename(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_del_(.+)$/, async (ctx) => handleBondManageDelete(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_deldo_(.+)$/, async (ctx) => handleBondManageDeleteExec(ctx, ctx.match[1]));
+
+    // ── Up-Down Auto Trade ──────────────────────────────────────────────────
+    this.bot.action('updown_list', handleUpDownList);
+    this.bot.action('ud_start_add', handleUpDownStartAdd);
+    this.bot.action('ud_start_all', handleUpDownStartAll);
+    this.bot.action('ud_stop_all', handleUpDownStopAll);
+    this.bot.action('ud_del_all_cfm', handleUpDownDeleteAllConfirm);
+    this.bot.action('ud_del_all_do', handleUpDownDeleteAllExecute);
+    this.bot.action('ud_remove_prompt', handleUpDownRemovePrompt);
+    this.bot.action('ud_close', handleUpDownClose);
+    this.bot.action('ud_add_confirm', handleUpDownConfirmAdd);
+    this.bot.action('ud_add_advanced', handleUpDownAddAdvanced);
+    this.bot.action('ud_adv_skip', handleUpDownAdvSkip);
+
+    // Up-Down: remove single
+    this.bot.action(/^ud_rm_(.+)$/, async (ctx) => {
+      await handleUpDownRemoveExecute(ctx, ctx.match[1]);
+    });
+
+    // Up-Down: history
+    this.bot.action(/^ud_history_(\d+)$/, async (ctx) => {
+      await handleUpDownHistory(ctx, parseInt(ctx.match[1], 10));
+    });
+
+    // Up-Down: task manage
+    this.bot.action(/^ud_task_(.+)$/, async (ctx) => {
+      await handleUpDownManage(ctx, ctx.match[1]);
+    });
+
+    // Up-Down: add flow — coin
+    this.bot.action(/^ud_add_coin_(.+)$/, async (ctx) => {
+      await handleUpDownAddCoin(ctx, ctx.match[1]);
+    });
+
+    // Up-Down: add flow — timeframe
+    this.bot.action(/^ud_add_tf_(.+)$/, async (ctx) => {
+      await handleUpDownAddTimeframe(ctx, ctx.match[1]);
+    });
+
+    // Up-Down: add flow — direction
+    this.bot.action('ud_add_dir_up', async (ctx) => handleUpDownAddDirection(ctx, 'up'));
+    this.bot.action('ud_add_dir_dn', async (ctx) => handleUpDownAddDirection(ctx, 'down'));
+
+    // Up-Down: add flow — amount presets
+    this.bot.action('ud_add_amt_10', async (ctx) => handleUpDownAddAmountPreset(ctx, 10));
+    this.bot.action('ud_add_amt_25', async (ctx) => handleUpDownAddAmountPreset(ctx, 25));
+    this.bot.action('ud_add_amt_50', async (ctx) => handleUpDownAddAmountPreset(ctx, 50));
+    this.bot.action('ud_add_amt_100', async (ctx) => handleUpDownAddAmountPreset(ctx, 100));
+
+    // Up-Down: add flow — time range presets
+    this.bot.action('ud_add_tr_full', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'full'));
+    this.bot.action('ud_add_tr_late', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'late'));
+    this.bot.action('ud_add_tr_early', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'early'));
+    this.bot.action('ud_add_tr_mid', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'mid'));
+
+    // Up-Down: add flow — UP price presets
+    this.bot.action('ud_add_up_any', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'any'));
+    this.bot.action('ud_add_up_hi', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'hi'));
+    this.bot.action('ud_add_up_lo', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'lo'));
+    this.bot.action('ud_add_up_mid', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'mid'));
+
+    // Up-Down: add flow — price change presets
+    this.bot.action('ud_add_pc_any', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'any'));
+    this.bot.action('ud_add_pc_pump', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'pump'));
+    this.bot.action('ud_add_pc_dump', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'dump'));
+
+    // Up-Down: advanced — order type
+    this.bot.action('ud_adv_ot_market', async (ctx) => handleUpDownAdvOrderType(ctx, 'market'));
+    this.bot.action('ud_adv_ot_limit', async (ctx) => handleUpDownAdvOrderType(ctx, 'limit'));
+
+    // Up-Down: advanced — max rounds presets
+    this.bot.action('ud_adv_mr_5', async (ctx) => handleUpDownAdvMaxRounds(ctx, 5));
+    this.bot.action('ud_adv_mr_10', async (ctx) => handleUpDownAdvMaxRounds(ctx, 10));
+    this.bot.action('ud_adv_mr_25', async (ctx) => handleUpDownAdvMaxRounds(ctx, 25));
+    this.bot.action('ud_adv_mr_50', async (ctx) => handleUpDownAdvMaxRounds(ctx, 50));
+
+    // Up-Down: advanced — slippage presets
+    this.bot.action('ud_adv_sl_2', async (ctx) => handleUpDownAdvSlippage(ctx, 2));
+    this.bot.action('ud_adv_sl_5', async (ctx) => handleUpDownAdvSlippage(ctx, 5));
+    this.bot.action('ud_adv_sl_10', async (ctx) => handleUpDownAdvSlippage(ctx, 10));
+
+    // Up-Down: advanced — TP/SL type
+    this.bot.action('ud_adv_tp_pct', async (ctx) => handleUpDownAdvTpType(ctx, 'pct'));
+    this.bot.action('ud_adv_tp_price', async (ctx) => handleUpDownAdvTpType(ctx, 'price'));
+    this.bot.action('ud_adv_sl_pct', async (ctx) => handleUpDownAdvSlType(ctx, 'pct'));
+    this.bot.action('ud_adv_sl_price', async (ctx) => handleUpDownAdvSlType(ctx, 'price'));
+
+    // Up-Down: advanced — TTL presets
+    this.bot.action('ud_adv_ttl_30', async (ctx) => handleUpDownAdvTtlPreset(ctx, 30));
+    this.bot.action('ud_adv_ttl_60', async (ctx) => handleUpDownAdvTtlPreset(ctx, 60));
+    this.bot.action('ud_adv_ttl_120', async (ctx) => handleUpDownAdvTtlPreset(ctx, 120));
+
+    // Up-Down: manage page actions
+    this.bot.action(/^udm_start_(.+)$/, async (ctx) => handleUpDownManageStart(ctx, ctx.match[1]));
+    this.bot.action(/^udm_pause_(.+)$/, async (ctx) => handleUpDownManagePause(ctx, ctx.match[1]));
+    this.bot.action(/^udm_dir_(.+)$/, async (ctx) => handleUpDownManageDirection(ctx, ctx.match[1]));
+    this.bot.action(/^udm_notify_(.+)$/, async (ctx) => handleUpDownManageNotify(ctx, ctx.match[1]));
+    this.bot.action(/^udm_ot_(.+)$/, async (ctx) => handleUpDownManageOT(ctx, ctx.match[1]));
+
+    // Up-Down: manage page — edit field prompts
+    this.bot.action(/^udm_amt_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_amount',
+        `💰 <b>Edit Amount</b>\n\nEnter new amount in USD:`);
+    });
+    this.bot.action(/^udm_slip_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_slippage',
+        `⚡ <b>Edit Slippage</b>\n\nEnter slippage % (0.1–50):`);
+    });
+    this.bot.action(/^udm_time_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_time_range',
+        `⏱ <b>Edit Time Range</b>\n\nEnter as mm:ss, mm:ss (e.g. 00:00, 14:55):`);
+    });
+    this.bot.action(/^udm_up_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_up_price',
+        `📈 <b>Edit UP Price Range</b>\n\nEnter as min, max (e.g. 0.70, 0.90):`);
+    });
+    this.bot.action(/^udm_pc_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_price_change',
+        `🪙 <b>Edit Spot Price Change</b>\n\nEnter as min, max in USD (e.g. -100, 9999):`);
+    });
+    this.bot.action(/^udm_rnd_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_rounds',
+        `🔁 <b>Edit Max Rounds</b>\n\nEnter number (1–100):`);
+    });
+
+    // Up-Down: manage page — rename / delete
+    this.bot.action(/^udm_rename_(.+)$/, async (ctx) => handleUpDownManageRename(ctx, ctx.match[1]));
+    this.bot.action(/^udm_del_(.+)$/, async (ctx) => handleUpDownManageDelete(ctx, ctx.match[1]));
+    this.bot.action(/^udm_deldo_(.+)$/, async (ctx) => handleUpDownManageDeleteExec(ctx, ctx.match[1]));
+
+    // Up-Down: manage page — TP/SL
+    this.bot.action(/^udm_tp_(.+)$/, async (ctx) => {
+      // Distinguish type selection vs prompt
+      const id = ctx.match[1];
+      if (id.startsWith('pct_')) {
+        await handleUpDownManageTpTypePct(ctx, id.slice(4));
+      } else if (id.startsWith('fix_')) {
+        await handleUpDownManageTpTypeFix(ctx, id.slice(4));
+      } else if (id.startsWith('clr_')) {
+        await handleUpDownManageTpClear(ctx, id.slice(4));
+      } else {
+        await handleUpDownManageTpPrompt(ctx, id);
+      }
+    });
+    this.bot.action(/^udm_sl_(.+)$/, async (ctx) => {
+      const id = ctx.match[1];
+      if (id.startsWith('pct_')) {
+        await handleUpDownManageSlTypePct(ctx, id.slice(4));
+      } else if (id.startsWith('fix_')) {
+        await handleUpDownManageSlTypeFix(ctx, id.slice(4));
+      } else if (id.startsWith('clr_')) {
+        await handleUpDownManageSlClear(ctx, id.slice(4));
+      } else {
+        await handleUpDownManageSlPrompt(ctx, id);
+      }
+    });
+
+    // Up-Down: templates
+    this.bot.action('udt_list', handleUpDownTemplateList);
+    this.bot.action(/^udt_use_(.+)$/, async (ctx) => {
+      await handleUpDownTemplateUse(ctx, ctx.match[1]);
+    });
+
     // Withdraw handlers
     this.bot.action('withdraw_menu', handleWithdrawMenu);
     this.bot.action(/^wd_chain_(.+)$/, async (ctx) => {
@@ -927,6 +1313,34 @@ export class TelegramBot {
         settingsAmountState.delete(telegramId);
         await handlePositionTradeInput(ctx, text);
         return;
+      }
+
+      // Check if user is in a bond add flow
+      const bondAdd = await bondAddState.get(telegramId);
+      if (bondAdd) {
+        const consumed = await handleBondAddInput(ctx, text);
+        if (consumed) return;
+      }
+
+      // Check if user is in a bond edit flow
+      const bondEdit = await bondEditState.get(telegramId);
+      if (bondEdit) {
+        const consumed = await handleBondEditInput(ctx, text);
+        if (consumed) return;
+      }
+
+      // Check if user is in an updown add flow
+      const udAdd = await updownAddState.get(telegramId);
+      if (udAdd) {
+        const consumed = await handleUpDownAddInput(ctx, text);
+        if (consumed) return;
+      }
+
+      // Check if user is in an updown edit flow
+      const udEdit = await updownEditState.get(telegramId);
+      if (udEdit) {
+        const consumed = await handleUpDownEditInput(ctx, text);
+        if (consumed) return;
       }
 
       // Check if user is in a copy-add flow (entering address or amount)
@@ -1026,6 +1440,10 @@ export class TelegramBot {
         withdrawState.has(telegramId) ||
         copyAddState.has(telegramId) ||
         copyEditState.has(telegramId) ||
+        bondAddState.has(telegramId) ||
+        bondEditState.has(telegramId) ||
+        updownAddState.has(telegramId) ||
+        updownEditState.has(telegramId) ||
         await settingsAmountState.hasAsync(telegramId) ||
         await settingsSlippageState.hasAsync(telegramId) ||
         await userState.hasAsync(telegramId) ||
@@ -1160,6 +1578,24 @@ export class TelegramBot {
         logger.info('[bot] Copy trade monitor delegated to external worker container');
       }
 
+      // Start bond trading monitor
+      startBondMonitor((n) => {
+        enqueueNotification(
+          n.chatId,
+          n.text,
+          n.buttons ? { buttons: n.buttons } : undefined,
+        );
+      });
+
+      // Start up-down auto trade monitor
+      startUpDownMonitor((n) => {
+        enqueueNotification(
+          n.chatId,
+          n.text,
+          n.buttons ? { buttons: n.buttons } : undefined,
+        );
+      });
+
       logger.info('Telegram bot started successfully');
     } catch (error) {
       logger.error('Failed to start bot:', error);
@@ -1175,6 +1611,8 @@ export class TelegramBot {
         const { stopCopyTradeMonitor } = await import('../services/copyTrade');
         stopCopyTradeMonitor();
       }
+      stopBondMonitor();
+      stopUpDownMonitor();
       await closeNotificationWorker();
       this.bot.stop('SIGINT');
       logger.info('Telegram bot stopped');

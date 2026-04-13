@@ -69,6 +69,14 @@ model User {
   copySubscriptions CopySubscription[]
   copiedTrades      CopiedTrade[]
 
+  // Bond trading (auto strategies)
+  bondStrategies   BondStrategy[]
+  bondTrades       BondTrade[]
+
+  // Up-Down auto strategies
+  updownStrategies UpDownStrategy[]
+  updownTrades     UpDownTrade[]
+
   isAdmin          Boolean  @default(false)
   isActive         Boolean  @default(true)
 
@@ -184,4 +192,151 @@ model CopiedTrade {
   @@index([traderAddress])
   @@index([subscriptionId])
   @@map("copied_trades")
+}
+
+model BondStrategy {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label               String?
+
+  // Trade sizing
+  fixedAmount         Float    @default(25.0)
+  dailyBudget         Float    @default(100.0)
+  maxDailyLoss        Float?
+
+  // Market filters
+  minProbability      Float    @default(95.0)
+  maxProbability      Float    @default(99.0)
+  maxHoursOut         Int      @default(48)
+  maxConcurrent       Int      @default(5)
+  includeSports       Boolean  @default(false)
+  includeCryptoUpDown Boolean  @default(false)
+  slippage            Float    @default(5.0)
+  minLiquidity        Float?
+  minVolume           Float?
+  categories          String?
+  maxSpendPerMarket   Float?
+  maxSpendTotal       Float?
+
+  // Scan settings
+  scanInterval        Int      @default(5)
+  outcomeSide         String   @default("auto")
+
+  // Status
+  isActive            Boolean  @default(true)
+  isPaused            Boolean  @default(true)
+  notificationsEnabled Boolean @default(true)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  trades              BondTrade[]
+
+  @@index([userId])
+  @@index([isActive, isPaused])
+  @@map("bond_strategies")
+}
+
+model BondTrade {
+  id            String        @id @default(cuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  strategyId    String?
+  strategy      BondStrategy? @relation(fields: [strategyId], references: [id], onDelete: SetNull)
+
+  conditionId   String
+  tokenId       String
+  question      String
+  outcome       String
+  probability   Float
+  amount        Float
+  price         Float
+  orderId       String?
+  status        String        @default("pending")
+  errorMsg      String?
+
+  createdAt     DateTime      @default(now())
+
+  @@index([userId, createdAt])
+  @@index([strategyId])
+  @@map("bond_trades")
+}
+
+model UpDownStrategy {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label               String?
+
+  // Target
+  coin                String   @default("BTC")
+  timeframe           String   @default("15-Minute")
+
+  // Triggers
+  timeRangeStart      String   @default("00:00")
+  timeRangeEnd        String   @default("14:55")
+  upPriceMin          Float    @default(0.01)
+  upPriceMax          Float    @default(0.99)
+  priceChangeMin      Float    @default(-9999)
+  priceChangeMax      Float    @default(9999)
+
+  // Trade settings
+  direction           String   @default("up")
+  orderType           String   @default("market")
+  limitPrice          Float?
+  limitTtlSeconds     Int      @default(60)
+  amount              Float    @default(25.0)
+  maxRounds           Int      @default(10)
+  roundsExecuted      Int      @default(0)
+
+  // TP/SL
+  takeProfitPct       Float?
+  takeProfitPrice     Float?
+  stopLossPct         Float?
+  stopLossPrice       Float?
+
+  // Status
+  isActive            Boolean  @default(true)
+  isPaused            Boolean  @default(true)
+  notificationsEnabled Boolean @default(true)
+  slippage            Float    @default(5.0)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  trades              UpDownTrade[]
+
+  @@index([userId])
+  @@index([isActive, isPaused])
+  @@map("updown_strategies")
+}
+
+model UpDownTrade {
+  id              String          @id @default(cuid())
+  userId          String
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  strategyId      String?
+  strategy        UpDownStrategy? @relation(fields: [strategyId], references: [id], onDelete: SetNull)
+
+  conditionId     String
+  tokenId         String
+  question        String
+  coin            String
+  direction       String
+  roundStartPrice Float?
+  triggerPrice    Float
+  amount          Float
+  fillPrice       Float?
+  orderId         String?
+  status          String          @default("pending")
+  tpSlOrderId     String?
+  tpSlStatus      String?
+  errorMsg        String?
+
+  createdAt       DateTime        @default(now())
+
+  @@index([userId, createdAt])
+  @@index([strategyId])
+  @@map("updown_trades")
 }
