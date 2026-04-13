@@ -1241,7 +1241,7 @@ export async function handlePnl(ctx: Context): Promise<void> {
     const activeRealized  = activePositions.reduce((s, p) => s + p.realizedPnl, 0);
     const closedRealized  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
     const totalPnl        = totalUnrealized + activeRealized + closedRealized;
-    const activeInvested  = activePositions.reduce((s, p) => s + (p.initialValue), 0);
+    const activeInvested  = activePositions.reduce((s, p) => s + p.totalBought, 0);
     const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
     const totalInvested   = activeInvested + closedInvested;
     const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
@@ -1275,8 +1275,10 @@ export async function handlePnl(ctx: Context): Promise<void> {
     caption += `${ce(EMOJI.diamond, '💎')} <b>Total P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${totalPnl.toFixed(2)}</b>\n`;
     caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${percentPnl.toFixed(1)}%\n\n`;
     caption += `${ce(EMOJI.bag, '💰')} <b>Trades:</b>  ${tradeCount}\n`;
-    caption += `${ce(EMOJI.trophy, '🏆')} <b>Best Trade:</b>  +$${bestTrade.toFixed(2)}\n`;
-    caption += `${ce(EMOJI.usdc, '💲')} <b>Worst Trade:</b>  -$${Math.abs(worstTrade).toFixed(2)}\n`;
+    const bestSign = bestTrade >= 0 ? '+' : '-';
+    const worstSign = worstTrade >= 0 ? '+' : '-';
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>Best Trade:</b>  ${bestSign}$${Math.abs(bestTrade).toFixed(2)}\n`;
+    caption += `${ce(EMOJI.usdc, '💲')} <b>Worst Trade:</b>  ${worstSign}$${Math.abs(worstTrade).toFixed(2)}\n`;
     caption += `${ce(EMOJI.briefcase, '💼')} <b>Balance:</b>  $${balance}`;
 
     // Try image generation
