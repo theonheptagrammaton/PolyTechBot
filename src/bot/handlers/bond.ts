@@ -23,7 +23,7 @@ function isExpired(ts: number): boolean {
 // ─── Add Flow State ─────────────────────────────────────────────────────────
 
 interface BondAddState {
-  step: 'daily_budget' | 'min_prob' | 'min_prob_custom' | 'time_window' | 'time_window_custom'
+  step: 'name' | 'daily_budget' | 'min_prob' | 'min_prob_custom' | 'time_window' | 'time_window_custom'
       | 'max_concurrent' | 'max_concurrent_custom'
       | 'markets_filter' | 'review'
       // Advanced steps
@@ -31,6 +31,7 @@ interface BondAddState {
       | 'adv_max_spend_market' | 'adv_max_spend_total'
       | 'adv_max_daily_loss' | 'adv_max_prob' | 'adv_scan_interval'
       | 'adv_outcome_side';
+  name?: string;
   dailyBudget?: number;
   minProbability?: number;
   maxProbability?: number;
@@ -133,7 +134,7 @@ export async function handleBondList(ctx: Context): Promise<void> {
   });
 
   const lines: string[] = [
-    `🤖 <b>Auto Trade</b>`,
+    `🤖 <b>Bond Trading</b>`,
     ``,
   ];
 
@@ -151,25 +152,23 @@ export async function handleBondList(ctx: Context): Promise<void> {
       // Calculate stats from trades
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
-      const wins = filledTrades.length; // filled = successful buy
-      // Estimated PnL: sum of (amount * (1/price - 1)) for resolved high-prob bonds
-      // Simplified: we show total spent and count
+      const tradeCount = filledTrades.length;
+      // Estimated PnL assumes all high-prob bonds resolve correctly (not guaranteed)
       const pnlEstimate = filledTrades.reduce((sum, t) => {
-        // Expected return = amount * (1 - price) (if resolves correctly)
         return sum + t.amount * (1 - t.price);
       }, 0);
       const pnlStr = pnlEstimate >= 0 ? `+$${pnlEstimate.toFixed(2)}` : `-$${Math.abs(pnlEstimate).toFixed(2)}`;
 
-      // Active sessions = today's trades count
+      // Today's trades
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      const activeSessions = filledTrades.filter(t => new Date(t.createdAt) >= today).length;
+      const todayTrades = filledTrades.filter(t => new Date(t.createdAt) >= today).length;
 
       lines.push(
         `${i + 1}. ${statusDot} 🎯 <b>${esc(name)}</b>\n` +
         `├ Mode: 📊 ${s.minProbability}%–${s.maxProbability}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
-        `├ PnL: <b>${pnlStr}</b> (${wins}W/0L)\n` +
-        `├ Active Sessions: <b>${activeSessions}</b>\n` +
+        `├ Est. PnL: <b>${pnlStr}</b> · Trades Filled: ${tradeCount}\n` +
+        `├ Today's Trades: <b>${todayTrades}</b>\n` +
         `└ Spent: <b>$${totalSpent.toFixed(2)}</b>`
       );
       lines.push(``);
@@ -311,7 +310,11 @@ export async function handleBondRemovePrompt(ctx: Context): Promise<void> {
 
 export async function handleBondRemoveExecute(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await prisma.bondStrategy.delete({ where: { id: stratId } }).catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+  await prisma.bondStrategy.deleteMany({ where: { id: stratId, userId: user.id } });
   await handleBondList(ctx);
 }
 
@@ -375,12 +378,23 @@ export async function handleBondStartAdd(ctx: Context): Promise<void> {
   }
 
   bondAddState.set(telegramId, {
-    step: 'daily_budget',
+    step: 'name',
     timestamp: Date.now(),
   });
 
   await sendHtml(ctx,
-    `💰 <b>Step 1/6: Daily Budget</b>\n\n` +
+    `✏️ <b>Step 1/7: Strategy Name</b>\n\n` +
+    `Give your strategy a name (e.g. "Safe Bonds", "High Prob Scanner"):`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('← Cancel', 'bond_list')],
+    ]),
+  );
+}
+
+// Step 2: Daily Budget
+async function showDailyBudgetStep(ctx: Context): Promise<void> {
+  await sendHtml(ctx,
+    `💰 <b>Step 2/7: Daily Budget</b>\n\n` +
     `How much USDC per day should this strategy spend?\n\n` +
     `Enter an amount (e.g. 50, 100, 200):`,
     Markup.inlineKeyboard([
@@ -389,10 +403,10 @@ export async function handleBondStartAdd(ctx: Context): Promise<void> {
   );
 }
 
-// Step 2: Min probability
+// Step 3: Min probability
 async function showMinProbStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `🎯 <b>Step 2/6: Min Probability</b>\n\n` +
+    `🎯 <b>Step 3/7: Min Probability</b>\n\n` +
     `Only buy markets where the winning side is at least this likely.\n\n` +
     `Choose a preset or enter custom:`,
     Markup.inlineKeyboard([
@@ -411,7 +425,7 @@ async function showMinProbStep(ctx: Context): Promise<void> {
 // Step 3: Time window
 async function showTimeWindowStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `⏰ <b>Step 3/6: Time Window</b>\n\n` +
+    `⏰ <b>Step 4/7: Time Window</b>\n\n` +
     `Only buy markets that expire within this many hours.\n\n` +
     `Choose a preset or enter custom:`,
     Markup.inlineKeyboard([
@@ -430,7 +444,7 @@ async function showTimeWindowStep(ctx: Context): Promise<void> {
 // Step 4: Max concurrent
 async function showMaxConcurrentStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `📊 <b>Step 4/6: Max Concurrent Positions</b>\n\n` +
+    `📊 <b>Step 5/7: Max Concurrent Positions</b>\n\n` +
     `Maximum number of open bond positions at once.`,
     Markup.inlineKeyboard([
       [
@@ -447,7 +461,7 @@ async function showMaxConcurrentStep(ctx: Context): Promise<void> {
 // Step 5: Market types
 async function showMarketsFilterStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `🏈 <b>Step 5/6: Market Types</b>\n\n` +
+    `🏈 <b>Step 6/7: Market Types</b>\n\n` +
     `Include sports and/or short-term crypto up/down markets?`,
     Markup.inlineKeyboard([
       [Markup.button.callback('Neither', 'bond_add_mkt_none')],
@@ -462,7 +476,8 @@ async function showMarketsFilterStep(ctx: Context): Promise<void> {
 // Step 6: Review
 async function showReviewStep(ctx: Context, state: BondAddState): Promise<void> {
   const lines = [
-    `📋 <b>Step 6/6: Review</b>\n`,
+    `📋 <b>Step 7/7: Review</b>\n`,
+    `✏️ Name: <b>${esc(state.name || 'Strategy')}</b>`,
     `💰 Daily Budget: $${state.dailyBudget ?? 100}`,
     `💵 Amount/Trade: $${state.fixedAmount ?? 25}`,
     `🎯 Min Probability: ${state.minProbability ?? 95}%`,
@@ -480,6 +495,19 @@ async function showReviewStep(ctx: Context, state: BondAddState): Promise<void> 
   if (state.maxSpendPerMarket != null) lines.push(`💸 Per Market Max: $${state.maxSpendPerMarket}`);
   if (state.maxSpendTotal != null) lines.push(`💸 Total Max: $${state.maxSpendTotal}`);
   if (state.maxDailyLoss != null) lines.push(`📅 Max Daily Loss: $${state.maxDailyLoss}`);
+
+  lines.push(`🔔 Notifications: On`);
+
+  // Consistency warnings
+  const fa = state.fixedAmount ?? 25;
+  const db = state.dailyBudget ?? 100;
+  if (fa > db) {
+    lines.push(`\n⚠️ Amount/trade ($${fa}) exceeds daily budget ($${db}).`);
+  }
+  const mspm = state.maxSpendPerMarket;
+  if (mspm != null && mspm < fa) {
+    lines.push(`⚠️ Per-market max ($${mspm}) is less than amount/trade ($${fa}).`);
+  }
 
   lines.push(`\nStrategy starts <b>paused</b>. Start it from the manage page.`);
 
@@ -521,7 +549,7 @@ export async function handleAddProbCustom(ctx: Context): Promise<void> {
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
   await sendHtml(ctx,
-    `🎯 <b>Custom Min Probability</b>\n\nEnter a value between 90 and 99:`,
+    `🎯 <b>Custom Min Probability</b>\n\nEnter a value between 50 and 99:`,
     Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
   );
 }
@@ -628,54 +656,54 @@ export async function handleAddAdvanced(ctx: Context): Promise<void> {
   const state = await bondAddState.get(telegramId);
   if (!state) return;
 
-  state.advStep = 0;
-  state.step = ADV_STEPS[0];
-  state.timestamp = Date.now();
-  bondAddState.set(telegramId, state);
-  await showAdvStep(ctx, state.step);
+  await showAdvMenu(ctx, state);
 }
 
-async function showAdvStep(ctx: Context, step: string): Promise<void> {
-  const prompt = ADV_PROMPTS[step] || 'Enter value:';
+async function showAdvMenu(ctx: Context, state: BondAddState): Promise<void> {
+  const lines = [
+    `⚙️ <b>Advanced Settings</b>\n`,
+    `💵 Amount/Trade: $${state.fixedAmount ?? 25}`,
+    `⚡ Slippage: ${state.slippage ?? 5}%`,
+    `💧 Min Liquidity: ${state.minLiquidity != null ? '$' + state.minLiquidity : '–'}`,
+    `📊 Min Volume: ${state.minVolume != null ? '$' + state.minVolume : '–'}`,
+    `💸 Per Market Max: ${state.maxSpendPerMarket != null ? '$' + state.maxSpendPerMarket : '–'}`,
+    `💸 Total Max: ${state.maxSpendTotal != null ? '$' + state.maxSpendTotal : '–'}`,
+    `📅 Max Daily Loss: ${state.maxDailyLoss != null ? '$' + state.maxDailyLoss : '–'}`,
+    `🎯 Max Probability: ${state.maxProbability ?? 99}%`,
+    `📡 Scan Interval: ${state.scanInterval ?? 5}min`,
+    `🎲 Outcome Side: ${state.outcomeSide ?? 'auto'}`,
+    `\nTap a setting to change it:`,
+  ];
 
-  if (step === 'adv_outcome_side') {
-    await sendHtml(ctx, prompt, Markup.inlineKeyboard([
-      [
-        Markup.button.callback('Auto', 'bond_add_side_auto'),
-        Markup.button.callback('YES', 'bond_add_side_yes'),
-        Markup.button.callback('NO', 'bond_add_side_no'),
-      ],
-      [Markup.button.callback('← Cancel', 'bond_list')],
-    ]));
-    return;
-  }
-
-  await sendHtml(ctx, prompt, Markup.inlineKeyboard([
-    [Markup.button.callback('⏭ Skip', 'bond_add_adv_skip')],
-    [Markup.button.callback('← Cancel', 'bond_list')],
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard([
+    [
+      Markup.button.callback('💵 Amount', 'bond_adv_edit_amount'),
+      Markup.button.callback('⚡ Slippage', 'bond_adv_edit_slippage'),
+    ],
+    [
+      Markup.button.callback('💧 Min Liq', 'bond_adv_edit_min_liq'),
+      Markup.button.callback('📊 Min Vol', 'bond_adv_edit_min_vol'),
+    ],
+    [
+      Markup.button.callback('💸 Mkt Max', 'bond_adv_edit_mkt_max'),
+      Markup.button.callback('💸 Total Max', 'bond_adv_edit_total_max'),
+    ],
+    [
+      Markup.button.callback('📅 Loss Limit', 'bond_adv_edit_loss'),
+      Markup.button.callback('🎯 Max Prob', 'bond_adv_edit_max_prob'),
+    ],
+    [
+      Markup.button.callback('📡 Scan Int.', 'bond_adv_edit_scan'),
+      Markup.button.callback('🎲 Side', 'bond_adv_edit_side'),
+    ],
+    [Markup.button.callback('← Back to Review', 'bond_adv_back_review')],
   ]));
 }
 
+// Legacy: kept for backwards compatibility with old inline keyboards
 export async function handleAddAdvSkip(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await bondAddState.get(telegramId);
-  if (!state || state.advStep == null) return;
-
-  state.advStep++;
-  state.timestamp = Date.now();
-
-  if (state.advStep >= ADV_STEPS.length) {
-    state.step = 'review';
-    bondAddState.set(telegramId, state);
-    await showReviewStep(ctx, state);
-    return;
-  }
-
-  state.step = ADV_STEPS[state.advStep];
-  bondAddState.set(telegramId, state);
-  await showAdvStep(ctx, state.step);
+  await handleAddAdvanced(ctx);
 }
 
 export async function handleAddSidePreset(ctx: Context, side: string): Promise<void> {
@@ -686,10 +714,69 @@ export async function handleAddSidePreset(ctx: Context, side: string): Promise<v
   if (!state) return;
 
   state.outcomeSide = side;
+  state.timestamp = Date.now();
+  bondAddState.set(telegramId, state);
+  await showAdvMenu(ctx, state);
+}
+
+export async function handleAdvBackReview(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await bondAddState.get(telegramId);
+  if (!state) return;
+
   state.step = 'review';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
   await showReviewStep(ctx, state);
+}
+
+export async function handleAdvEdit(ctx: Context, field: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await bondAddState.get(telegramId);
+  if (!state) return;
+
+  const stepMap: Record<string, BondAddState['step']> = {
+    amount: 'adv_amount',
+    slippage: 'adv_slippage',
+    min_liq: 'adv_min_liq',
+    min_vol: 'adv_min_vol',
+    mkt_max: 'adv_max_spend_market',
+    total_max: 'adv_max_spend_total',
+    loss: 'adv_max_daily_loss',
+    max_prob: 'adv_max_prob',
+    scan: 'adv_scan_interval',
+  };
+
+  if (field === 'side') {
+    state.step = 'adv_outcome_side';
+    state.timestamp = Date.now();
+    bondAddState.set(telegramId, state);
+    await sendHtml(ctx, ADV_PROMPTS['adv_outcome_side'], Markup.inlineKeyboard([
+      [
+        Markup.button.callback('Auto', 'bond_add_side_auto'),
+        Markup.button.callback('YES', 'bond_add_side_yes'),
+        Markup.button.callback('NO', 'bond_add_side_no'),
+      ],
+      [Markup.button.callback('← Back', 'bond_add_advanced')],
+    ]));
+    return;
+  }
+
+  const step = stepMap[field];
+  if (!step) return;
+
+  state.step = step;
+  state.timestamp = Date.now();
+  bondAddState.set(telegramId, state);
+
+  const prompt = ADV_PROMPTS[step] || 'Enter value:';
+  await sendHtml(ctx, prompt, Markup.inlineKeyboard([
+    [Markup.button.callback('← Back', 'bond_add_advanced')],
+  ]));
 }
 
 // ─── Confirm Add ────────────────────────────────────────────────────────────
@@ -705,32 +792,39 @@ export async function handleBondConfirmAdd(ctx: Context): Promise<void> {
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
-  const count = await prisma.bondStrategy.count({ where: { userId: user.id } });
-  const label = `Strategy-${count + 1}`;
-
-  await prisma.bondStrategy.create({
-    data: {
-      userId: user.id,
-      label,
-      fixedAmount: state.fixedAmount ?? 25,
-      dailyBudget: state.dailyBudget ?? 100,
-      maxDailyLoss: state.maxDailyLoss ?? null,
-      minProbability: state.minProbability ?? 95,
-      maxProbability: state.maxProbability ?? 99,
-      maxHoursOut: state.maxHoursOut ?? 48,
-      maxConcurrent: state.maxConcurrent ?? 5,
-      includeSports: state.includeSports ?? false,
-      includeCryptoUpDown: state.includeCryptoUpDown ?? false,
-      slippage: state.slippage ?? 5,
-      minLiquidity: state.minLiquidity ?? null,
-      minVolume: state.minVolume ?? null,
-      maxSpendPerMarket: state.maxSpendPerMarket ?? null,
-      maxSpendTotal: state.maxSpendTotal ?? null,
-      scanInterval: state.scanInterval ?? 5,
-      outcomeSide: state.outcomeSide ?? 'auto',
-      isPaused: true,
-    },
+  // Use transaction to prevent race condition on MAX_STRATEGIES
+  const created = await prisma.$transaction(async (tx) => {
+    const count = await tx.bondStrategy.count({ where: { userId: user.id } });
+    if (count >= MAX_STRATEGIES) return null;
+    return tx.bondStrategy.create({
+      data: {
+        userId: user.id,
+        label: state.name || 'Strategy',
+        fixedAmount: state.fixedAmount ?? 25,
+        dailyBudget: state.dailyBudget ?? 100,
+        maxDailyLoss: state.maxDailyLoss ?? null,
+        minProbability: state.minProbability ?? 95,
+        maxProbability: state.maxProbability ?? 99,
+        maxHoursOut: state.maxHoursOut ?? 48,
+        maxConcurrent: state.maxConcurrent ?? 5,
+        includeSports: state.includeSports ?? false,
+        includeCryptoUpDown: state.includeCryptoUpDown ?? false,
+        slippage: state.slippage ?? 5,
+        minLiquidity: state.minLiquidity ?? null,
+        minVolume: state.minVolume ?? null,
+        maxSpendPerMarket: state.maxSpendPerMarket ?? null,
+        maxSpendTotal: state.maxSpendTotal ?? null,
+        scanInterval: state.scanInterval ?? 5,
+        outcomeSide: state.outcomeSide ?? 'auto',
+        isPaused: true,
+      },
+    });
   });
+
+  if (!created) {
+    await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
+    return;
+  }
 
   bondAddState.delete(telegramId);
   await handleBondList(ctx);
@@ -748,6 +842,20 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
   const num = parseNumber(text);
 
   switch (state.step) {
+    case 'name': {
+      const name = text.trim();
+      if (!name || name.length < 1 || name.length > 32) {
+        await ctx.reply('Enter a name (1–32 characters).');
+        return true;
+      }
+      state.name = name;
+      state.step = 'daily_budget';
+      state.timestamp = Date.now();
+      bondAddState.set(telegramId, state);
+      await showDailyBudgetStep(ctx);
+      return true;
+    }
+
     case 'daily_budget': {
       if (num == null || num < 1 || num > 100_000) {
         await ctx.reply('❌ Enter a valid amount ($1–$100,000).');
@@ -762,8 +870,8 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
     }
 
     case 'min_prob_custom': {
-      if (num == null || num < 90 || num > 99) {
-        await ctx.reply('❌ Enter a value between 90 and 99.');
+      if (num == null || num < 50 || num > 99) {
+        await ctx.reply('❌ Enter a value between 50 and 99.');
         return true;
       }
       state.minProbability = num;
@@ -888,20 +996,21 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 }
 
 async function advanceAdvStep(telegramId: string, state: BondAddState, ctx: Context): Promise<true> {
-  state.advStep = (state.advStep ?? 0) + 1;
   state.timestamp = Date.now();
-
-  if (state.advStep >= ADV_STEPS.length) {
-    state.step = 'review';
-    bondAddState.set(telegramId, state);
-    await showReviewStep(ctx, state);
-    return true;
-  }
-
-  state.step = ADV_STEPS[state.advStep];
   bondAddState.set(telegramId, state);
-  await showAdvStep(ctx, state.step);
+  await showAdvMenu(ctx, state);
   return true;
+}
+
+// ─── Ownership Helper ────────────────────────────────────────────────────────
+
+/** Verify the current user owns the bond strategy. Returns the strategy or null. */
+async function verifyBondOwnership(ctx: Context, stratId: string) {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return null;
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return null;
+  return prisma.bondStrategy.findFirst({ where: { id: stratId, userId: user.id } });
 }
 
 // ─── Manage Page ────────────────────────────────────────────────────────────
@@ -909,7 +1018,7 @@ async function advanceAdvStep(telegramId: string, state: BondAddState, ctx: Cont
 export async function handleBondManage(ctx: Context, stratId: string): Promise<void> {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
-  const strat = await prisma.bondStrategy.findUnique({ where: { id: stratId } });
+  const strat = await verifyBondOwnership(ctx, stratId);
   if (!strat) {
     await ctx.reply('❌ Strategy not found.');
     return;
@@ -990,19 +1099,23 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
 
 export async function handleManageStart(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyBondOwnership(ctx, id);
+  if (!strat) return;
   await prisma.bondStrategy.update({ where: { id }, data: { isPaused: false } });
   await handleBondManage(ctx, id);
 }
 
 export async function handleManagePause(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyBondOwnership(ctx, id);
+  if (!strat) return;
   await prisma.bondStrategy.update({ where: { id }, data: { isPaused: true } });
   await handleBondManage(ctx, id);
 }
 
 export async function handleManageToggleSports(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.bondStrategy.findUnique({ where: { id } });
+  const strat = await verifyBondOwnership(ctx, id);
   if (!strat) return;
   await prisma.bondStrategy.update({ where: { id }, data: { includeSports: !strat.includeSports } });
   await handleBondManage(ctx, id);
@@ -1010,7 +1123,7 @@ export async function handleManageToggleSports(ctx: Context, id: string): Promis
 
 export async function handleManageToggleCrypto(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.bondStrategy.findUnique({ where: { id } });
+  const strat = await verifyBondOwnership(ctx, id);
   if (!strat) return;
   await prisma.bondStrategy.update({ where: { id }, data: { includeCryptoUpDown: !strat.includeCryptoUpDown } });
   await handleBondManage(ctx, id);
@@ -1018,7 +1131,7 @@ export async function handleManageToggleCrypto(ctx: Context, id: string): Promis
 
 export async function handleManageToggleNotify(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.bondStrategy.findUnique({ where: { id } });
+  const strat = await verifyBondOwnership(ctx, id);
   if (!strat) return;
   await prisma.bondStrategy.update({ where: { id }, data: { notificationsEnabled: !strat.notificationsEnabled } });
   await handleBondManage(ctx, id);
@@ -1026,7 +1139,7 @@ export async function handleManageToggleNotify(ctx: Context, id: string): Promis
 
 export async function handleManageCycleSide(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.bondStrategy.findUnique({ where: { id } });
+  const strat = await verifyBondOwnership(ctx, id);
   if (!strat) return;
   const sides = ['auto', 'yes', 'no'];
   const idx = sides.indexOf(strat.outcomeSide);
@@ -1069,6 +1182,8 @@ export async function handleManageDelete(ctx: Context, id: string): Promise<void
 
 export async function handleManageDeleteExecute(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyBondOwnership(ctx, id);
+  if (!strat) return;
   await prisma.bondStrategy.delete({ where: { id } }).catch(() => {});
   await handleBondList(ctx);
 }
@@ -1087,6 +1202,14 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
 
   const state = await bondEditState.get(telegramId);
   if (!state) return false;
+
+  // Verify ownership before any update
+  const owned = await verifyBondOwnership(ctx, state.stratId);
+  if (!owned) {
+    bondEditState.delete(telegramId);
+    await ctx.reply('❌ Strategy not found.');
+    return true;
+  }
 
   const num = parseNumber(text);
   const id = state.stratId;
@@ -1122,12 +1245,22 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
           await ctx.reply('❌ Enter 50–99.');
           return true;
         }
+        const stratForMin = await prisma.bondStrategy.findUnique({ where: { id }, select: { maxProbability: true } });
+        if (stratForMin && num > stratForMin.maxProbability) {
+          await ctx.reply(`❌ Min probability must be <= max probability (${stratForMin.maxProbability}%).`);
+          return true;
+        }
         await prisma.bondStrategy.update({ where: { id }, data: { minProbability: num } });
         break;
       }
       case 'awaiting_max_prob': {
-        if (num == null || num < 90 || num > 100) {
-          await ctx.reply('❌ Enter 90–100.');
+        if (num == null || num < 50 || num > 100) {
+          await ctx.reply('❌ Enter 50–100.');
+          return true;
+        }
+        const stratForMax = await prisma.bondStrategy.findUnique({ where: { id }, select: { minProbability: true } });
+        if (stratForMax && num < stratForMax.minProbability) {
+          await ctx.reply(`❌ Max probability must be >= min probability (${stratForMax.minProbability}%).`);
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxProbability: num } });

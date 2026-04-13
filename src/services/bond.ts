@@ -190,7 +190,9 @@ export async function applyStrategyFilters(
 
   // 2. maxHoursOut
   if (market.endDate) {
-    const hoursLeft = (new Date(market.endDate).getTime() - Date.now()) / (1000 * 60 * 60);
+    const endTime = new Date(market.endDate).getTime();
+    if (isNaN(endTime)) return fail('invalid market endDate');
+    const hoursLeft = (endTime - Date.now()) / (1000 * 60 * 60);
     if (hoursLeft <= 0) return fail('market already expired');
     if (hoursLeft > strategy.maxHoursOut) return fail(`expires in ${hoursLeft.toFixed(0)}h > ${strategy.maxHoursOut}h`);
   }
@@ -363,10 +365,10 @@ export async function executeBondOrder(
     ]);
 
     await Promise.all([
-      redisCache.set(dailyKey, dailySpent + amount, 90_000), // 25h
-      redisCache.set(totalKey, totalSpent + amount),
+      redisCache.set(dailyKey, dailySpent + tradeAmount, 90_000), // 25h
+      redisCache.set(totalKey, totalSpent + tradeAmount),
       redisCache.set(dedupKey, 1, 86_400), // 24h
-      redisCache.set(perMarketKey, perMarketSpent + amount),
+      redisCache.set(perMarketKey, perMarketSpent + tradeAmount, 604_800), // 7d
     ]);
 
     // Commission (fire-and-forget)
@@ -389,7 +391,8 @@ export async function executeBondOrder(
       actualAmount: tradeAmount,
     };
   } catch (err: any) {
-    // Record failed trade
+    // Record failed trade (amount = intended tradeAmount after commission)
+    const failedTradeAmt = parseFloat((strategy.fixedAmount - strategy.fixedAmount * COMMISSION_RATE).toFixed(6));
     await prisma.bondTrade.create({
       data: {
         userId: user.id,
@@ -399,7 +402,7 @@ export async function executeBondOrder(
         question: market.question.slice(0, 255),
         outcome,
         probability: price,
-        amount: strategy.fixedAmount,
+        amount: failedTradeAmt,
         price,
         status: 'failed',
         errorMsg: (err?.message ?? 'unknown error').slice(0, 255),
@@ -442,21 +445,19 @@ export async function checkDailyLoss(
     select: { amount: true, price: true },
   });
 
-  // Estimate loss: for bonds, loss = amount * (1 - price) since we're buying at high probability
-  // If market resolves NO when we bought YES at 0.95, we lose the full amount
-  // Simplified: daily loss = total spent - (total spent * avg probability)
-  // This is an estimate; actual loss depends on resolution
+  // Daily loss = total capital at risk today
+  // For bond trading: we buy at high probability, so risk per trade = amount
+  // (if market resolves against us, we lose the full amount)
+  // Using total spent as the risk metric — conservative but accurate
   let totalSpent = 0;
-  let weightedProb = 0;
   for (const t of trades) {
     totalSpent += t.amount;
-    weightedProb += t.amount * t.price;
   }
 
   if (totalSpent === 0) return false;
 
-  const avgProb = weightedProb / totalSpent;
-  const estimatedLoss = totalSpent * (1 - avgProb);
+  // Use total spent as the loss limit (worst-case: all markets resolve wrong)
+  const estimatedLoss = totalSpent;
 
   if (estimatedLoss >= maxDailyLoss) {
     await redisCache.set(pausedKey, 1, 90_000); // 25h

@@ -66,7 +66,7 @@ app.get('/api/stats/overview', async (req, res) => {
     const since = periodToDate(req.query.period);
     const dateFilter = since ? { createdAt: { gte: since } } : {};
 
-    const [totalUsers, totalTrades, commissionAgg, activeSubs, filledTrades, failedTrades, skippedTrades] = await Promise.all([
+    const [totalUsers, totalTrades, commissionAgg, activeSubs, filledTrades, failedTrades, skippedTrades, activeBondStrats, activeUpdownStrats, totalBondTrades, totalUpdownTrades] = await Promise.all([
       prisma.user.count({ where: dateFilter }),
       prisma.copiedTrade.count({ where: dateFilter }),
       prisma.commissionLog.aggregate({ where: dateFilter, _sum: { amount: true } }),
@@ -74,6 +74,10 @@ app.get('/api/stats/overview', async (req, res) => {
       prisma.copiedTrade.count({ where: { ...dateFilter, status: 'filled' } }),
       prisma.copiedTrade.count({ where: { ...dateFilter, status: 'failed' } }),
       prisma.copiedTrade.count({ where: { ...dateFilter, status: 'skipped' } }),
+      prisma.bondStrategy.count({ where: { isActive: true, isPaused: false } }),
+      prisma.upDownStrategy.count({ where: { isActive: true, isPaused: false } }),
+      prisma.bondTrade.count({ where: dateFilter }),
+      prisma.upDownTrade.count({ where: dateFilter }),
     ]);
 
     const totalCommission = commissionAgg._sum.amount || 0;
@@ -87,6 +91,10 @@ app.get('/api/stats/overview', async (req, res) => {
       totalVolume: totalCommission / COMMISSION_RATE,
       totalCommission,
       activeSubs,
+      activeBondStrats,
+      activeUpdownStrats,
+      totalBondTrades,
+      totalUpdownTrades,
     });
   } catch (err) {
     console.error('overview error:', err);
@@ -320,6 +328,236 @@ app.get('/api/stats/financials', async (req, res) => {
     });
   } catch (err) {
     console.error('financials error:', err);
+    res.status(500).json({ error: 'Internal error', detail: err.message });
+  }
+});
+
+// --- Users list (paginated) ---
+app.get('/api/stats/users/list', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const search = (req.query.search || '').trim();
+    const sort = req.query.sort || 'createdAt';
+    const order = req.query.order === 'asc' ? 'asc' : 'desc';
+    const skip = (page - 1) * limit;
+
+    const allowedSorts = ['createdAt', 'username', 'firstName', 'referralEarnedTotal', 'cashbackEarnedTotal'];
+    const orderBy = allowedSorts.includes(sort) ? { [sort]: order } : { createdAt: 'desc' };
+
+    const where = search ? {
+      OR: [
+        { username: { contains: search, mode: 'insensitive' } },
+        { firstName: { contains: search, mode: 'insensitive' } },
+        { telegramId: { contains: search } },
+      ],
+    } : {};
+
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        select: {
+          id: true,
+          telegramId: true,
+          username: true,
+          firstName: true,
+          createdAt: true,
+          referralCode: true,
+          referralEarnedTotal: true,
+          cashbackEarnedTotal: true,
+          referredBy: { select: { username: true, firstName: true } },
+          _count: {
+            select: {
+              referrals: true,
+              copySubscriptions: true,
+              bondStrategies: true,
+              updownStrategies: true,
+            },
+          },
+        },
+      }),
+      prisma.user.count({ where }),
+    ]);
+
+    // Fetch total trade volume per user (sum of copiedSize from filled trades)
+    const userIds = users.map(u => u.id);
+    const volumeAggs = userIds.length > 0 ? await prisma.copiedTrade.groupBy({
+      by: ['userId'],
+      where: { userId: { in: userIds }, status: 'filled' },
+      _sum: { copiedSize: true },
+    }) : [];
+    const volumeMap = {};
+    volumeAggs.forEach(v => { volumeMap[v.userId] = v._sum.copiedSize || 0; });
+
+    const result = users.map(u => ({
+      id: u.id,
+      telegramId: u.telegramId,
+      username: u.username,
+      firstName: u.firstName,
+      createdAt: u.createdAt,
+      referralCode: u.referralCode,
+      referredBy: u.referredBy ? (u.referredBy.username || u.referredBy.firstName || '-') : null,
+      referralCount: u._count.referrals,
+      referralEarnedTotal: u.referralEarnedTotal,
+      cashbackEarnedTotal: u.cashbackEarnedTotal,
+      copySubCount: u._count.copySubscriptions,
+      bondStratCount: u._count.bondStrategies,
+      updownStratCount: u._count.updownStrategies,
+      totalTradeVolume: volumeMap[u.id] || 0,
+    }));
+
+    res.json({ users: result, total, page, limit });
+  } catch (err) {
+    console.error('users list error:', err);
+    res.status(500).json({ error: 'Internal error', detail: err.message });
+  }
+});
+
+// --- User detail ---
+app.get('/api/stats/users/detail/:id', async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        telegramId: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+        createdAt: true,
+        referralCode: true,
+        referralEarnedTotal: true,
+        referralClaimable: true,
+        cashbackEarnedTotal: true,
+        cashbackClaimable: true,
+        defaultTradeAmount: true,
+        slippageTolerance: true,
+        tradingEnabled: true,
+        isAdmin: true,
+        isActive: true,
+        referredBy: { select: { id: true, username: true, firstName: true } },
+        referrals: {
+          select: { id: true, username: true, firstName: true, telegramId: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        },
+        _count: {
+          select: {
+            copySubscriptions: true,
+            copiedTrades: true,
+            bondStrategies: true,
+            bondTrades: true,
+            updownStrategies: true,
+            updownTrades: true,
+            referrals: true,
+          },
+        },
+      },
+    });
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const [recentCopied, recentBond, recentUpdown] = await Promise.all([
+      prisma.copiedTrade.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: { id: true, side: true, outcome: true, copiedSize: true, price: true, status: true, createdAt: true, traderAddress: true },
+      }),
+      prisma.bondTrade.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: { id: true, question: true, outcome: true, amount: true, price: true, probability: true, status: true, createdAt: true },
+      }),
+      prisma.upDownTrade.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: { id: true, coin: true, direction: true, amount: true, triggerPrice: true, fillPrice: true, status: true, createdAt: true },
+      }),
+    ]);
+
+    res.json({ ...user, recentCopied, recentBond, recentUpdown });
+  } catch (err) {
+    console.error('user detail error:', err);
+    res.status(500).json({ error: 'Internal error', detail: err.message });
+  }
+});
+
+// --- Auto Strategies stats ---
+app.get('/api/stats/auto-strategies', async (req, res) => {
+  try {
+    const since = periodToDate(req.query.period);
+    const unit = truncUnit(req.query.period);
+    const dateFilter = since ? { createdAt: { gte: since } } : {};
+
+    const [
+      activeBond, pausedBond, totalBondTrades, filledBondTrades,
+      activeUpdown, pausedUpdown, totalUpdownTrades, filledUpdownTrades,
+    ] = await Promise.all([
+      prisma.bondStrategy.count({ where: { isActive: true, isPaused: false } }),
+      prisma.bondStrategy.count({ where: { isActive: true, isPaused: true } }),
+      prisma.bondTrade.count({ where: dateFilter }),
+      prisma.bondTrade.count({ where: { ...dateFilter, status: 'filled' } }),
+      prisma.upDownStrategy.count({ where: { isActive: true, isPaused: false } }),
+      prisma.upDownStrategy.count({ where: { isActive: true, isPaused: true } }),
+      prisma.upDownTrade.count({ where: dateFilter }),
+      prisma.upDownTrade.count({ where: { ...dateFilter, status: 'filled' } }),
+    ]);
+
+    const bondDateClause = since ? `WHERE "createdAt" >= '${since.toISOString()}'` : '';
+    const updownDateClause = since ? `WHERE "createdAt" >= '${since.toISOString()}'` : '';
+
+    const dailyBondTrades = await prisma.$queryRawUnsafe(`
+      SELECT DATE_TRUNC('${unit}', "createdAt") AS date,
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status = 'filled')::int AS filled,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed
+      FROM bond_trades ${bondDateClause}
+      GROUP BY date ORDER BY date
+    `);
+
+    const dailyUpdownTrades = await prisma.$queryRawUnsafe(`
+      SELECT DATE_TRUNC('${unit}', "createdAt") AS date,
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status = 'filled')::int AS filled,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed
+      FROM updown_trades ${updownDateClause}
+      GROUP BY date ORDER BY date
+    `);
+
+    // Top users by strategy count
+    const topUsers = await prisma.$queryRawUnsafe(`
+      SELECT u.id, u.username, u."firstName",
+        (SELECT COUNT(*)::int FROM bond_strategies bs WHERE bs."userId" = u.id AND bs."isActive" = true) AS bond_count,
+        (SELECT COUNT(*)::int FROM updown_strategies us WHERE us."userId" = u.id AND us."isActive" = true) AS updown_count
+      FROM users u
+      WHERE EXISTS (SELECT 1 FROM bond_strategies bs WHERE bs."userId" = u.id AND bs."isActive" = true)
+         OR EXISTS (SELECT 1 FROM updown_strategies us WHERE us."userId" = u.id AND us."isActive" = true)
+      ORDER BY (
+        (SELECT COUNT(*) FROM bond_strategies bs WHERE bs."userId" = u.id AND bs."isActive" = true) +
+        (SELECT COUNT(*) FROM updown_strategies us WHERE us."userId" = u.id AND us."isActive" = true)
+      ) DESC
+      LIMIT 20
+    `);
+
+    res.json({
+      kpis: {
+        activeBond, pausedBond, totalBondTrades, filledBondTrades,
+        bondFillRate: totalBondTrades > 0 ? ((filledBondTrades / totalBondTrades) * 100).toFixed(1) : '0.0',
+        activeUpdown, pausedUpdown, totalUpdownTrades, filledUpdownTrades,
+        updownFillRate: totalUpdownTrades > 0 ? ((filledUpdownTrades / totalUpdownTrades) * 100).toFixed(1) : '0.0',
+      },
+      dailyBondTrades: serializeBigInt(dailyBondTrades),
+      dailyUpdownTrades: serializeBigInt(dailyUpdownTrades),
+      topUsers: serializeBigInt(topUsers),
+    });
+  } catch (err) {
+    console.error('auto-strategies error:', err);
     res.status(500).json({ error: 'Internal error', detail: err.message });
   }
 });

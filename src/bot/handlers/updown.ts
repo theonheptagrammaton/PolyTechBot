@@ -25,17 +25,36 @@ function coinEmoji(sym: string): string {
   return '';
 }
 
+const TF_SHORT: Record<string, string> = {
+  '1-Minute': '1m', '5-Minute': '5m', '15-Minute': '15m',
+  '30-Minute': '30m', '1-Hour': '1h', '4-Hour': '4h',
+};
+function tfShort(tf: string): string {
+  return TF_SHORT[tf] || tf;
+}
+
+/** Validate mm:ss format. Returns total seconds or null if invalid. */
+function parseTimeStr(s: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
+  if (!m) return null;
+  const mins = parseInt(m[1], 10);
+  const secs = parseInt(m[2], 10);
+  if (mins < 0 || mins > 59 || secs < 0 || secs > 59) return null;
+  return mins * 60 + secs;
+}
+
 // ─── Add Flow State ─────────────────────────────────────────────────────────
 
 interface UpDownAddState {
   step:
-    | 'coin' | 'timeframe' | 'direction' | 'amount'
+    | 'name' | 'coin' | 'timeframe' | 'direction' | 'amount'
     | 'triggers_time' | 'triggers_up_price' | 'triggers_price_change'
     | 'review'
     // Advanced
     | 'adv_order_type' | 'adv_limit_price' | 'adv_limit_ttl'
     | 'adv_max_rounds' | 'adv_slippage'
     | 'adv_tp_type' | 'adv_tp_value' | 'adv_sl_type' | 'adv_sl_value';
+  name?: string;
   coin?: string;
   timeframe?: string;
   direction?: string;
@@ -159,7 +178,7 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       const dirStr = s.direction === 'up' ? 'UP' : 'DOWN';
       const orderStr = s.orderType === 'limit' && s.limitPrice
         ? `Limit ${s.limitPrice}` : 'Market';
-      const tfShort = s.timeframe === '5-Minute' ? '5m' : s.timeframe === '15-Minute' ? '15m' : '1h';
+      const tf = tfShort(s.timeframe);
 
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
@@ -172,7 +191,7 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
 
       lines.push(
         `${statusDot} <b>${esc(name)}</b>\n` +
-        `│  ${s.coin} · ${tfShort} · ${dirStr} · ${orderStr} · $${s.amount.toFixed(2)}\n` +
+        `│  ${s.coin} · ${tf} · ${dirStr} · ${orderStr} · $${s.amount.toFixed(2)}\n` +
         `│  ${s.timeRangeStart}–${s.timeRangeEnd} · UP ${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}${trigChange}\n` +
         `│  ${wins}W/${losses}L · ${s.roundsExecuted}/${s.maxRounds} rounds\n` +
         `└  $${totalSpent.toFixed(2)} spent`
@@ -307,7 +326,11 @@ export async function handleRemovePrompt(ctx: Context): Promise<void> {
 
 export async function handleRemoveExecute(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  await prisma.upDownStrategy.delete({ where: { id: stratId } }).catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return;
+  await prisma.upDownStrategy.deleteMany({ where: { id: stratId, userId: user.id } });
   await handleUpDownList(ctx);
 }
 
@@ -376,10 +399,10 @@ interface Template {
 
 const TEMPLATES: Template[] = [
   {
-    id: 'late_entry',
-    name: 'Late Entry',
+    id: 'momentum_closer',
+    name: 'Momentum Closer',
     emoji: '₿',
-    description: 'Buy UP in the last 2 min when price is already high',
+    description: 'Buy UP late in the round when price is already high (riding momentum)',
     coin: 'BTC',
     timeframe: '15-Minute',
     direction: 'up',
@@ -426,6 +449,23 @@ const TEMPLATES: Template[] = [
     amount: 25,
     maxRounds: 5,
   },
+  {
+    id: 'eth_breakout',
+    name: 'ETH Breakout',
+    emoji: 'Ξ',
+    description: 'Buy ETH UP early when price starts moving in your favor',
+    coin: 'ETH',
+    timeframe: '15-Minute',
+    direction: 'up',
+    timeRangeStart: '01:00',
+    timeRangeEnd: '05:00',
+    upPriceMin: 0.50,
+    upPriceMax: 0.75,
+    priceChangeMin: 10,
+    priceChangeMax: 9999,
+    amount: 25,
+    maxRounds: 10,
+  },
 ];
 
 export async function handleTemplateList(ctx: Context): Promise<void> {
@@ -442,10 +482,10 @@ export async function handleTemplateList(ctx: Context): Promise<void> {
     const pcStr = t.priceChangeMin > -9999 || t.priceChangeMax < 9999
       ? ` · $${t.priceChangeMin > -9999 ? t.priceChangeMin : ''}–$${t.priceChangeMax < 9999 ? t.priceChangeMax : ''}`
       : '';
-    const tfShort = t.timeframe === '5-Minute' ? '5m' : t.timeframe === '15-Minute' ? '15m' : '1h';
+    const tf = tfShort(t.timeframe);
     lines.push(
       `<b>${t.name}</b>`,
-      `├ ${t.coin} · ${tfShort} · ${t.direction.toUpperCase()} · $${t.amount}`,
+      `├ ${t.coin} · ${tf} · ${t.direction.toUpperCase()} · $${t.amount}`,
       `└ ${t.timeRangeStart}–${t.timeRangeEnd} · UP ${t.upPriceMin}–${t.upPriceMax}${pcStr}`,
       ``,
     );
@@ -460,7 +500,6 @@ export async function handleTemplateList(ctx: Context): Promise<void> {
 }
 
 export async function handleTemplateUse(ctx: Context, templateId: string): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
@@ -494,6 +533,7 @@ export async function handleTemplateUse(ctx: Context, templateId: string): Promi
     },
   });
 
+  await ctx.answerCbQuery(`"${tmpl.name}" created (paused)`).catch(() => {});
   await handleUpDownList(ctx);
 }
 
@@ -512,17 +552,12 @@ export async function handleStartAdd(ctx: Context): Promise<void> {
     return;
   }
 
-  updownAddState.set(telegramId, { step: 'coin', timestamp: Date.now() });
+  updownAddState.set(telegramId, { step: 'name', timestamp: Date.now() });
 
   await sendHtml(ctx,
-    `₿ <b>Step 1/5: Select Coin</b>\n\n` +
-    `Which cryptocurrency do you want to trade?`,
+    `✏️ <b>Step 1/5: Strategy Name</b>\n\n` +
+    `Give your strategy a name (e.g. "BTC Scalper", "ETH Breakout"):`,
     Markup.inlineKeyboard([
-      [
-        Markup.button.callback('₿ BTC', 'ud_add_coin_BTC'),
-        Markup.button.callback('Ξ ETH', 'ud_add_coin_ETH'),
-        Markup.button.callback('◎ SOL', 'ud_add_coin_SOL'),
-      ],
       [Markup.button.callback('← Cancel', 'updown_list')],
     ]),
   );
@@ -542,7 +577,7 @@ export async function handleAddCoin(ctx: Context, coin: string): Promise<void> {
   updownAddState.set(telegramId, state);
 
   await sendHtml(ctx,
-    `⏱ <b>Step 2/5: Timeframe</b>\n\n` +
+    `⏱ <b>Step 3/5: Timeframe</b>\n\n` +
     `Select market timeframe:`,
     Markup.inlineKeyboard([
       [
@@ -570,7 +605,7 @@ export async function handleAddTimeframe(ctx: Context, tf: string): Promise<void
   updownAddState.set(telegramId, state);
 
   await sendHtml(ctx,
-    `🎯 <b>Step 3/5: Direction & Amount</b>\n\n` +
+    `🎯 <b>Step 4/5: Direction & Amount</b>\n\n` +
     `Which direction do you want to bet?`,
     Markup.inlineKeyboard([
       [
@@ -629,7 +664,7 @@ async function showTriggersTimeStep(ctx: Context, state: UpDownAddState, telegra
   updownAddState.set(telegramId, state);
 
   await sendHtml(ctx,
-    `⏱ <b>Step 4/5: Triggers</b>\n\n` +
+    `⏱ <b>Step 5/5: Triggers</b>\n\n` +
     `<b>Time Range</b> — When during the round should the bot look for entries?\n` +
     `Enter as <code>mm:ss, mm:ss</code> (start, end)\n\n` +
     `Examples:\n` +
@@ -773,7 +808,8 @@ async function showReviewStep(ctx: Context, state: UpDownAddState): Promise<void
     : 'Any';
 
   const lines = [
-    `📋 <b>Step 5/5: Review</b>\n`,
+    `📋 <b>Review</b>\n`,
+    `✏️ Name: <b>${esc(state.name || 'Strategy')}</b>`,
     `${ce} <b>${state.coin}</b> · ${state.timeframe}`,
     `🎯 Direction: ${dirStr}`,
     `💰 Amount: $${state.amount ?? 25}`,
@@ -819,31 +855,42 @@ export async function handleConfirmAdd(ctx: Context): Promise<void> {
     return;
   }
 
-  await prisma.upDownStrategy.create({
-    data: {
-      userId: user.id,
-      coin: state.coin || 'BTC',
-      timeframe: state.timeframe || '15-Minute',
-      direction: state.direction || 'up',
-      amount: state.amount || 25,
-      timeRangeStart: state.timeRangeStart || '00:00',
-      timeRangeEnd: state.timeRangeEnd || '14:55',
-      upPriceMin: state.upPriceMin ?? 0.01,
-      upPriceMax: state.upPriceMax ?? 0.99,
-      priceChangeMin: state.priceChangeMin ?? -9999,
-      priceChangeMax: state.priceChangeMax ?? 9999,
-      orderType: state.orderType || 'market',
-      limitPrice: state.limitPrice,
-      limitTtlSeconds: state.limitTtlSeconds ?? 60,
-      maxRounds: state.maxRounds ?? 10,
-      slippage: state.slippage ?? 5,
-      takeProfitPct: state.takeProfitPct,
-      takeProfitPrice: state.takeProfitPrice,
-      stopLossPct: state.stopLossPct,
-      stopLossPrice: state.stopLossPrice,
-      isPaused: true,
-    },
+  // Use transaction to prevent race condition on MAX_STRATEGIES
+  const created = await prisma.$transaction(async (tx) => {
+    const count = await tx.upDownStrategy.count({ where: { userId: user.id } });
+    if (count >= MAX_STRATEGIES) return null;
+    return tx.upDownStrategy.create({
+      data: {
+        userId: user.id,
+        label: state.name || 'Strategy',
+        coin: state.coin || 'BTC',
+        timeframe: state.timeframe || '15-Minute',
+        direction: state.direction || 'up',
+        amount: state.amount || 25,
+        timeRangeStart: state.timeRangeStart || '00:00',
+        timeRangeEnd: state.timeRangeEnd || '14:55',
+        upPriceMin: state.upPriceMin ?? 0.01,
+        upPriceMax: state.upPriceMax ?? 0.99,
+        priceChangeMin: state.priceChangeMin ?? -9999,
+        priceChangeMax: state.priceChangeMax ?? 9999,
+        orderType: state.orderType || 'market',
+        limitPrice: state.limitPrice,
+        limitTtlSeconds: state.limitTtlSeconds ?? 60,
+        maxRounds: state.maxRounds ?? 10,
+        slippage: state.slippage ?? 5,
+        takeProfitPct: state.takeProfitPct,
+        takeProfitPrice: state.takeProfitPrice,
+        stopLossPct: state.stopLossPct,
+        stopLossPrice: state.stopLossPrice,
+        isPaused: true,
+      },
+    });
   });
+
+  if (!created) {
+    await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
+    return;
+  }
 
   updownAddState.delete(telegramId);
   await handleUpDownList(ctx);
@@ -858,109 +905,47 @@ export async function handleAddAdvanced(ctx: Context): Promise<void> {
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  state.step = 'adv_order_type';
-  state.advStep = 0;
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-
-  await showAdvancedStep(ctx, state, telegramId);
+  await showAdvMenu(ctx, state, telegramId);
 }
 
-async function showAdvancedStep(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
-  const step = state.advStep ?? 0;
+async function showAdvMenu(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
+  const orderStr = state.orderType === 'limit' && state.limitPrice
+    ? `Limit @ ${state.limitPrice}` : (state.orderType || 'Market');
+  const ttlStr = state.limitTtlSeconds ? `${state.limitTtlSeconds}s` : '60s';
 
-  switch (step) {
-    case 0: // Order type
-      state.step = 'adv_order_type';
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `📋 <b>Order Type</b>\n\nSelect order execution type:`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('📈 Market', 'ud_adv_ot_market'),
-            Markup.button.callback('📊 Limit', 'ud_adv_ot_limit'),
-          ],
-          [Markup.button.callback('⏭ Skip (Market)', 'ud_adv_skip')],
-          [Markup.button.callback('← Cancel', 'updown_list')],
-        ]),
-      );
-      break;
+  const lines = [
+    `⚙️ <b>Advanced Settings</b>\n`,
+    `📋 Order Type: ${orderStr}`,
+    ...(state.orderType === 'limit' ? [`⏱ Limit TTL: ${ttlStr}`] : []),
+    `🔁 Max Rounds: ${state.maxRounds ?? 10}`,
+    `⚡ Slippage: ${state.slippage ?? 5}%`,
+    `🏆 Take Profit: ${state.takeProfitPct != null ? state.takeProfitPct + '%' : state.takeProfitPrice != null ? '@' + state.takeProfitPrice : '–'}`,
+    `🛑 Stop Loss: ${state.stopLossPct != null ? state.stopLossPct + '%' : state.stopLossPrice != null ? '@' + state.stopLossPrice : '–'}`,
+    `\nTap a setting to change it:`,
+  ];
 
-    case 1: // Max rounds
-      state.step = 'adv_max_rounds';
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `🔁 <b>Max Rounds</b>\n\nHow many rounds should this strategy run?\n\nEnter a number (1–100):`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('5', 'ud_adv_mr_5'),
-            Markup.button.callback('10', 'ud_adv_mr_10'),
-            Markup.button.callback('25', 'ud_adv_mr_25'),
-            Markup.button.callback('50', 'ud_adv_mr_50'),
-          ],
-          [Markup.button.callback('⏭ Skip (10)', 'ud_adv_skip')],
-          [Markup.button.callback('← Cancel', 'updown_list')],
-        ]),
-      );
-      break;
+  const buttons = [
+    [
+      Markup.button.callback('📋 Order Type', 'ud_adv_edit_order'),
+      Markup.button.callback('🔁 Rounds', 'ud_adv_edit_rounds'),
+    ],
+    [
+      Markup.button.callback('⚡ Slippage', 'ud_adv_edit_slippage'),
+    ],
+    [
+      Markup.button.callback('🏆 Take Profit', 'ud_adv_edit_tp'),
+      Markup.button.callback('🛑 Stop Loss', 'ud_adv_edit_sl'),
+    ],
+    [Markup.button.callback('← Back to Review', 'ud_adv_back_review')],
+  ];
 
-    case 2: // Slippage
-      state.step = 'adv_slippage';
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `⚡ <b>Slippage</b>\n\nMax slippage tolerance (%).\n\nEnter a value (0.1–50):`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('2%', 'ud_adv_sl_2'),
-            Markup.button.callback('5%', 'ud_adv_sl_5'),
-            Markup.button.callback('10%', 'ud_adv_sl_10'),
-          ],
-          [Markup.button.callback('⏭ Skip (5%)', 'ud_adv_skip')],
-          [Markup.button.callback('← Cancel', 'updown_list')],
-        ]),
-      );
-      break;
-
-    case 3: // TP
-      state.step = 'adv_tp_type';
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `🏆 <b>Take Profit</b>\n\nSet TP condition:`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('📊 % from entry', 'ud_adv_tp_pct'),
-            Markup.button.callback('💲 Fixed price', 'ud_adv_tp_price'),
-          ],
-          [Markup.button.callback('⏭ Skip (No TP)', 'ud_adv_skip')],
-          [Markup.button.callback('← Cancel', 'updown_list')],
-        ]),
-      );
-      break;
-
-    case 4: // SL
-      state.step = 'adv_sl_type';
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `🛑 <b>Stop Loss</b>\n\nSet SL condition:`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('📊 % from entry', 'ud_adv_sl_pct'),
-            Markup.button.callback('💲 Fixed price', 'ud_adv_sl_price'),
-          ],
-          [Markup.button.callback('⏭ Skip (No SL)', 'ud_adv_skip')],
-          [Markup.button.callback('← Cancel', 'updown_list')],
-        ]),
-      );
-      break;
-
-    default:
-      // Done with advanced, back to review
-      state.step = 'review';
-      updownAddState.set(telegramId, state);
-      await showReviewStep(ctx, state);
-      break;
+  if (state.orderType === 'limit') {
+    buttons.splice(1, 0, [Markup.button.callback('⏱ Limit TTL', 'ud_adv_edit_ttl')]);
   }
+
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
 }
+
 
 // Advanced: order type
 export async function handleAdvOrderType(ctx: Context, type: string): Promise<void> {
@@ -978,14 +963,14 @@ export async function handleAdvOrderType(ctx: Context, type: string): Promise<vo
     updownAddState.set(telegramId, state);
     await sendHtml(ctx,
       `💲 <b>Limit Price</b>\n\nEnter limit order price (0.01–0.99):`,
-      Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'updown_list')]]),
+      Markup.inlineKeyboard([[Markup.button.callback('← Back', 'ud_add_advanced')]]),
     );
     return;
   }
 
-  state.advStep = (state.advStep ?? 0) + 1;
+  state.limitPrice = null;
   updownAddState.set(telegramId, state);
-  await showAdvancedStep(ctx, state, telegramId);
+  await showAdvMenu(ctx, state, telegramId);
 }
 
 // Advanced: max rounds preset
@@ -997,10 +982,9 @@ export async function handleAdvMaxRounds(ctx: Context, n: number): Promise<void>
   if (!state) return;
 
   state.maxRounds = n;
-  state.advStep = (state.advStep ?? 0) + 1;
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showAdvancedStep(ctx, state, telegramId);
+  await showAdvMenu(ctx, state, telegramId);
 }
 
 // Advanced: slippage preset
@@ -1012,10 +996,9 @@ export async function handleAdvSlippage(ctx: Context, pct: number): Promise<void
   if (!state) return;
 
   state.slippage = pct;
-  state.advStep = (state.advStep ?? 0) + 1;
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showAdvancedStep(ctx, state, telegramId);
+  await showAdvMenu(ctx, state, telegramId);
 }
 
 // Advanced: TP type selection
@@ -1037,7 +1020,7 @@ export async function handleAdvTpType(ctx: Context, type: string): Promise<void>
 
   await sendHtml(ctx,
     prompt,
-    Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'updown_list')]]),
+    Markup.inlineKeyboard([[Markup.button.callback('← Back', 'ud_add_advanced')]]),
   );
 }
 
@@ -1060,11 +1043,11 @@ export async function handleAdvSlType(ctx: Context, type: string): Promise<void>
 
   await sendHtml(ctx,
     prompt,
-    Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'updown_list')]]),
+    Markup.inlineKeyboard([[Markup.button.callback('← Back', 'ud_add_advanced')]]),
   );
 }
 
-// Advanced: Skip (use defaults and move to next)
+// Advanced: Skip — return to menu
 export async function handleAdvSkip(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
@@ -1072,10 +1055,165 @@ export async function handleAdvSkip(ctx: Context): Promise<void> {
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  state.advStep = (state.advStep ?? 0) + 1;
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showAdvancedStep(ctx, state, telegramId);
+  await showAdvMenu(ctx, state, telegramId);
+}
+
+// Advanced: back to review
+export async function handleAdvBackReview(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.step = 'review';
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showReviewStep(ctx, state);
+}
+
+// Advanced: edit a specific field from the menu
+export async function handleAdvEditField(ctx: Context, field: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.timestamp = Date.now();
+
+  switch (field) {
+    case 'order':
+      state.step = 'adv_order_type';
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `📋 <b>Order Type</b>\n\nSelect order execution type:`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('📈 Market', 'ud_adv_ot_market'),
+            Markup.button.callback('📊 Limit', 'ud_adv_ot_limit'),
+          ],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
+        ]),
+      );
+      break;
+
+    case 'rounds':
+      state.step = 'adv_max_rounds';
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `🔁 <b>Max Rounds</b>\n\nHow many rounds should this strategy run?\n\nEnter a number (1–100):`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('5', 'ud_adv_mr_5'),
+            Markup.button.callback('10', 'ud_adv_mr_10'),
+            Markup.button.callback('25', 'ud_adv_mr_25'),
+            Markup.button.callback('50', 'ud_adv_mr_50'),
+          ],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
+        ]),
+      );
+      break;
+
+    case 'slippage':
+      state.step = 'adv_slippage';
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `⚡ <b>Slippage</b>\n\nMax slippage tolerance (%).\n\nEnter a value (0.1–50):`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('2%', 'ud_adv_sl_2'),
+            Markup.button.callback('5%', 'ud_adv_sl_5'),
+            Markup.button.callback('10%', 'ud_adv_sl_10'),
+          ],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
+        ]),
+      );
+      break;
+
+    case 'tp':
+      state.step = 'adv_tp_type';
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `🏆 <b>Take Profit</b>\n\nSet TP condition:`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('📊 % from entry', 'ud_adv_tp_pct'),
+            Markup.button.callback('💲 Fixed price', 'ud_adv_tp_price'),
+          ],
+          [Markup.button.callback('❌ Clear TP', 'ud_adv_tp_clear')],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
+        ]),
+      );
+      break;
+
+    case 'sl':
+      state.step = 'adv_sl_type';
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `🛑 <b>Stop Loss</b>\n\nSet SL condition:`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('📊 % from entry', 'ud_adv_sl_pct'),
+            Markup.button.callback('💲 Fixed price', 'ud_adv_sl_price'),
+          ],
+          [Markup.button.callback('❌ Clear SL', 'ud_adv_sl_clear')],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
+        ]),
+      );
+      break;
+
+    case 'ttl':
+      state.step = 'adv_limit_ttl';
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `⏱ <b>Limit Order TTL</b>\n\nHow long should limit orders stay active (seconds)?`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('30s', 'ud_adv_ttl_30'),
+            Markup.button.callback('60s', 'ud_adv_ttl_60'),
+            Markup.button.callback('120s', 'ud_adv_ttl_120'),
+          ],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
+        ]),
+      );
+      break;
+
+    default:
+      await showAdvMenu(ctx, state, telegramId);
+  }
+}
+
+// Advanced: clear TP
+export async function handleAdvTpClear(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+  state.takeProfitPct = null;
+  state.takeProfitPrice = null;
+  state.tpType = undefined;
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showAdvMenu(ctx, state, telegramId);
+}
+
+// Advanced: clear SL
+export async function handleAdvSlClear(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+  state.stopLossPct = null;
+  state.stopLossPrice = null;
+  state.slType = undefined;
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showAdvMenu(ctx, state, telegramId);
 }
 
 // ─── Add Flow Text Input Handler ────────────────────────────────────────────
@@ -1087,6 +1225,31 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
   if (!state) return false;
 
   switch (state.step) {
+    case 'name': {
+      const name = text.trim();
+      if (!name || name.length < 1 || name.length > 32) {
+        await ctx.reply('Enter a name (1–32 characters).');
+        return true;
+      }
+      state.name = name;
+      state.step = 'coin';
+      state.timestamp = Date.now();
+      updownAddState.set(telegramId, state);
+      await sendHtml(ctx,
+        `₿ <b>Step 2/5: Select Coin</b>\n\n` +
+        `Which cryptocurrency do you want to trade?`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('₿ BTC', 'ud_add_coin_BTC'),
+            Markup.button.callback('Ξ ETH', 'ud_add_coin_ETH'),
+            Markup.button.callback('◎ SOL', 'ud_add_coin_SOL'),
+          ],
+          [Markup.button.callback('← Cancel', 'updown_list')],
+        ]),
+      );
+      return true;
+    }
+
     case 'amount': {
       const n = parseNumber(text);
       if (n == null || n < 1 || n > 10000) {
@@ -1101,12 +1264,22 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
 
     case 'triggers_time': {
       const parts = text.split(',').map(s => s.trim());
-      if (parts.length !== 2 || !parts[0].includes(':') || !parts[1].includes(':')) {
+      if (parts.length !== 2) {
         await ctx.reply('❌ Enter as mm:ss, mm:ss (e.g. 00:00, 14:55)');
         return true;
       }
-      state.timeRangeStart = parts[0];
-      state.timeRangeEnd = parts[1];
+      const startSec = parseTimeStr(parts[0]);
+      const endSec = parseTimeStr(parts[1]);
+      if (startSec == null || endSec == null) {
+        await ctx.reply('❌ Invalid time format. Use mm:ss (e.g. 00:00, 14:55)');
+        return true;
+      }
+      if (startSec >= endSec) {
+        await ctx.reply('❌ Start time must be before end time.');
+        return true;
+      }
+      state.timeRangeStart = parts[0].trim();
+      state.timeRangeEnd = parts[1].trim();
       state.timestamp = Date.now();
       await showTriggersUpPriceStep(ctx, state, telegramId);
       return true;
@@ -1143,6 +1316,10 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
         await ctx.reply('❌ Invalid numbers.');
         return true;
       }
+      if (min > max) {
+        await ctx.reply('❌ Min must be ≤ max.');
+        return true;
+      }
       state.priceChangeMin = min;
       state.priceChangeMax = max;
       state.step = 'review';
@@ -1170,7 +1347,7 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
             Markup.button.callback('60s', 'ud_adv_ttl_60'),
             Markup.button.callback('120s', 'ud_adv_ttl_120'),
           ],
-          [Markup.button.callback('← Cancel', 'updown_list')],
+          [Markup.button.callback('← Back', 'ud_add_advanced')],
         ]),
       );
       return true;
@@ -1183,10 +1360,9 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
         return true;
       }
       state.limitTtlSeconds = Math.round(n);
-      state.advStep = (state.advStep ?? 0) + 1;
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await showAdvancedStep(ctx, state, telegramId);
+      await showAdvMenu(ctx, state, telegramId);
       return true;
     }
 
@@ -1197,10 +1373,9 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
         return true;
       }
       state.maxRounds = Math.round(n);
-      state.advStep = (state.advStep ?? 0) + 1;
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await showAdvancedStep(ctx, state, telegramId);
+      await showAdvMenu(ctx, state, telegramId);
       return true;
     }
 
@@ -1211,10 +1386,9 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
         return true;
       }
       state.slippage = n;
-      state.advStep = (state.advStep ?? 0) + 1;
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await showAdvancedStep(ctx, state, telegramId);
+      await showAdvMenu(ctx, state, telegramId);
       return true;
     }
 
@@ -1233,10 +1407,9 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
         }
         state.takeProfitPrice = n;
       }
-      state.advStep = (state.advStep ?? 0) + 1;
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await showAdvancedStep(ctx, state, telegramId);
+      await showAdvMenu(ctx, state, telegramId);
       return true;
     }
 
@@ -1255,10 +1428,9 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
         }
         state.stopLossPrice = n;
       }
-      state.advStep = (state.advStep ?? 0) + 1;
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await showAdvancedStep(ctx, state, telegramId);
+      await showAdvMenu(ctx, state, telegramId);
       return true;
     }
   }
@@ -1275,10 +1447,21 @@ export async function handleAdvTtlPreset(ctx: Context, seconds: number): Promise
   if (!state) return;
 
   state.limitTtlSeconds = seconds;
-  state.advStep = (state.advStep ?? 0) + 1;
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showAdvancedStep(ctx, state, telegramId);
+  await showAdvMenu(ctx, state, telegramId);
+}
+
+// ─── Ownership Helper ────────────────────────────────────────────────────────
+
+/** Verify the current user owns the strategy. Returns the strategy or null. */
+async function verifyUdOwnership(ctx: Context, stratId: string) {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return null;
+  const user = await getUserByTelegramId(telegramId);
+  if (!user) return null;
+  const strat = await prisma.upDownStrategy.findFirst({ where: { id: stratId, userId: user.id } });
+  return strat;
 }
 
 // ─── Manage Page ────────────────────────────────────────────────────────────
@@ -1290,7 +1473,7 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
   if (!telegramId) return;
   updownEditState.delete(telegramId);
 
-  const strat = await prisma.upDownStrategy.findUnique({ where: { id: stratId } });
+  const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) {
     await ctx.answerCbQuery('Strategy not found').catch(() => {});
     return;
@@ -1300,7 +1483,7 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
   const dirStr = strat.direction === 'up' ? 'UP' : 'DOWN';
   const orderStr = strat.orderType === 'limit' && strat.limitPrice
     ? `Limit @ ${strat.limitPrice} (TTL: ${strat.limitTtlSeconds}s)` : 'Market';
-  const tfShort = strat.timeframe === '5-Minute' ? '5m' : strat.timeframe === '15-Minute' ? '15m' : '1h';
+  const tf = tfShort(strat.timeframe);
   const pcStr = strat.priceChangeMin > -9999 || strat.priceChangeMax < 9999
     ? `$${strat.priceChangeMin} – $${strat.priceChangeMax}` : 'Any';
   const tpStr = strat.takeProfitPct != null ? `${strat.takeProfitPct}%`
@@ -1309,7 +1492,7 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
     : strat.stopLossPrice != null ? `@${strat.stopLossPrice}` : '–';
 
   const lines = [
-    `<b>${esc(strat.label || 'AFK')}</b> · ${strat.coin} ${tfShort}`,
+    `<b>${esc(strat.label || 'AFK')}</b> · ${strat.coin} ${tf}`,
     `${statusStr}`,
     ``,
     `Direction: ${dirStr}`,
@@ -1362,19 +1545,23 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
 
 export async function handleManageStart(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyUdOwnership(ctx, stratId);
+  if (!strat) return;
   await prisma.upDownStrategy.update({ where: { id: stratId }, data: { isPaused: false } });
   await handleManage(ctx, stratId);
 }
 
 export async function handleManagePause(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyUdOwnership(ctx, stratId);
+  if (!strat) return;
   await prisma.upDownStrategy.update({ where: { id: stratId }, data: { isPaused: true } });
   await handleManage(ctx, stratId);
 }
 
 export async function handleManageToggleDirection(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.upDownStrategy.findUnique({ where: { id: stratId } });
+  const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
   await prisma.upDownStrategy.update({
     where: { id: stratId },
@@ -1385,7 +1572,7 @@ export async function handleManageToggleDirection(ctx: Context, stratId: string)
 
 export async function handleManageToggleNotify(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.upDownStrategy.findUnique({ where: { id: stratId } });
+  const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
   await prisma.upDownStrategy.update({
     where: { id: stratId },
@@ -1396,7 +1583,7 @@ export async function handleManageToggleNotify(ctx: Context, stratId: string): P
 
 export async function handleManageOrderType(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const strat = await prisma.upDownStrategy.findUnique({ where: { id: stratId } });
+  const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
 
   if (strat.orderType === 'market') {
@@ -1453,6 +1640,8 @@ export async function handleManageDelete(ctx: Context, stratId: string): Promise
 
 export async function handleManageDeleteExecute(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyUdOwnership(ctx, stratId);
+  if (!strat) return;
   await prisma.upDownStrategy.delete({ where: { id: stratId } }).catch(() => {});
   await handleUpDownList(ctx);
 }
@@ -1526,6 +1715,8 @@ export async function handleManageSlTypeFix(ctx: Context, stratId: string): Prom
 
 export async function handleManageTpClear(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyUdOwnership(ctx, stratId);
+  if (!strat) return;
   await prisma.upDownStrategy.update({
     where: { id: stratId },
     data: { takeProfitPct: null, takeProfitPrice: null },
@@ -1535,6 +1726,8 @@ export async function handleManageTpClear(ctx: Context, stratId: string): Promis
 
 export async function handleManageSlClear(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyUdOwnership(ctx, stratId);
+  if (!strat) return;
   await prisma.upDownStrategy.update({
     where: { id: stratId },
     data: { stopLossPct: null, stopLossPrice: null },
@@ -1551,6 +1744,14 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
   if (!state) return false;
 
   const { step, stratId } = state;
+
+  // Verify ownership before any update
+  const owned = await verifyUdOwnership(ctx, stratId);
+  if (!owned) {
+    updownEditState.delete(telegramId);
+    await ctx.reply('❌ Strategy not found.');
+    return true;
+  }
 
   switch (step) {
     case 'awaiting_amount': {
@@ -1579,8 +1780,18 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
 
     case 'awaiting_time_range': {
       const parts = text.split(',').map(s => s.trim());
-      if (parts.length !== 2 || !parts[0].includes(':') || !parts[1].includes(':')) {
+      if (parts.length !== 2) {
         await ctx.reply('❌ Enter as mm:ss, mm:ss (e.g. 00:00, 14:55)');
+        return true;
+      }
+      const startSec = parseTimeStr(parts[0]);
+      const endSec = parseTimeStr(parts[1]);
+      if (startSec == null || endSec == null) {
+        await ctx.reply('❌ Invalid time format. Use mm:ss (e.g. 00:00, 14:55)');
+        return true;
+      }
+      if (startSec >= endSec) {
+        await ctx.reply('❌ Start time must be before end time.');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -1623,6 +1834,10 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
       const max = parseNumber(parts[1]);
       if (min == null || max == null) {
         await ctx.reply('❌ Invalid numbers.');
+        return true;
+      }
+      if (min > max) {
+        await ctx.reply('❌ Min must be ≤ max.');
         return true;
       }
       await prisma.upDownStrategy.update({

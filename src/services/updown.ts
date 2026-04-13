@@ -112,6 +112,9 @@ export async function executeUpDownOrder(
     let orderResp: any;
 
     if (strategy.orderType === 'limit' && strategy.limitPrice != null) {
+      if (strategy.limitPrice <= 0) {
+        return { success: false, errorMsg: 'invalid limit price' };
+      }
       // Limit order
       const size = String(Math.floor((tradeAmount / strategy.limitPrice) * 100) / 100);
       orderResp = await predexonPlaceOrder(predexonUserId, {
@@ -226,7 +229,7 @@ export async function executeUpDownOrder(
 
 // ─── Limit Order TTL Management ─────────────────────────────────────────────
 
-const _limitTimers = new Map<string, NodeJS.Timeout>();
+const _limitTimers = new Map<string, { cancel: ReturnType<typeof setTimeout>; check: ReturnType<typeof setInterval> }>();
 
 function scheduleLimitTtl(
   predexonUserId: string,
@@ -234,24 +237,32 @@ function scheduleLimitTtl(
   ttlSeconds: number,
   strategyId: string,
 ): void {
+  function cleanup() {
+    const timers = _limitTimers.get(orderId);
+    if (timers) {
+      clearInterval(timers.check);
+      clearTimeout(timers.cancel);
+      _limitTimers.delete(orderId);
+    }
+  }
+
   // Check fill status every 3s
   const checkInterval = setInterval(async () => {
     try {
       const order = await getOrder(predexonUserId, orderId);
       if (order.status === 'filled') {
-        clearInterval(checkInterval);
-        clearTimeout(cancelTimer);
-        _limitTimers.delete(orderId);
+        cleanup();
         // Update DB
-        const price = parseFloat(order.price ?? '0') || 0;
+        const price = parseFloat(order.price ?? '0');
+        if (isNaN(price) || price <= 0) {
+          logger.warn(`[updown] Limit order ${orderId} filled with invalid price: ${order.price}`);
+        }
         await prisma.upDownTrade.updateMany({
           where: { orderId },
-          data: { status: 'filled', fillPrice: price },
+          data: { status: 'filled', fillPrice: isNaN(price) ? null : price },
         });
       } else if (order.status === 'cancelled' || order.status === 'expired') {
-        clearInterval(checkInterval);
-        clearTimeout(cancelTimer);
-        _limitTimers.delete(orderId);
+        cleanup();
         await prisma.upDownTrade.updateMany({
           where: { orderId },
           data: { status: 'cancelled' },
@@ -262,8 +273,7 @@ function scheduleLimitTtl(
 
   // Cancel after TTL
   const cancelTimer = setTimeout(async () => {
-    clearInterval(checkInterval);
-    _limitTimers.delete(orderId);
+    cleanup();
     try {
       await cancelOrder(predexonUserId, orderId);
       await prisma.upDownTrade.updateMany({
@@ -275,7 +285,7 @@ function scheduleLimitTtl(
     }
   }, ttlSeconds * 1000);
 
-  _limitTimers.set(orderId, cancelTimer);
+  _limitTimers.set(orderId, { cancel: cancelTimer, check: checkInterval });
 }
 
 // ─── TP/SL Check ────────────────────────────────────────────────────────────
@@ -306,7 +316,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
   }
 
   for (const trade of trades) {
-    if (!trade.strategy || !trade.fillPrice) continue;
+    if (!trade.strategy || trade.fillPrice == null) continue;
     const strat = trade.strategy;
 
     // Check if any TP/SL is configured
@@ -330,43 +340,60 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
         if (currentPrice >= target) tpTriggered = true;
       }
 
-      // SL check
+      // SL check (independent of TP — both can trigger, TP takes priority)
       let slTriggered = false;
-      if (!tpTriggered) {
-        if (strat.stopLossPrice != null && currentPrice <= strat.stopLossPrice) {
-          slTriggered = true;
-        } else if (strat.stopLossPct != null) {
-          const target = trade.fillPrice - (trade.fillPrice * strat.stopLossPct / 100);
-          if (currentPrice <= target) slTriggered = true;
-        }
+      if (strat.stopLossPrice != null && currentPrice <= strat.stopLossPrice) {
+        slTriggered = true;
+      } else if (strat.stopLossPct != null) {
+        const target = trade.fillPrice - (trade.fillPrice * strat.stopLossPct / 100);
+        if (currentPrice <= target) slTriggered = true;
       }
 
       if (!tpTriggered && !slTriggered) continue;
 
+      if (tpTriggered && slTriggered) {
+        logger.info(`[updown] Trade ${trade.id}: both TP and SL triggered at price ${currentPrice}, using TP`);
+      }
+
       const tpSlStatus = tpTriggered ? 'tp_triggered' : 'sl_triggered';
 
       // Place SELL order
-      if (trade.user.predexonUserId) {
-        try {
-          const sellResp = await predexonPlaceOrder(trade.user.predexonUserId, {
-            venue: 'polymarket',
-            tokenId: trade.tokenId,
-            side: 'sell',
-            type: 'market',
-            size: String(Math.floor((trade.amount / trade.fillPrice) * 100) / 100),
-          });
+      if (!trade.user.predexonUserId) {
+        logger.warn(`[updown] TP/SL: no predexonUserId for trade ${trade.id}, marking status only`);
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { tpSlStatus: `${tpSlStatus}_no_sell` },
+        });
+        continue;
+      }
 
-          await prisma.upDownTrade.update({
-            where: { id: trade.id },
-            data: {
-              tpSlStatus,
-              tpSlOrderId: sellResp.orderId || null,
-            },
-          });
-        } catch (err: any) {
-          logger.warn(`[updown] TP/SL sell failed for trade ${trade.id}: ${err?.message}`);
+      try {
+        const sellSize = trade.fillPrice > 0
+          ? String(Math.floor((trade.amount / trade.fillPrice) * 100) / 100)
+          : '0';
+        if (sellSize === '0') {
+          logger.warn(`[updown] TP/SL: invalid sell size for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
           continue;
         }
+
+        const sellResp = await predexonPlaceOrder(trade.user.predexonUserId, {
+          venue: 'polymarket',
+          tokenId: trade.tokenId,
+          side: 'sell',
+          type: 'market',
+          size: sellSize,
+        });
+
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: {
+            tpSlStatus,
+            tpSlOrderId: sellResp.orderId || null,
+          },
+        });
+      } catch (err: any) {
+        logger.warn(`[updown] TP/SL sell failed for trade ${trade.id}: ${err?.message}`);
+        continue;
       }
 
       // Notification
@@ -425,9 +452,10 @@ export function stopUpDownMonitor(): void {
     clearInterval(tpSlInterval);
     tpSlInterval = null;
   }
-  // Clear limit timers
-  for (const timer of _limitTimers.values()) {
-    clearTimeout(timer);
+  // Clear limit timers (both check intervals and cancel timeouts)
+  for (const timers of _limitTimers.values()) {
+    clearInterval(timers.check);
+    clearTimeout(timers.cancel);
   }
   _limitTimers.clear();
   logger.info('[updown] Up-down monitor stopped');

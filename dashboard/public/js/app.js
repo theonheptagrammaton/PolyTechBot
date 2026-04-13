@@ -4,6 +4,13 @@ let currentTab = 'overview';
 let currentPeriod = '30d';
 let feedInterval = null;
 
+// Users page state
+let usersPage = 1;
+let usersSearch = '';
+let usersSort = 'createdAt';
+let usersOrder = 'desc';
+let expandedUserId = null;
+
 // --- Init ---
 document.addEventListener('DOMContentLoaded', () => {
   initClock();
@@ -102,6 +109,13 @@ function navigateTo(tab) {
   // Clear feed polling
   if (feedInterval) { clearInterval(feedInterval); feedInterval = null; }
 
+  // Reset users state on tab switch
+  if (tab !== 'users') {
+    usersPage = 1;
+    usersSearch = '';
+    expandedUserId = null;
+  }
+
   // Render
   loadTab(tab);
 }
@@ -128,6 +142,7 @@ async function loadTab(tab) {
       case 'users': await renderUsers(content); break;
       case 'trades': await renderTrades(content); break;
       case 'copytrade': await renderCopyTrade(content); break;
+      case 'autostrategies': await renderAutoStrategies(content); break;
       case 'financials': await renderFinancials(content); break;
       default: content.innerHTML = '<p>Unknown tab</p>';
     }
@@ -145,17 +160,19 @@ async function renderOverview(el) {
   ]);
 
   el.innerHTML = `
-    <div class="kpi-grid">
+    <div class="kpi-grid kpi-grid-5">
       ${kpiCard('TOTAL USERS', data.totalUsers)}
       ${kpiCard('TOTAL TRADES', data.totalTrades)}
       ${kpiCard('TOTAL VOLUME', data.totalVolume, 'currency')}
       ${kpiCard('COMMISSION', data.totalCommission, 'currency')}
       ${kpiCard('ACTIVE SUBS', data.activeSubs)}
     </div>
-    <div class="kpi-grid kpi-grid-3" style="margin-top: 16px;">
+    <div class="kpi-grid kpi-grid-5" style="margin-top: 16px;">
       ${kpiCard('FILLED', data.filledTrades)}
       ${kpiCard('FAILED', data.failedTrades)}
       ${kpiCard('SKIPPED', data.skippedTrades)}
+      ${kpiCard('BOND STRATS', data.activeBondStrats)}
+      ${kpiCard('UPDOWN STRATS', data.activeUpdownStrats)}
     </div>
     <div class="section">
       <h3 class="section-title">LIVE FEED</h3>
@@ -203,14 +220,19 @@ function renderFeedTable(trades) {
 
 // --- Users ---
 async function renderUsers(el) {
-  const data = await API.fetch('/api/stats/users', { period: currentPeriod });
+  const [statsData, listData] = await Promise.all([
+    API.fetch('/api/stats/users', { period: currentPeriod }),
+    API.fetch('/api/stats/users/list', { page: usersPage, limit: 25, search: usersSearch, sort: usersSort, order: usersOrder }),
+  ]);
+
+  const totalPages = Math.ceil(listData.total / listData.limit) || 1;
 
   el.innerHTML = `
     <div class="kpi-grid kpi-grid-4">
-      ${kpiCard('TOTAL USERS', data.kpis.totalUsers)}
-      ${kpiCard('NEW TODAY', data.kpis.newToday)}
-      ${kpiCard('NEW THIS WEEK', data.kpis.newWeek)}
-      ${kpiCard('ACTIVE IN PERIOD', data.kpis.activeInPeriod)}
+      ${kpiCard('TOTAL USERS', statsData.kpis.totalUsers)}
+      ${kpiCard('NEW TODAY', statsData.kpis.newToday)}
+      ${kpiCard('NEW THIS WEEK', statsData.kpis.newWeek)}
+      ${kpiCard('ACTIVE IN PERIOD', statsData.kpis.activeInPeriod)}
     </div>
     <div class="chart-grid">
       <div class="chart-box">
@@ -222,19 +244,262 @@ async function renderUsers(el) {
         <div class="chart-container"><canvas id="chart-cumulative-users"></canvas></div>
       </div>
     </div>
+    <div class="section">
+      <h3 class="section-title">USER LIST</h3>
+      <div class="search-bar">
+        <input type="text" id="user-search" placeholder="Search username, name, or telegram ID..." value="${escapeHtml(usersSearch)}">
+      </div>
+      <div id="users-table-container">
+        ${renderUsersTable(listData.users)}
+      </div>
+      <div class="pagination">
+        <button id="users-prev" ${usersPage <= 1 ? 'disabled' : ''}>PREV</button>
+        <span>PAGE ${usersPage} OF ${totalPages}</span>
+        <button id="users-next" ${usersPage >= totalPages ? 'disabled' : ''}>NEXT</button>
+      </div>
+    </div>
+    <div id="user-detail-container"></div>
   `;
 
-  if (data.newUsers.length) {
+  // Charts
+  if (statsData.newUsers.length) {
     createBarChart('chart-new-users',
-      chartLabels(data.newUsers, currentPeriod),
-      [{ label: 'New Users', data: data.newUsers.map(d => d.count) }]
+      chartLabels(statsData.newUsers, currentPeriod),
+      [{ label: 'New Users', data: statsData.newUsers.map(d => d.count) }]
     );
   }
-  if (data.cumulative.length) {
+  if (statsData.cumulative.length) {
     createLineChart('chart-cumulative-users',
-      chartLabels(data.cumulative, currentPeriod),
-      [{ label: 'Total Users', data: data.cumulative.map(d => Number(d.cumulative)) }]
+      chartLabels(statsData.cumulative, currentPeriod),
+      [{ label: 'Total Users', data: statsData.cumulative.map(d => Number(d.cumulative)) }]
     );
+  }
+
+  // Search handler
+  let searchTimeout;
+  document.getElementById('user-search').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      usersSearch = e.target.value.trim();
+      usersPage = 1;
+      reloadUsersTable();
+    }, 400);
+  });
+
+  // Pagination
+  document.getElementById('users-prev').addEventListener('click', () => {
+    if (usersPage > 1) { usersPage--; reloadUsersTable(); }
+  });
+  document.getElementById('users-next').addEventListener('click', () => {
+    if (usersPage < totalPages) { usersPage++; reloadUsersTable(); }
+  });
+}
+
+async function reloadUsersTable() {
+  const container = document.getElementById('users-table-container');
+  if (!container) return;
+  container.innerHTML = '<div class="loading">Loading...</div>';
+
+  try {
+    const listData = await API.fetch('/api/stats/users/list', { page: usersPage, limit: 25, search: usersSearch, sort: usersSort, order: usersOrder });
+    const totalPages = Math.ceil(listData.total / listData.limit) || 1;
+
+    container.innerHTML = renderUsersTable(listData.users);
+
+    // Update pagination
+    const prevBtn = document.getElementById('users-prev');
+    const nextBtn = document.getElementById('users-next');
+    if (prevBtn) prevBtn.disabled = usersPage <= 1;
+    if (nextBtn) nextBtn.disabled = usersPage >= totalPages;
+    const pageSpan = document.querySelector('.pagination span');
+    if (pageSpan) pageSpan.textContent = `PAGE ${usersPage} OF ${totalPages}`;
+
+    // Rebind row click handlers
+    bindUserRowClicks();
+  } catch (err) {
+    container.innerHTML = '<div class="error">Failed to load users</div>';
+    console.error(err);
+  }
+}
+
+function renderUsersTable(users) {
+  if (!users || !users.length) return '<p class="empty">No users found</p>';
+
+  const startIdx = (usersPage - 1) * 25;
+  return `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>#</th><th>USER</th><th>TELEGRAM ID</th><th>REGISTERED</th>
+          <th>REFERRER</th><th>REF CODE</th><th>REFERRALS</th><th>REF EARNED</th>
+          <th>CASHBACK</th><th>STRATEGIES</th><th>VOLUME</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${users.map((u, i) => {
+          const stratCount = (u.copySubCount || 0) + (u.bondStratCount || 0) + (u.updownStratCount || 0);
+          return `
+            <tr class="clickable-row" data-user-id="${u.id}">
+              <td>${startIdx + i + 1}</td>
+              <td>${escapeHtml(u.username || u.firstName || '-')}</td>
+              <td class="mono">${u.telegramId}</td>
+              <td>${formatDate(u.createdAt)}</td>
+              <td>${u.referredBy || '-'}</td>
+              <td class="mono">${u.referralCode || '-'}</td>
+              <td>${u.referralCount}</td>
+              <td>${formatCurrency(u.referralEarnedTotal)}</td>
+              <td>${formatCurrency(u.cashbackEarnedTotal)}</td>
+              <td><span class="badge">${stratCount}</span></td>
+              <td>${formatCurrency(u.totalTradeVolume)}</td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function bindUserRowClicks() {
+  document.querySelectorAll('.clickable-row[data-user-id]').forEach(row => {
+    row.addEventListener('click', () => {
+      const userId = row.dataset.userId;
+      if (expandedUserId === userId) {
+        expandedUserId = null;
+        const detailContainer = document.getElementById('user-detail-container');
+        if (detailContainer) detailContainer.innerHTML = '';
+      } else {
+        expandedUserId = userId;
+        loadUserDetail(userId);
+      }
+    });
+  });
+}
+
+// Bind initial rows after renderUsers completes
+document.addEventListener('DOMContentLoaded', () => {
+  // Use MutationObserver to bind clicks after table renders
+  const observer = new MutationObserver(() => {
+    bindUserRowClicks();
+  });
+  const content = document.getElementById('content');
+  if (content) observer.observe(content, { childList: true, subtree: true });
+});
+
+async function loadUserDetail(userId) {
+  const container = document.getElementById('user-detail-container');
+  if (!container) return;
+  container.innerHTML = '<div class="loading">Loading user detail...</div>';
+
+  try {
+    const u = await API.fetch(`/api/stats/users/detail/${userId}`);
+
+    container.innerHTML = `
+      <div class="section" style="margin-top: 16px;">
+        <h3 class="section-title">USER DETAIL: ${escapeHtml(u.username || u.firstName || u.telegramId)}</h3>
+        <div class="user-detail-grid">
+          <div class="user-detail-field"><div class="label">TELEGRAM ID</div><div class="value">${u.telegramId}</div></div>
+          <div class="user-detail-field"><div class="label">NAME</div><div class="value">${escapeHtml((u.firstName || '') + ' ' + (u.lastName || '')).trim() || '-'}</div></div>
+          <div class="user-detail-field"><div class="label">USERNAME</div><div class="value">${u.username ? '@' + escapeHtml(u.username) : '-'}</div></div>
+          <div class="user-detail-field"><div class="label">REGISTERED</div><div class="value">${formatDateTime(u.createdAt)}</div></div>
+          <div class="user-detail-field"><div class="label">REFERRAL CODE</div><div class="value">${u.referralCode || '-'}</div></div>
+          <div class="user-detail-field"><div class="label">REFERRED BY</div><div class="value">${u.referredBy ? escapeHtml(u.referredBy.username || u.referredBy.firstName || '-') : '-'}</div></div>
+          <div class="user-detail-field"><div class="label">REFERRAL EARNED</div><div class="value">${formatCurrency(u.referralEarnedTotal)}</div></div>
+          <div class="user-detail-field"><div class="label">CASHBACK EARNED</div><div class="value">${formatCurrency(u.cashbackEarnedTotal)}</div></div>
+          <div class="user-detail-field"><div class="label">DEFAULT TRADE</div><div class="value">$${u.defaultTradeAmount}</div></div>
+          <div class="user-detail-field"><div class="label">SLIPPAGE</div><div class="value">${u.slippageTolerance}%</div></div>
+          <div class="user-detail-field"><div class="label">TRADING</div><div class="value">${u.tradingEnabled ? 'ENABLED' : 'DISABLED'}</div></div>
+          <div class="user-detail-field"><div class="label">STATUS</div><div class="value">${u.isActive ? 'ACTIVE' : 'INACTIVE'}${u.isAdmin ? ' / ADMIN' : ''}</div></div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 16px;">
+          <div class="user-detail-field"><div class="label">COPY SUBS</div><div class="value">${u._count.copySubscriptions}</div></div>
+          <div class="user-detail-field"><div class="label">COPIED TRADES</div><div class="value">${u._count.copiedTrades}</div></div>
+          <div class="user-detail-field"><div class="label">BOND STRATS</div><div class="value">${u._count.bondStrategies}</div></div>
+          <div class="user-detail-field"><div class="label">BOND TRADES</div><div class="value">${u._count.bondTrades}</div></div>
+          <div class="user-detail-field"><div class="label">UPDOWN STRATS</div><div class="value">${u._count.updownStrategies}</div></div>
+          <div class="user-detail-field"><div class="label">UPDOWN TRADES</div><div class="value">${u._count.updownTrades}</div></div>
+          <div class="user-detail-field"><div class="label">REFERRALS</div><div class="value">${u._count.referrals}</div></div>
+        </div>
+
+        ${u.referrals && u.referrals.length > 0 ? `
+          <h3 class="section-title" style="margin-top: 20px;">REFERRAL LIST</h3>
+          <table class="data-table">
+            <thead><tr><th>USER</th><th>TELEGRAM ID</th><th>REGISTERED</th></tr></thead>
+            <tbody>
+              ${u.referrals.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.username || r.firstName || '-')}</td>
+                  <td class="mono">${r.telegramId}</td>
+                  <td>${formatDate(r.createdAt)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : ''}
+
+        ${u.recentCopied && u.recentCopied.length > 0 ? `
+          <h3 class="section-title" style="margin-top: 20px;">RECENT COPIED TRADES</h3>
+          <table class="data-table">
+            <thead><tr><th>TIME</th><th>SIDE</th><th>OUTCOME</th><th>SIZE</th><th>PRICE</th><th>STATUS</th><th>TRADER</th></tr></thead>
+            <tbody>
+              ${u.recentCopied.map(t => `
+                <tr>
+                  <td>${timeAgo(t.createdAt)}</td>
+                  <td><span class="tag tag-${t.side.toLowerCase()}">${t.side}</span></td>
+                  <td>${t.outcome}</td>
+                  <td>${formatCurrency(t.copiedSize)}</td>
+                  <td>${Number(t.price).toFixed(2)}</td>
+                  <td><span class="status status-${t.status}">${t.status}</span></td>
+                  <td class="mono">${shortenAddress(t.traderAddress)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : ''}
+
+        ${u.recentBond && u.recentBond.length > 0 ? `
+          <h3 class="section-title" style="margin-top: 20px;">RECENT BOND TRADES</h3>
+          <table class="data-table">
+            <thead><tr><th>TIME</th><th>QUESTION</th><th>OUTCOME</th><th>AMOUNT</th><th>PROB</th><th>STATUS</th></tr></thead>
+            <tbody>
+              ${u.recentBond.map(t => `
+                <tr>
+                  <td>${timeAgo(t.createdAt)}</td>
+                  <td>${escapeHtml(truncateText(t.question, 40))}</td>
+                  <td>${t.outcome}</td>
+                  <td>${formatCurrency(t.amount)}</td>
+                  <td>${Number(t.probability).toFixed(1)}%</td>
+                  <td><span class="status status-${t.status}">${t.status}</span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : ''}
+
+        ${u.recentUpdown && u.recentUpdown.length > 0 ? `
+          <h3 class="section-title" style="margin-top: 20px;">RECENT UPDOWN TRADES</h3>
+          <table class="data-table">
+            <thead><tr><th>TIME</th><th>COIN</th><th>DIR</th><th>AMOUNT</th><th>TRIGGER</th><th>FILL</th><th>STATUS</th></tr></thead>
+            <tbody>
+              ${u.recentUpdown.map(t => `
+                <tr>
+                  <td>${timeAgo(t.createdAt)}</td>
+                  <td>${t.coin}</td>
+                  <td><span class="tag">${t.direction.toUpperCase()}</span></td>
+                  <td>${formatCurrency(t.amount)}</td>
+                  <td>${Number(t.triggerPrice).toFixed(4)}</td>
+                  <td>${t.fillPrice ? Number(t.fillPrice).toFixed(4) : '-'}</td>
+                  <td><span class="status status-${t.status}">${t.status}</span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : ''}
+      </div>
+    `;
+  } catch (err) {
+    container.innerHTML = '<div class="error">Failed to load user detail</div>';
+    console.error(err);
   }
 }
 
@@ -364,6 +629,82 @@ function renderWalletsTable(wallets) {
   `;
 }
 
+// --- Auto Strategies ---
+async function renderAutoStrategies(el) {
+  const data = await API.fetch('/api/stats/auto-strategies', { period: currentPeriod });
+  const k = data.kpis;
+
+  el.innerHTML = `
+    <div class="kpi-grid kpi-grid-4">
+      ${kpiCard('ACTIVE BOND', k.activeBond)}
+      ${kpiCard('PAUSED BOND', k.pausedBond)}
+      ${kpiCard('BOND TRADES', k.totalBondTrades)}
+      ${kpiCard('BOND FILL RATE', k.bondFillRate + '%')}
+    </div>
+    <div class="kpi-grid kpi-grid-4" style="margin-top: 16px;">
+      ${kpiCard('ACTIVE UPDOWN', k.activeUpdown)}
+      ${kpiCard('PAUSED UPDOWN', k.pausedUpdown)}
+      ${kpiCard('UPDOWN TRADES', k.totalUpdownTrades)}
+      ${kpiCard('UPDOWN FILL RATE', k.updownFillRate + '%')}
+    </div>
+    <div class="chart-grid">
+      <div class="chart-box">
+        <h3 class="section-title">DAILY BOND TRADES</h3>
+        <div class="chart-container"><canvas id="chart-daily-bond"></canvas></div>
+      </div>
+      <div class="chart-box">
+        <h3 class="section-title">DAILY UPDOWN TRADES</h3>
+        <div class="chart-container"><canvas id="chart-daily-updown"></canvas></div>
+      </div>
+    </div>
+    <div class="section">
+      <h3 class="section-title">TOP USERS BY STRATEGY COUNT</h3>
+      ${renderTopStrategyUsers(data.topUsers)}
+    </div>
+  `;
+
+  if (data.dailyBondTrades.length) {
+    createBarChart('chart-daily-bond',
+      chartLabels(data.dailyBondTrades, currentPeriod),
+      [
+        { label: 'Filled', data: data.dailyBondTrades.map(d => d.filled) },
+        { label: 'Failed', data: data.dailyBondTrades.map(d => d.failed) },
+      ],
+      true
+    );
+  }
+  if (data.dailyUpdownTrades.length) {
+    createBarChart('chart-daily-updown',
+      chartLabels(data.dailyUpdownTrades, currentPeriod),
+      [
+        { label: 'Filled', data: data.dailyUpdownTrades.map(d => d.filled) },
+        { label: 'Failed', data: data.dailyUpdownTrades.map(d => d.failed) },
+      ],
+      true
+    );
+  }
+}
+
+function renderTopStrategyUsers(users) {
+  if (!users || !users.length) return '<p class="empty">No active strategies</p>';
+  return `
+    <table class="data-table">
+      <thead><tr><th>#</th><th>USER</th><th>BOND</th><th>UPDOWN</th><th>TOTAL</th></tr></thead>
+      <tbody>
+        ${users.map((u, i) => `
+          <tr>
+            <td>${i + 1}</td>
+            <td>${escapeHtml(u.username || u.firstName || '-')}</td>
+            <td>${u.bond_count}</td>
+            <td>${u.updown_count}</td>
+            <td>${u.bond_count + u.updown_count}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
 // --- Financials ---
 async function renderFinancials(el) {
   const data = await API.fetch('/api/stats/financials', { period: currentPeriod });
@@ -443,4 +784,15 @@ function kpiCard(label, value, format) {
       <div class="kpi-value">${display}</div>
     </div>
   `;
+}
+
+// --- Utility ---
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function truncateText(str, maxLen) {
+  if (!str) return '';
+  return str.length > maxLen ? str.slice(0, maxLen) + '...' : str;
 }

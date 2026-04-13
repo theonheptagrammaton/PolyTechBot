@@ -175,6 +175,10 @@ import {
   handleAdvSlType as handleUpDownAdvSlType,
   handleAdvSkip as handleUpDownAdvSkip,
   handleAdvTtlPreset as handleUpDownAdvTtlPreset,
+  handleAdvBackReview as handleUpDownAdvBackReview,
+  handleAdvEditField as handleUpDownAdvEditField,
+  handleAdvTpClear as handleUpDownAdvTpClear,
+  handleAdvSlClear as handleUpDownAdvSlClear,
   handleAddInput as handleUpDownAddInput,
   handleEditInput as handleUpDownEditInput,
   handleManage as handleUpDownManage,
@@ -226,6 +230,8 @@ import {
   handleAddAdvanced,
   handleAddAdvSkip,
   handleAddSidePreset,
+  handleAdvBackReview,
+  handleAdvEdit,
   handleManageStart as handleBondManageStart,
   handleManagePause as handleBondManagePause,
   handleManageToggleSports,
@@ -1037,6 +1043,10 @@ export class TelegramBot {
     this.bot.action('bond_add_side_yes', async (ctx) => handleAddSidePreset(ctx, 'yes'));
     this.bot.action('bond_add_side_no', async (ctx) => handleAddSidePreset(ctx, 'no'));
 
+    // Bond add flow: advanced menu
+    this.bot.action('bond_adv_back_review', handleAdvBackReview);
+    this.bot.action(/^bond_adv_edit_(.+)$/, async (ctx) => handleAdvEdit(ctx, ctx.match[1]));
+
     // Bond manage page actions
     this.bot.action(/^bpm_start_(.+)$/, async (ctx) => handleBondManageStart(ctx, ctx.match[1]));
     this.bot.action(/^bpm_pause_(.+)$/, async (ctx) => handleBondManagePause(ctx, ctx.match[1]));
@@ -1112,6 +1122,10 @@ export class TelegramBot {
     this.bot.action('ud_add_confirm', handleUpDownConfirmAdd);
     this.bot.action('ud_add_advanced', handleUpDownAddAdvanced);
     this.bot.action('ud_adv_skip', handleUpDownAdvSkip);
+    this.bot.action('ud_adv_back_review', handleUpDownAdvBackReview);
+    this.bot.action(/^ud_adv_edit_(.+)$/, async (ctx) => handleUpDownAdvEditField(ctx, ctx.match[1]));
+    this.bot.action('ud_adv_tp_clear', handleUpDownAdvTpClear);
+    this.bot.action('ud_adv_sl_clear', handleUpDownAdvSlClear);
 
     // Up-Down: remove single
     this.bot.action(/^ud_rm_(.+)$/, async (ctx) => {
