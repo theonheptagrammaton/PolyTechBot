@@ -29,7 +29,7 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
   const bondTotal = bondStrategies.length;
   let bondStatus: string;
   if (bondTotal === 0) {
-    bondStatus = '⚪ Not configured';
+    bondStatus = '💤 No strategies yet';
   } else if (bondRunning > 0) {
     bondStatus = `🟢 ${bondRunning}/${bondTotal} running`;
   } else {
@@ -44,28 +44,39 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
   const updownTotal = updownStrategies.length;
   let updownStatus: string;
   if (updownTotal === 0) {
-    updownStatus = '⚪ Not configured';
+    updownStatus = '💤 No strategies yet';
   } else if (updownRunning > 0) {
     updownStatus = `🟢 ${updownRunning}/${updownTotal} running`;
   } else {
     updownStatus = `🔴 ${updownTotal} paused`;
   }
 
+  const totalStrats = bondTotal + updownTotal;
+  const totalRunning = bondRunning + updownRunning;
+
   const lines = [
-    `🤖 <b>Your Strategies</b>`,
-    `💰 Wallet: Main Wallet (${shortWallet})`,
+    `🧠 <b>Auto Strategies</b>`,
     ``,
-    `🎯 <b>Bonding</b> — ${bondStatus}`,
+    `👛 <code>${shortWallet}</code>`,
+    `⚡ ${totalRunning}/${totalStrats} active strategies`,
     ``,
-    `📈 <b>Up-Down</b> — ${updownStatus}`,
+    `━━━━━━━━━━━━━━━━━━━━`,
     ``,
-    `Select a strategy to manage:`,
+    `🎯 <b>Bonding</b>`,
+    `└ ${bondStatus}`,
+    ``,
+    `📊 <b>Up-Down</b>`,
+    `└ ${updownStatus}`,
+    ``,
+    `━━━━━━━━━━━━━━━━━━━━`,
   ];
 
   const buttons = [
-    [Markup.button.callback('🎯 Bonding', 'bond_list')],
-    [Markup.button.callback('📈 Up-Down', 'updown_list')],
-    [Markup.button.callback('← Main Menu', 'back_to_menu')],
+    [
+      Markup.button.callback('🎯 Bonding', 'bond_list'),
+      Markup.button.callback('📊 Up-Down', 'updown_list'),
+    ],
+    [Markup.button.callback('🔙 Main Menu', 'back_to_menu')],
   ];
 
   await sendPage(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
