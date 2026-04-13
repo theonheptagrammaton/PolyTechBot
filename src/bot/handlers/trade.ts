@@ -171,11 +171,18 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
           timestamp: Date.now(),
         });
 
+        // Fetch balance for display
+        const user = await getUserByTelegramId(telegramId);
+        const balanceStr = user
+          ? await getBalance(user.encryptedPrivateKey, user.encryptedApiKey, user.encryptedApiSecret, user.encryptedPassphrase, user.predexonUserId ?? undefined).catch(() => '0.00')
+          : '0.00';
+
         const priceDisplay = (price * 100).toFixed(1);
         await ctx.reply(
           `💵 *Enter Trade Amount*\n\n` +
           `Market: ${market.question}\n` +
-          `Outcome: ${outcome.toUpperCase()} (${priceDisplay}¢)\n\n` +
+          `Outcome: ${outcome.toUpperCase()} (${priceDisplay}¢)\n` +
+          `💼 Balance: *$${balanceStr}*\n\n` +
           `Please send the amount in USD.\n` +
           `Example: \`50\`\n\n` +
           `⚠️ Min: $1 · Max: $10,000`,
@@ -326,10 +333,17 @@ export async function handleOutcomeSelection(ctx: Context, data: string): Promis
 
     const priceDisplay = (price * 100).toFixed(1);
 
+    // Fetch balance for display
+    const user = await getUserByTelegramId(telegramId);
+    const balanceStr = user
+      ? await getBalance(user.encryptedPrivateKey, user.encryptedApiKey, user.encryptedApiSecret, user.encryptedPassphrase, user.predexonUserId ?? undefined).catch(() => '0.00')
+      : '0.00';
+
     const message =
       '💵 *Enter Trade Amount*\n\n' +
       `Market: ${market.question}\n` +
-      `Outcome: ${outcome.toUpperCase()} (${priceDisplay}¢)\n\n` +
+      `Outcome: ${outcome.toUpperCase()} (${priceDisplay}¢)\n` +
+      `💼 Balance: *$${balanceStr}*\n\n` +
       'Please send the amount you want to trade in USD.\n' +
       'Example: `50` or `150`\n\n' +
       '⚠️ Min: $1 · Max: $10,000';
@@ -1312,11 +1326,18 @@ export async function handleLimitTradeInput(ctx: Context, text: string): Promise
     state.timestamp = Date.now();
     limitTradeState.set(telegramId, state);
 
+    // Fetch balance for display
+    const user = await getUserByTelegramId(telegramId);
+    const balanceStr = user
+      ? await getBalance(user.encryptedPrivateKey, user.encryptedApiKey, user.encryptedApiSecret, user.encryptedPassphrase, user.predexonUserId ?? undefined).catch(() => '0.00')
+      : '0.00';
+
     await ctx.reply(
       `📋 *Limit Order — BUY ${state.outcome.toUpperCase()} @ ${cents}¢*\n\n` +
       `Market: ${state.marketQuestion}\n\n` +
       `📊 Current price: *${currentCents}¢*\n` +
       `🎯 Your limit: *${cents}¢*\n` +
+      `💼 Balance: *$${balanceStr}*\n` +
       aboveMarketNote + `\n` +
       `Enter USD amount to spend:\n` +
       `⚠️ Min: $1 · Max: $10,000`,

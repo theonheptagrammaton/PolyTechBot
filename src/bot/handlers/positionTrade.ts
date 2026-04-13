@@ -2,7 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { config } from '../../config';
-import { getActivePositions, ActivePosition, fetchTxHashForOrder } from '../../services/portfolio';
+import { getActivePositions, getBalance, ActivePosition, fetchTxHashForOrder } from '../../services/portfolio';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
 import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
@@ -567,13 +567,20 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
       timestamp: Date.now(),
     });
 
+    // Fetch balance for display
+    const user = await getUserByTelegramId(telegramId);
+    const balanceStr = user
+      ? await getBalance(user.encryptedPrivateKey, user.encryptedApiKey, user.encryptedApiSecret, user.encryptedPassphrase, user.predexonUserId ?? undefined).catch(() => '0.00')
+      : '0.00';
+
     const curCents = (pos.curPrice * 100).toFixed(1);
     const estimatedShares = (10 / pos.curPrice).toFixed(1);
     const msg =
       `📈 *Buy More*\n\n` +
       `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
       `You already hold: *${pos.size.toFixed(4)} shares*\n` +
-      `Current price: *${curCents}¢*\n\n` +
+      `Current price: *${curCents}¢*\n` +
+      `💼 Balance: *$${balanceStr}*\n\n` +
       `*Enter USDC amount to spend:*\n` +
       `Example: \`10\` → buys ~${estimatedShares} shares at ${curCents}¢`;
 

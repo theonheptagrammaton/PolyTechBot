@@ -7,7 +7,7 @@ import { logger } from '../../utils/logger';
 import { maskSensitiveData } from '../../utils/encryption';
 import { mainMenuKeyboard, buildMainMenuText } from './markets';
 import { ce, EMOJI } from '../../utils/customEmoji';
-import { getMainMenuStats } from '../../services/portfolio';
+import { getMainMenuStats, getBalance } from '../../services/portfolio';
 import { config } from '../../config';
 
 const MENU_IMAGE = path.join(__dirname, '../img/opening.jpg');
@@ -307,12 +307,18 @@ export async function handleStart(ctx: Context): Promise<void> {
             ]),
           });
         } else {
+          // Fetch balance for display
+          const balanceStr = await getBalance(
+            user.encryptedPrivateKey, user.encryptedApiKey, user.encryptedApiSecret, user.encryptedPassphrase, user.predexonUserId ?? undefined
+          ).catch(() => '0.00');
+
           const estimatedShares = (10 / pos.curPrice).toFixed(1);
           const msg =
             `📈 *Buy More*\n\n` +
             `*${pos.outcome}* — ${truncTitle}\n\n` +
             `You already hold: *${pos.size.toFixed(4)} shares*\n` +
-            `Current price: *${curCents}¢*\n\n` +
+            `Current price: *${curCents}¢*\n` +
+            `💼 Balance: *$${balanceStr}*\n\n` +
             `*Enter USDC amount to spend:*\n` +
             `Example: \`10\` → buys ~${estimatedShares} shares at ${curCents}¢`;
 
