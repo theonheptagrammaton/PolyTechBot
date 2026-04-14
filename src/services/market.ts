@@ -107,37 +107,57 @@ const TIMEFRAME_ORDER: Record<string, number> = {
   'Weekly':    6,
 };
 
+/** Duration of each timeframe in milliseconds — used to compute actual round start from endDate */
+const TIMEFRAME_DURATION_MS: Record<string, number> = {
+  '5-Minute':  5 * 60_000,
+  '15-Minute': 15 * 60_000,
+  '1-Hour':    60 * 60_000,
+  '4-Hour':    4 * 60 * 60_000,
+  'Daily':     24 * 60 * 60_000,
+  'Weekly':    7 * 24 * 60 * 60_000,
+};
+
 /**
  * Fetches all active "Up or Down" crypto markets from Polymarket.
  * Results are cached for 60 s (prices update frequently).
  */
 export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
   try {
-    const cacheKey = 'markets:updown:v8';
+    const cacheKey = 'markets:updown:v9';
     const cached = await redisCache.get<UpDownMarket[]>(cacheKey);
     if (cached) return cached;
 
     logger.info('Fetching crypto up/down markets');
 
-    // Two parallel fetches:
+    // Three parallel fetches:
     // 1. Top-200 by volume  → covers popular daily/hourly markets
-    // 2. Soonest-ending 100 → catches new 5-min/15-min markets that have near-zero volume
-    //    and are pushed off the top-200 list (endDate asc = currently-live short-term rounds)
-    const [volResp, shortResp] = await Promise.all([
+    // 2. Most recently created 100 → catches newly listed events
+    // 3. Soonest-ending 100 (endDate >= now) → catches CURRENTLY LIVE short-term rounds
+    //    whose events were created hours/days ago and fall off the startDate-desc list
+    const nowIso = new Date().toISOString();
+    const [volResp, shortResp, liveResp] = await Promise.all([
       axios.get(`${GAMMA_API_BASE}/events`, {
         params: { active: true, closed: false, order: 'volume24hr', ascending: false, limit: 200, tag_id: 21 },
         timeout: 15000,
       }),
-      // startDate desc = most recently created events first → new 5-min/15-min rounds always appear here
       axios.get(`${GAMMA_API_BASE}/events`, {
         params: { active: true, closed: false, order: 'startDate', ascending: false, limit: 100, tag_id: 21 },
+        timeout: 15000,
+      }),
+      // endDate asc with min = now → currently live rounds come first
+      axios.get(`${GAMMA_API_BASE}/events`, {
+        params: { active: true, closed: false, order: 'endDate', ascending: true, limit: 100, tag_id: 21, end_date_min: nowIso },
         timeout: 15000,
       }),
     ]);
 
     // Merge and deduplicate by event id
     const seen = new Set<string>();
-    const merged = [...(Array.isArray(volResp.data) ? volResp.data : []), ...(Array.isArray(shortResp.data) ? shortResp.data : [])];
+    const merged = [
+      ...(Array.isArray(volResp.data)   ? volResp.data   : []),
+      ...(Array.isArray(shortResp.data) ? shortResp.data : []),
+      ...(Array.isArray(liveResp.data)  ? liveResp.data  : []),
+    ];
     const events: any[] = merged.filter(e => {
       const id = String(e.id);
       if (seen.has(id)) return false;
@@ -198,6 +218,16 @@ export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
       const downIdx = outcomes.findIndex((o: string) => o.toLowerCase() === 'down');
       if (upIdx < 0 || downIdx < 0) continue;
 
+      // Compute actual round start from endDate – timeframe duration.
+      // event.startDate is event *creation* time (can be hours before the round),
+      // so we derive the real round start from the market's endDate.
+      const marketEndDate = market.endDate ?? event.endDate ?? '';
+      const durationMs = TIMEFRAME_DURATION_MS[timeframe] ?? 24 * 60 * 60_000;
+      const endMs2 = new Date(marketEndDate).getTime();
+      const roundStartDate = !isNaN(endMs2)
+        ? new Date(endMs2 - durationMs).toISOString()
+        : (event.startDate ?? '');
+
       markets.push({
         eventId:     String(event.id),
         marketId:    String(market.id),
@@ -206,8 +236,8 @@ export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
         coinEmoji:   coinInfo.emoji,
         coinName:    coinInfo.name,
         timeframe,
-        startDate:   event.startDate ?? '',
-        endDate:     market.endDate ?? event.endDate ?? '',
+        startDate:   roundStartDate,
+        endDate:     marketEndDate,
         upPrice:     parseFloat(prices[upIdx]   ?? '0.5'),
         downPrice:   parseFloat(prices[downIdx] ?? '0.5'),
         upTokenId:   tokenIds[upIdx]   ?? '',

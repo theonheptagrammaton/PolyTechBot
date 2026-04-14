@@ -39,7 +39,8 @@ function findMatchingMarket(
   timeframe: string,
   markets: UpDownMarket[],
 ): UpDownMarket | null {
-  // Match coin + timeframe, pick the one that hasn't ended yet and started most recently
+  // Match coin + timeframe, pick the currently-live round.
+  // startDate is the computed round start (endDate − timeframe duration), not event creation time.
   const now = Date.now();
   const candidates = markets.filter(m =>
     m.coin === coin &&
@@ -48,8 +49,8 @@ function findMatchingMarket(
     new Date(m.startDate).getTime() <= now
   );
   if (candidates.length === 0) return null;
-  // Pick most recently started
-  candidates.sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
+  // Pick the soonest-ending round (= currently live), not the most recently created
+  candidates.sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
   return candidates[0];
 }
 
