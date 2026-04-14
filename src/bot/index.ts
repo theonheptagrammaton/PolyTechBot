@@ -1697,6 +1697,7 @@ export class TelegramBot {
         { command: 'copytrade',   description: '⚡ Copy trading' },
         { command: 'pnl',         description: '📉 PNL summary' },
         { command: 'price',       description: '💲 Get market price' },
+        { command: 'nothingeverhappens', description: '🙅 Random NO bet' },
         { command: 'settings',    description: '⚙️ Settings' },
         { command: 'help',        description: '❓ Help' },
       ]).catch((err: any) => logger.warn('setMyCommands failed:', err?.message));
