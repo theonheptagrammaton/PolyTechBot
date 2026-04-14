@@ -268,7 +268,7 @@ export async function handleShowCategories(ctx: Context): Promise<void> {
 export async function handleCategorySelection(ctx: Context, category: string, page: number = 1): Promise<void> {
   try {
     const lang = ((ctx as any).userLanguage as Locale) || 'en';
-    await ctx.answerCbQuery(t(lang, 'common.loading'));
+    if (ctx.callbackQuery) await ctx.answerCbQuery(t(lang, 'common.loading')).catch(() => {});
 
     const botUsername = ctx.botInfo?.username || process.env.BOT_USERNAME || 'PolymarketBot';
     const cat = CATEGORY_META[category] ?? { name: category, emoji: '📊' };
