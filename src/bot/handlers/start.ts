@@ -352,9 +352,9 @@ export async function handleStart(ctx: Context): Promise<void> {
           welcomeMessage +=
             t(lang, 'start.depositAddresses') +
             t(lang, 'start.depositEvm', { address: existingUser.depositAddressEvm }) +
-            t(lang, 'start.depositSolana', { address: existingUser.depositAddressSvm }) +
-            t(lang, 'start.depositBtc', { address: existingUser.depositAddressBtc }) +
-            t(lang, 'start.depositTron', { address: existingUser.depositAddressTvm }) +
+            t(lang, 'start.depositSolana', { address: existingUser.depositAddressSvm ?? 'N/A' }) +
+            t(lang, 'start.depositBtc', { address: existingUser.depositAddressBtc ?? 'N/A' }) +
+            t(lang, 'start.depositTron', { address: existingUser.depositAddressTvm ?? 'N/A' }) +
             t(lang, 'start.depositNote');
         }
 
