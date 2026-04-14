@@ -136,6 +136,6 @@ function formatChartHour(dateStr) {
 }
 
 function chartLabels(data, period) {
-  const formatter = period === '24h' ? formatChartHour : formatChartDate;
+  const formatter = (period === '24h' || period === 'today') ? formatChartHour : formatChartDate;
   return data.map(d => formatter(d.date));
 }

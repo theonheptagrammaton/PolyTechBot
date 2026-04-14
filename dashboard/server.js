@@ -44,6 +44,10 @@ app.use('/api', authMiddleware);
 // --- Period helper ---
 function periodToDate(period) {
   if (!period || period === 'all') return null;
+  if (period === 'today') {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
   const now = new Date();
   const map = {
     '24h': 24 * 60 * 60 * 1000,
@@ -57,7 +61,7 @@ function periodToDate(period) {
 }
 
 function truncUnit(period) {
-  return period === '24h' ? 'hour' : 'day';
+  return (period === '24h' || period === 'today') ? 'hour' : 'day';
 }
 
 // --- Overview KPIs ---

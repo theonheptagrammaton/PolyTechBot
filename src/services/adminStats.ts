@@ -8,6 +8,7 @@ export interface AdminStats {
   totalUsers: number;
   activeUsers: number;
   walletUsers: number;
+  newUsersDaily: number;
   newUsersToday: number;
   newUsersWeek: number;
   newUsersMonth: number;
@@ -15,16 +16,19 @@ export interface AdminStats {
 
   // Trading Volume (derived from commission: volume = commission / COMMISSION_RATE)
   volumeTotal: number;
+  volumeDaily: number;
   volumeToday: number;
   volumeWeek: number;
   volumeMonth: number;
   totalTrades: number;
+  tradesDaily: number;
   tradesToday: number;
   tradesWeek: number;
   tradesMonth: number;
 
   // Commission / Revenue (from DB — accurate going forward)
   commissionTotal: number;
+  commissionDaily: number;
   commissionToday: number;
   commissionWeek: number;
   commissionMonth: number;
@@ -43,6 +47,7 @@ export interface AdminStats {
   copiedFilled: number;
   copiedFailed: number;
   copiedSkipped: number;
+  copiedDaily: number;
   copiedToday: number;
   copiedWeek: number;
 
@@ -59,33 +64,37 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
   logger.info('[adminStats] Calculating...');
 
   const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const dayAgo   = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const weekAgo  = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000);
   const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
   const [
     totalUsers, activeUsers, walletUsers,
-    newUsersToday, newUsersWeek, newUsersMonth,
+    newUsersDaily, newUsersToday, newUsersWeek, newUsersMonth,
     copyTradeActiveUsers,
-    commissionAgg, commissionTodayAgg, commissionWeekAgg, commissionMonthAgg,
-    totalTrades, tradesToday, tradesWeek, tradesMonth,
+    commissionAgg, commissionDailyAgg, commissionTodayAgg, commissionWeekAgg, commissionMonthAgg,
+    totalTrades, tradesDaily, tradesToday, tradesWeek, tradesMonth,
     cashbackAgg,
     totalReferrals, referralAgg, topReferrerRows,
     totalSubscriptions, activeSubscriptions,
-    copiedStatusGroups, copiedToday, copiedWeek,
+    copiedStatusGroups, copiedDaily, copiedToday, copiedWeek,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.user.count({ where: { isActive: true } }),
     prisma.user.count({ where: { polymarketProxyAddress: { not: null } } }),
+    prisma.user.count({ where: { createdAt: { gte: midnight } } }),
     prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
     prisma.user.count({ where: { createdAt: { gte: weekAgo } } }),
     prisma.user.count({ where: { createdAt: { gte: monthAgo } } }),
     prisma.user.count({ where: { copySubscriptions: { some: { isActive: true, isPaused: false } } } }),
     prisma.commissionLog.aggregate({ _sum: { amount: true } }),
+    prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: midnight } } }),
     prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: dayAgo } } }),
     prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: weekAgo } } }),
     prisma.commissionLog.aggregate({ _sum: { amount: true }, where: { createdAt: { gte: monthAgo } } }),
     prisma.commissionLog.count(),
+    prisma.commissionLog.count({ where: { createdAt: { gte: midnight } } }),
     prisma.commissionLog.count({ where: { createdAt: { gte: dayAgo } } }),
     prisma.commissionLog.count({ where: { createdAt: { gte: weekAgo } } }),
     prisma.commissionLog.count({ where: { createdAt: { gte: monthAgo } } }),
@@ -102,21 +111,24 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
     prisma.copySubscription.count(),
     prisma.copySubscription.count({ where: { isActive: true, isPaused: false } }),
     prisma.copiedTrade.groupBy({ by: ['status'], _count: { id: true } }),
+    prisma.copiedTrade.count({ where: { createdAt: { gte: midnight }, status: 'filled' } }),
     prisma.copiedTrade.count({ where: { createdAt: { gte: dayAgo  }, status: 'filled' } }),
     prisma.copiedTrade.count({ where: { createdAt: { gte: weekAgo }, status: 'filled' } }),
   ]);
 
-  const commissionTotal = commissionAgg._sum.amount       ?? 0;
-  const commissionToday = commissionTodayAgg._sum.amount  ?? 0;
-  const commissionWeek  = commissionWeekAgg._sum.amount   ?? 0;
-  const commissionMonth = commissionMonthAgg._sum.amount  ?? 0;
+  const commissionTotal = commissionAgg._sum.amount        ?? 0;
+  const commissionDaily = commissionDailyAgg._sum.amount   ?? 0;
+  const commissionToday = commissionTodayAgg._sum.amount   ?? 0;
+  const commissionWeek  = commissionWeekAgg._sum.amount    ?? 0;
+  const commissionMonth = commissionMonthAgg._sum.amount   ?? 0;
 
   const volumeData = {
     volumeTotal: parseFloat((commissionTotal / COMMISSION_RATE).toFixed(2)),
+    volumeDaily: parseFloat((commissionDaily / COMMISSION_RATE).toFixed(2)),
     volumeToday: parseFloat((commissionToday / COMMISSION_RATE).toFixed(2)),
     volumeWeek:  parseFloat((commissionWeek  / COMMISSION_RATE).toFixed(2)),
     volumeMonth: parseFloat((commissionMonth / COMMISSION_RATE).toFixed(2)),
-    totalTrades, tradesToday, tradesWeek, tradesMonth,
+    totalTrades, tradesDaily, tradesToday, tradesWeek, tradesMonth,
   };
 
   // Resolve top referrer names
@@ -135,12 +147,13 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
 
   const stats: AdminStats = {
     totalUsers, activeUsers, walletUsers,
-    newUsersToday, newUsersWeek, newUsersMonth,
+    newUsersDaily, newUsersToday, newUsersWeek, newUsersMonth,
     copyTradeActiveUsers,
 
     ...volumeData,
 
     commissionTotal,
+    commissionDaily,
     commissionToday,
     commissionWeek,
     commissionMonth,
@@ -155,7 +168,7 @@ export async function getAdminStats(forceRefresh = false): Promise<AdminStats> {
     copiedFilled:  statusMap['filled']  ?? 0,
     copiedFailed:  statusMap['failed']  ?? 0,
     copiedSkipped: statusMap['skipped'] ?? 0,
-    copiedToday, copiedWeek,
+    copiedDaily, copiedToday, copiedWeek,
 
     generatedAt: now.toISOString(),
   };
@@ -176,17 +189,19 @@ export function formatStatsMessage(s: AdminStats): string {
 
   m += '👥 *USERS*\n';
   m += `├ Total: *${s.totalUsers}* · Active: *${s.activeUsers}* · With Wallet: *${s.walletUsers}*\n`;
-  m += `├ New Today: *${s.newUsersToday}* · Week: *${s.newUsersWeek}* · Month: *${s.newUsersMonth}*\n`;
+  m += `├ New Daily: *${s.newUsersDaily}* · 24h: *${s.newUsersToday}* · Week: *${s.newUsersWeek}* · Month: *${s.newUsersMonth}*\n`;
   m += `└ Copy Trade Users: *${s.copyTradeActiveUsers}*\n\n`;
 
   m += '📈 *TRADING VOLUME*\n';
-  m += `├ Today: *${formatVolume(s.volumeToday)}* (${s.tradesToday} trades)\n`;
+  m += `├ Daily: *${formatVolume(s.volumeDaily)}* (${s.tradesDaily} trades)\n`;
+  m += `├ 24h: *${formatVolume(s.volumeToday)}* (${s.tradesToday} trades)\n`;
   m += `├ This Week: *${formatVolume(s.volumeWeek)}* (${s.tradesWeek} trades)\n`;
   m += `├ This Month: *${formatVolume(s.volumeMonth)}* (${s.tradesMonth} trades)\n`;
   m += `└ All Time: *${formatVolume(s.volumeTotal)}* (${s.totalTrades} trades)\n\n`;
 
   m += '💰 *COMMISSION (REVENUE)*\n';
-  m += `├ Today: *${formatVolume(s.commissionToday)}*\n`;
+  m += `├ Daily: *${formatVolume(s.commissionDaily)}*\n`;
+  m += `├ 24h: *${formatVolume(s.commissionToday)}*\n`;
   m += `├ This Week: *${formatVolume(s.commissionWeek)}*\n`;
   m += `├ This Month: *${formatVolume(s.commissionMonth)}*\n`;
   m += `├ All Time: *${formatVolume(s.commissionTotal)}*\n`;
@@ -210,7 +225,7 @@ export function formatStatsMessage(s: AdminStats): string {
   m += '⚡ *COPY TRADE*\n';
   m += `├ Subscriptions: *${s.totalSubscriptions}* total · *${s.activeSubscriptions}* active\n`;
   m += `├ Filled: *${s.copiedFilled}* · Failed: *${s.copiedFailed}* · Skipped: *${s.copiedSkipped}*\n`;
-  m += `└ Copied Today: *${s.copiedToday}* · This Week: *${s.copiedWeek}*\n\n`;
+  m += `└ Copied Daily: *${s.copiedDaily}* · 24h: *${s.copiedToday}* · This Week: *${s.copiedWeek}*\n\n`;
 
   m += `🕒 _Generated: ${new Date(s.generatedAt).toLocaleString()}_`;
 
