@@ -8,6 +8,12 @@ import { getBalance as predexonGetBalance } from '../../services/predexon';
 import { sendPage } from '../../utils/telegram';
 import { ce, EMOJI } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
+import { t, Locale } from '../../i18n';
+
+/** Get locale from user object */
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 // ─── Cross-chain config ──────────────────────────────────────────────────────
 
@@ -84,16 +90,21 @@ setInterval(() => {
 export async function handleWithdrawMenu(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery();
+
+    const telegramId = ctx.from?.id.toString();
+    const user = telegramId ? await getUserByTelegramId(telegramId) : null;
+    const lang = getLang(user);
+
     await sendPage(ctx,
-      '🏦 *Select Withdrawal Destination*\n\nChoose where you want to receive your funds:',
+      t(lang, 'withdraw.selectDestination'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('🟢 Polygon',             'wd_chain_polygon')],
-          [Markup.button.callback('🟣 Solana',              'wd_chain_solana')],
-          [Markup.button.callback('🔵 Ethereum',            'wd_chain_ethereum')],
-          [Markup.button.callback('🟡 Binance Smart Chain', 'wd_chain_bsc')],
-          [Markup.button.callback('🏠 Main Menu',           'back_to_menu')],
+          [Markup.button.callback(t(lang, 'withdraw.chainPolygon'), 'wd_chain_polygon')],
+          [Markup.button.callback(t(lang, 'withdraw.chainSolana'), 'wd_chain_solana')],
+          [Markup.button.callback(t(lang, 'withdraw.chainEthereum'), 'wd_chain_ethereum')],
+          [Markup.button.callback(t(lang, 'withdraw.chainBSC'), 'wd_chain_bsc')],
+          [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
         ]),
       }
     );
@@ -118,10 +129,12 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
       if (!telegramId) return;
 
       const user = await getUserByTelegramId(telegramId);
+      const lang = getLang(user);
+
       if (!user?.polymarketProxyAddress) {
-        await sendPage(ctx, '❌ Wallet not set up. Use /start first.', {
+        await sendPage(ctx, t(lang, 'withdraw.walletNotSetUp'), {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('← Back', 'withdraw_menu')]]),
+          ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'common.back'), 'withdraw_menu')]]),
         });
         return;
       }
@@ -144,13 +157,13 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
       }
 
       const text =
-        `${crossChain.icon} *Withdraw USDC → ${crossChain.label}*\n\n` +
-        `💵 *Available:* $${balance} USDC\n\n` +
-        `📍 Please enter your ${crossChain.label} destination address:`;
+        `${crossChain.icon} *${t(lang, 'withdraw.crossChainTitle', { chain: crossChain.label })}*\n\n` +
+        `💵 *${t(lang, 'withdraw.available')}:* $${balance} USDC\n\n` +
+        `📍 ${t(lang, 'withdraw.enterDestinationAddress', { chain: crossChain.label })}`;
 
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('← Back', 'withdraw_menu')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'common.back'), 'withdraw_menu')],
+        [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
       ]);
 
       const cbMsg = ctx.callbackQuery && 'message' in ctx.callbackQuery
@@ -195,10 +208,12 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
     if (!telegramIdPoly) return;
 
     const userPoly = await getUserByTelegramId(telegramIdPoly);
+    const lang = getLang(userPoly);
+
     if (!userPoly?.polymarketProxyAddress) {
-      await sendPage(ctx, '❌ Wallet not set up. Use /start first.', {
+      await sendPage(ctx, t(lang, 'withdraw.walletNotSetUp'), {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('← Back', 'withdraw_menu')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'common.back'), 'withdraw_menu')]]),
       });
       return;
     }
@@ -221,14 +236,14 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
     }
 
     const polyText =
-      `🟢 *Withdraw USDC — Polygon*\n\n` +
-      `💵 *Available:* $${balancePoly} USDC\n` +
-      `🌐 *Token:*\n\`${NATIVE_USDC.address}\`\n\n` +
-      `📍 Please enter your Polygon wallet address:`;
+      `🟢 *${t(lang, 'withdraw.polygonTitle')}*\n\n` +
+      `💵 *${t(lang, 'withdraw.available')}:* $${balancePoly} USDC\n` +
+      `🌐 *${t(lang, 'withdraw.token')}:*\n\`${NATIVE_USDC.address}\`\n\n` +
+      `📍 ${t(lang, 'withdraw.enterPolygonAddress')}`;
 
     const polyKeyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('← Back', 'withdraw_menu')],
-      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      [Markup.button.callback(t(lang, 'common.back'), 'withdraw_menu')],
+      [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
     ]);
 
     const cbMsgPoly = ctx.callbackQuery && 'message' in ctx.callbackQuery
@@ -274,14 +289,16 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
 
 export async function handleWithdrawToken(ctx: Context, tokenKey: string): Promise<void> {
   try {
-    await ctx.answerCbQuery('Loading balance...');
-
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
     const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
+
+    await ctx.answerCbQuery(t(lang, 'withdraw.loadingBalance'));
+
     if (!user?.polymarketProxyAddress) {
-      await ctx.answerCbQuery('Wallet not set up');
+      await ctx.answerCbQuery(t(lang, 'withdraw.walletNotSetUpShort'));
       return;
     }
 
@@ -309,14 +326,14 @@ export async function handleWithdrawToken(ctx: Context, tokenKey: string): Promi
     const contractDisplay = TOKEN_CONTRACT_DISPLAY[tokenKey];
 
     const text =
-      `🏦 *Withdraw ${token.symbol} (Polygon)*\n\n` +
-      `💵 *Available Balance:* ${formatBalance(balance, token.symbol)}\n` +
-      `🌐 *Token Address:*\n\`${contractDisplay}\`\n\n` +
-      `📍 Please enter your Polygon wallet address:`;
+      `🏦 *${t(lang, 'withdraw.tokenTitle', { symbol: token.symbol })}*\n\n` +
+      `💵 *${t(lang, 'withdraw.availableBalance')}:* ${formatBalance(balance, token.symbol)}\n` +
+      `🌐 *${t(lang, 'withdraw.tokenAddress')}:*\n\`${contractDisplay}\`\n\n` +
+      `📍 ${t(lang, 'withdraw.enterPolygonAddress')}`;
 
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('← Back', 'wd_chain_polygon')],
-      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+      [Markup.button.callback(t(lang, 'common.back'), 'wd_chain_polygon')],
+      [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
     ]);
 
     // Send the state message and capture its message_id for future in-place edits.
@@ -403,6 +420,9 @@ async function handleAddressInput(
   state: WithdrawState,
   address: string
 ): Promise<void> {
+  const user = await getUserByTelegramId(telegramId).catch(() => null);
+  const lang = getLang(user);
+
   const isCrossChain = state.chain !== 'polygon';
   const crossChain = isCrossChain ? CROSS_CHAIN_CONFIG[state.chain] : null;
 
@@ -412,10 +432,10 @@ async function handleAddressInput(
     // Solana address validation
     if (!isValidSolanaAddress(address)) {
       await editWithdrawMessage(ctx, state,
-        `${crossChain.icon} <b>Withdraw USDC → ${crossChain.label}</b>\n\n` +
-        `💵 <b>Available:</b> $${state.balance} USDC\n\n` +
-        `❌ <b>Invalid Solana address.</b> Please enter a valid Solana wallet address:`,
-        [[Markup.button.callback('← Back', 'withdraw_menu')]]
+        `${crossChain.icon} <b>${t(lang, 'withdraw.crossChainTitle', { chain: crossChain.label })}</b>\n\n` +
+        `💵 <b>${t(lang, 'withdraw.available')}:</b> $${state.balance} USDC\n\n` +
+        `❌ <b>${t(lang, 'withdraw.invalidSolanaAddress')}</b>`,
+        [[Markup.button.callback(t(lang, 'common.back'), 'withdraw_menu')]]
       );
       return;
     }
@@ -423,13 +443,13 @@ async function handleAddressInput(
   } else {
     // EVM address validation (Polygon, Ethereum, BSC)
     if (!ethers.utils.isAddress(address)) {
-      const backBtn = Markup.button.callback('← Back', 'withdraw_menu');
+      const backBtn = Markup.button.callback(t(lang, 'common.back'), 'withdraw_menu');
       const label = isCrossChain
-        ? `${crossChain!.icon} <b>Withdraw USDC → ${crossChain!.label}</b>`
-        : `🟢 <b>Withdraw USDC — Polygon</b>`;
-      const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC`;
+        ? `${crossChain!.icon} <b>${t(lang, 'withdraw.crossChainTitle', { chain: crossChain!.label })}</b>`
+        : `🟢 <b>${t(lang, 'withdraw.polygonTitle')}</b>`;
+      const balanceLine = `💵 <b>${t(lang, 'withdraw.available')}:</b> $${state.balance} USDC`;
       await editWithdrawMessage(ctx, state,
-        `${label}\n\n${balanceLine}\n\n❌ <b>Invalid address.</b> Please enter a valid EVM wallet address:`,
+        `${label}\n\n${balanceLine}\n\n❌ <b>${t(lang, 'withdraw.invalidEVMAddress')}</b>`,
         [[backBtn]]
       );
       return;
@@ -448,16 +468,16 @@ async function handleAddressInput(
   const crossChainAddrDone = isCrossChainAddrDone ? CROSS_CHAIN_CONFIG[state.chain] : null;
 
   const headerLine = crossChainAddrDone
-    ? `${crossChainAddrDone.icon} <b>Withdraw USDC → ${crossChainAddrDone.label}</b>`
-    : `🟢 <b>Withdraw USDC — Polygon</b>`;
-  const balanceLine = `💵 <b>Available:</b> $${state.balance} USDC`;
+    ? `${crossChainAddrDone.icon} <b>${t(lang, 'withdraw.crossChainTitle', { chain: crossChainAddrDone.label })}</b>`
+    : `🟢 <b>${t(lang, 'withdraw.polygonTitle')}</b>`;
+  const balanceLine = `💵 <b>${t(lang, 'withdraw.available')}:</b> $${state.balance} USDC`;
 
   await editWithdrawMessage(ctx, state,
     `${headerLine}\n\n` +
     `${balanceLine}\n` +
-    `📍 <b>Destination:</b>\n<code>${checksummed}</code>\n\n` +
-    `💰 Please enter the amount to withdraw (in ${amountLabel}):`,
-    [[Markup.button.callback('← Cancel', 'wd_cancel')]]
+    `📍 <b>${t(lang, 'withdraw.destination')}:</b>\n<code>${checksummed}</code>\n\n` +
+    `💰 ${t(lang, 'withdraw.enterAmount', { label: amountLabel })}`,
+    [[Markup.button.callback(t(lang, 'withdraw.cancel'), 'wd_cancel')]]
   );
 }
 
@@ -469,6 +489,9 @@ async function handleAmountInput(
   state: WithdrawState,
   amountText: string
 ): Promise<void> {
+  const user = await getUserByTelegramId(telegramId).catch(() => null);
+  const lang = getLang(user);
+
   // Normalize locale-specific decimal formats before parsing.
   // Handles: "1.234,56" (European) → 1234.56, "1,234.56" (US) → 1234.56, "10,5" → 10.5
   const normalized = (() => {
@@ -487,16 +510,16 @@ async function handleAmountInput(
   const isCrossChainAmt = state.chain !== 'polygon';
   const crossChainAmt = isCrossChainAmt ? CROSS_CHAIN_CONFIG[state.chain] : null;
   const headerAmt = crossChainAmt
-    ? `${crossChainAmt.icon} <b>Withdraw USDC → ${crossChainAmt.label}</b>`
-    : `🟢 <b>Withdraw USDC — Polygon</b>`;
-  const balanceAmt = `💵 <b>Available:</b> $${state.balance} USDC`;
+    ? `${crossChainAmt.icon} <b>${t(lang, 'withdraw.crossChainTitle', { chain: crossChainAmt.label })}</b>`
+    : `🟢 <b>${t(lang, 'withdraw.polygonTitle')}</b>`;
+  const balanceAmt = `💵 <b>${t(lang, 'withdraw.available')}:</b> $${state.balance} USDC`;
 
   if (isNaN(amount) || amount <= 0) {
     await editWithdrawMessage(ctx, state,
       `${headerAmt}\n\n${balanceAmt}\n` +
-      `📍 <b>Destination:</b>\n<code>${state.destinationAddress}</code>\n\n` +
-      `❌ <b>Invalid amount.</b> Please enter a positive number:`,
-      [[Markup.button.callback('← Cancel', 'wd_cancel')]]
+      `📍 <b>${t(lang, 'withdraw.destination')}:</b>\n<code>${state.destinationAddress}</code>\n\n` +
+      `❌ <b>${t(lang, 'withdraw.invalidAmount')}</b>`,
+      [[Markup.button.callback(t(lang, 'withdraw.cancel'), 'wd_cancel')]]
     );
     return;
   }
@@ -505,9 +528,9 @@ async function handleAmountInput(
   if (amount > available) {
     await editWithdrawMessage(ctx, state,
       `${headerAmt}\n\n${balanceAmt}\n` +
-      `📍 <b>Destination:</b>\n<code>${state.destinationAddress}</code>\n\n` +
-      `❌ <b>Insufficient balance.</b> Max: ${state.balance} ${state.tokenSymbol}\n\nPlease enter a smaller amount:`,
-      [[Markup.button.callback('← Cancel', 'wd_cancel')]]
+      `📍 <b>${t(lang, 'withdraw.destination')}:</b>\n<code>${state.destinationAddress}</code>\n\n` +
+      `❌ <b>${t(lang, 'withdraw.insufficientBalance', { max: state.balance || '0', symbol: state.tokenSymbol || 'USDC' })}</b>`,
+      [[Markup.button.callback(t(lang, 'withdraw.cancel'), 'wd_cancel')]]
     );
     return;
   }
@@ -515,17 +538,17 @@ async function handleAmountInput(
   // Show processing state
   await editWithdrawMessage(ctx, state,
     `${headerAmt}\n\n` +
-    `${ce(EMOJI.loading, '⏳')} Processing withdrawal of <b>${amount} ${state.tokenSymbol}</b>...\n` +
-    `📍 To: <code>${state.destinationAddress}</code>`,
+    `${ce(EMOJI.loading, '⏳')} ${t(lang, 'withdraw.processing', { amount: String(amount), symbol: state.tokenSymbol || 'USDC' })}\n` +
+    `📍 ${t(lang, 'withdraw.to')}: <code>${state.destinationAddress}</code>`,
     []
   );
 
   // Fetch user BEFORE deleting state so a DB lookup failure allows a clean retry
-  const user = await getUserByTelegramId(telegramId).catch(() => null);
-  if (!user?.encryptedPrivateKey || !user?.polymarketProxyAddress) {
-    await editWithdrawMessage(ctx, state, '❌ Wallet not found. Please contact support.', [
-      [Markup.button.callback('🔄 Try Again', 'withdraw_menu')],
-      [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+  const userForExec = await getUserByTelegramId(telegramId).catch(() => null);
+  if (!userForExec?.encryptedPrivateKey || !userForExec?.polymarketProxyAddress) {
+    await editWithdrawMessage(ctx, state, `❌ ${t(lang, 'withdraw.walletNotFound')}`, [
+      [Markup.button.callback(t(lang, 'withdraw.tryAgain'), 'withdraw_menu')],
+      [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
     ]);
     return;
   }
@@ -539,9 +562,9 @@ async function handleAmountInput(
 
     // Use Predexon API for withdrawals when predexonUserId is available (managed, no gas needed)
     let result: { success: boolean; txHash?: string; pending?: boolean; error?: string };
-    if (user.predexonUserId) {
+    if (userForExec.predexonUserId) {
       result = await executePredexonWithdraw({
-        predexonUserId: user.predexonUserId,
+        predexonUserId: userForExec.predexonUserId,
         venue: 'polymarket',
         amount,
         destinationAddress: state.destinationAddress!,
@@ -551,15 +574,15 @@ async function handleAmountInput(
       // Legacy fallback for users without Predexon userId
       result = isCrossChainExec
         ? await executeBridgeWithdraw({
-            encryptedPrivateKey: user.encryptedPrivateKey,
-            proxyAddress: user.polymarketProxyAddress,
+            encryptedPrivateKey: userForExec.encryptedPrivateKey,
+            proxyAddress: userForExec.polymarketProxyAddress,
             chain: state.chain,
             recipientAddr: state.destinationAddress!,
             amount,
           })
         : await executeWithdraw({
-            encryptedPrivateKey: user.encryptedPrivateKey,
-            proxyAddress: user.polymarketProxyAddress,
+            encryptedPrivateKey: userForExec.encryptedPrivateKey,
+            proxyAddress: userForExec.polymarketProxyAddress,
             tokenAddress: state.tokenAddress!,
             tokenDecimals: state.tokenDecimals!,
             destinationAddress: state.destinationAddress!,
@@ -569,21 +592,21 @@ async function handleAmountInput(
 
     if (result.success) {
       const statusLine = result.pending
-        ? ce(EMOJI.loading, '⏳') + ' <b>Status:</b> Pending confirmation...'
-        : '✅ <b>Status:</b> Confirmed';
+        ? ce(EMOJI.loading, '⏳') + ` <b>${t(lang, 'withdraw.status')}:</b> ${t(lang, 'withdraw.pendingConfirmation')}`
+        : `✅ <b>${t(lang, 'withdraw.status')}:</b> ${t(lang, 'withdraw.confirmed')}`;
       const chainNote = crossChainExec
-        ? `\n<i>Bridge is delivering USDC to your ${crossChainExec.label} address (1–2 min)</i>`
-        : `\n<i>You can track your transaction on Polygonscan</i>`;
+        ? `\n<i>${t(lang, 'withdraw.bridgeDelivering', { chain: crossChainExec.label })}</i>`
+        : `\n<i>${t(lang, 'withdraw.trackOnPolygonscan')}</i>`;
 
       await editWithdrawMessage(ctx, state,
-        `✅ <b>Withdrawal Submitted</b>\n\n` +
-        `💸 <b>Amount:</b> ${amount} ${state.tokenSymbol}\n` +
-        `📍 <b>To:</b> <code>${state.destinationAddress}</code>\n` +
-        `🔗 <b>Tx:</b> <code>${result.txHash}</code>\n` +
+        `✅ <b>${t(lang, 'withdraw.submitted')}</b>\n\n` +
+        `💸 <b>${t(lang, 'withdraw.amount')}:</b> ${amount} ${state.tokenSymbol}\n` +
+        `📍 <b>${t(lang, 'withdraw.to')}:</b> <code>${state.destinationAddress}</code>\n` +
+        `🔗 <b>${t(lang, 'withdraw.tx')}:</b> <code>${result.txHash}</code>\n` +
         `${statusLine}${chainNote}`,
         [
-          [Markup.button.callback('💼 My Wallet', 'wallet_page')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'withdraw.myWallet'), 'wallet_page')],
+          [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
         ]
       );
     } else {
@@ -593,34 +616,34 @@ async function handleAmountInput(
       let reason = '';
       const err = result.error || '';
       if (err.includes('invalid recipient address')) {
-        reason = '❗ The destination address format is invalid for this chain.\nPlease check the address and try again.';
+        reason = `❗ ${t(lang, 'withdraw.errInvalidRecipient')}`;
       } else if (err.includes('insufficient') || err.includes('balance')) {
-        reason = '❗ Insufficient balance to complete the withdrawal.';
+        reason = `❗ ${t(lang, 'withdraw.errInsufficientBalance')}`;
       } else if (err.includes('Platform executor not configured')) {
-        reason = '❗ Withdrawal service is not configured. Please try again later.';
+        reason = `❗ ${t(lang, 'withdraw.errNotConfigured')}`;
       } else if (err.includes('All RPCs unresponsive')) {
-        reason = '❗ Network is temporarily unavailable. Please try again in a moment.';
+        reason = `❗ ${t(lang, 'withdraw.errNetworkUnavailable')}`;
       } else if (err) {
         reason = `❗ ${err.length > 120 ? err.slice(0, 120) + '…' : err}`;
       } else {
-        reason = '❗ Please check your balance and destination address, then try again.';
+        reason = `❗ ${t(lang, 'withdraw.errGeneric')}`;
       }
 
       await editWithdrawMessage(ctx, state,
-        `❌ <b>Withdrawal Failed</b>\n\n${reason}`,
+        `❌ <b>${t(lang, 'withdraw.failed')}</b>\n\n${reason}`,
         [
-          [Markup.button.callback('🔄 Try Again', 'withdraw_menu')],
-          [Markup.button.callback('🏠 Main Menu',  'back_to_menu')],
+          [Markup.button.callback(t(lang, 'withdraw.tryAgain'), 'withdraw_menu')],
+          [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
         ]
       );
     }
   } catch (error: any) {
     logger.error('[withdraw] executeWithdraw error:', error);
     await editWithdrawMessage(ctx, state,
-      `❌ <b>Withdrawal Failed</b>\n\n❗ An unexpected error occurred. Please try again.`,
+      `❌ <b>${t(lang, 'withdraw.failed')}</b>\n\n❗ ${t(lang, 'withdraw.errUnexpected')}`,
       [
-        [Markup.button.callback('🔄 Try Again', 'withdraw_menu')],
-        [Markup.button.callback('🏠 Main Menu',  'back_to_menu')],
+        [Markup.button.callback(t(lang, 'withdraw.tryAgain'), 'withdraw_menu')],
+        [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
       ]
     );
   }
@@ -634,13 +657,16 @@ export async function handleWithdrawCancel(ctx: Context): Promise<void> {
     const telegramId = ctx.from?.id.toString();
     if (telegramId) withdrawState.delete(telegramId);
 
+    const user = telegramId ? await getUserByTelegramId(telegramId) : null;
+    const lang = getLang(user);
+
     await sendPage(ctx,
-      '❌ Withdrawal cancelled.',
+      `❌ ${t(lang, 'withdraw.cancelled')}`,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('💼 My Wallet', 'wallet_page')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'withdraw.myWallet'), 'wallet_page')],
+          [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
         ]),
       }
     );
@@ -681,4 +707,3 @@ async function editWithdrawMessage(
     }
   }
 }
-

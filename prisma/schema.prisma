@@ -50,6 +50,7 @@ model User {
   // Trading settings
   defaultTradeAmount  Int      @default(25)  // Default trade amount in USD
   slippageTolerance   Float    @default(1.0) // Max slippage % for market orders (0.1–25)
+  language            String   @default("en")  // User language: en, zh, ru
   tradingEnabled      Boolean  @default(false) // Whether CTF trading is enabled (one-time approval)
 
   // Referral system

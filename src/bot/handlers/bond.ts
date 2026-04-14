@@ -5,6 +5,11 @@ import { getUserByTelegramId } from '../../services/user';
 import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
+import { t, Locale } from '../../i18n';
+
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -122,7 +127,8 @@ export async function handleBondList(ctx: Context): Promise<void> {
   bondEditState.delete(telegramId);
 
   const user = await getUserByTelegramId(telegramId);
-  if (!user) { await ctx.reply('❌ User not found. Use /start first.'); return; }
+  const lang = user ? getLang(user) : (((ctx as any).userLanguage as Locale) || 'en');
+  if (!user) { await ctx.reply(t(lang, 'common.userNotFoundStart')); return; }
 
   const strategies = await prisma.bondStrategy.findMany({
     where: { userId: user.id },
@@ -136,27 +142,25 @@ export async function handleBondList(ctx: Context): Promise<void> {
   });
 
   const lines: string[] = [
-    `🤖 <b>Bond Trading</b>`,
+    `🤖 <b>${t(lang, 'Bond Trading')}</b>`,
     ``,
   ];
 
   if (strategies.length === 0) {
-    lines.push(`No bond strategies yet.`);
-    lines.push(`Tap <b>➕ Add</b> to create your first strategy.`);
+    lines.push(t(lang, 'No bond strategies yet.'));
+    lines.push(t(lang, 'Tap <b>Add</b> to create your first strategy.'));
   } else {
     const running = strategies.filter(s => s.isActive && !s.isPaused).length;
 
     for (let i = 0; i < strategies.length; i++) {
       const s = strategies[i];
       const statusDot = s.isActive && !s.isPaused ? '🟢' : '🔴';
-      const name = s.label || `Strategy-${i + 1}`;
+      const name = s.label || `${t(lang, 'Strategy')}-${i + 1}`;
 
       // Calculate stats from trades
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
       const tradeCount = filledTrades.length;
-      // Estimated PnL assumes all high-prob bonds resolve correctly (not guaranteed)
-      // Profit per trade = amount * (1/price - 1) = shares payout minus cost
       const pnlEstimate = filledTrades.reduce((sum, t) => {
         return sum + (t.price > 0 ? t.amount * (1 / t.price - 1) : 0);
       }, 0);
@@ -169,15 +173,15 @@ export async function handleBondList(ctx: Context): Promise<void> {
 
       lines.push(
         `${i + 1}. ${statusDot} 🎯 <b>${esc(name)}</b>\n` +
-        `├ Mode: 📊 ${s.minProbability.toFixed(1)}%–${s.maxProbability.toFixed(1)}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
-        `├ Est. PnL: <b>${pnlStr}</b> · Trades Filled: ${tradeCount}\n` +
-        `├ Today's Trades: <b>${todayTrades}</b>\n` +
-        `└ Spent: <b>$${totalSpent.toFixed(2)}</b>`
+        `├ ${t(lang, 'Mode')}: 📊 ${s.minProbability.toFixed(1)}%–${s.maxProbability.toFixed(1)}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
+        `├ ${t(lang, 'Est. PnL')}: <b>${pnlStr}</b> · ${t(lang, 'Trades Filled')}: ${tradeCount}\n` +
+        `├ ${t(lang, "Today's Trades")}: <b>${todayTrades}</b>\n` +
+        `└ ${t(lang, 'Spent')}: <b>$${totalSpent.toFixed(2)}</b>`
       );
       lines.push(``);
     }
 
-    lines.push(`⚡ Status: ${running}/${strategies.length} tasks running.`);
+    lines.push(`⚡ ${t(lang, 'Status')}: ${running}/${strategies.length} ${t(lang, 'tasks running.')}`);
   }
 
   const buttons: any[][] = [];
@@ -189,33 +193,33 @@ export async function handleBondList(ctx: Context): Promise<void> {
     const isRunning = s.isActive && !s.isPaused;
     buttons.push([
       Markup.button.callback(
-        isRunning ? `⏹ Stop ${i + 1}` : `▶️ Start ${i + 1}`,
+        isRunning ? `⏹ ${t(lang, 'Stop')} ${i + 1}` : `▶️ ${t(lang, 'Start')} ${i + 1}`,
         isRunning ? `bpm_pause_${id}` : `bpm_start_${id}`
       ),
-      Markup.button.callback(`✏️ Edit ${i + 1}`, `bond_task_${id}`),
+      Markup.button.callback(`✏️ ${t(lang, 'Edit')} ${i + 1}`, `bond_task_${id}`),
     ]);
   }
 
   // Controls row
   buttons.push([
-    Markup.button.callback('➕ Add', 'bond_start_add'),
-    Markup.button.callback('🗑 Remove', 'bond_remove_prompt'),
+    Markup.button.callback(`➕ ${t(lang, 'Add')}`, 'bond_start_add'),
+    Markup.button.callback(`🗑 ${t(lang, 'Remove')}`, 'bond_remove_prompt'),
   ]);
 
   if (strategies.length > 0) {
     buttons.push([
-      Markup.button.callback('▶️ Start All', 'bond_start_all'),
-      Markup.button.callback('⏹ Stop All', 'bond_stop_all'),
+      Markup.button.callback(`▶️ ${t(lang, 'Start All')}`, 'bond_start_all'),
+      Markup.button.callback(`⏹ ${t(lang, 'Stop All')}`, 'bond_stop_all'),
     ]);
     buttons.push([
-      Markup.button.callback('📜 History', 'bond_history_10'),
-      Markup.button.callback('🗑 Delete All', 'bond_del_all_cfm'),
+      Markup.button.callback(`📜 ${t(lang, 'History')}`, 'bond_history_10'),
+      Markup.button.callback(`🗑 ${t(lang, 'Delete All')}`, 'bond_del_all_cfm'),
     ]);
   }
 
   buttons.push([
-    Markup.button.callback('← Auto Strategies', 'auto_strategies'),
-    Markup.button.callback('× Close', 'bond_close'),
+    Markup.button.callback(`← ${t(lang, 'Auto Strategies')}`, 'auto_strategies'),
+    Markup.button.callback(`× ${t(lang, 'Close')}`, 'bond_close'),
   ]);
 
   const keyboard = Markup.inlineKeyboard(buttons);
@@ -257,11 +261,12 @@ export async function handleBondStopAll(ctx: Context): Promise<void> {
 export async function handleBondDeleteAllConfirm(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
 
-  const text = `⚠️ <b>Delete All Strategies</b>\n\nThis will permanently delete all your bond strategies. Are you sure?`;
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+  const text = `⚠️ <b>${t(lang, 'Delete All Strategies')}</b>\n\n${t(lang, 'This will permanently delete all your bond strategies. Are you sure?')}`;
   const keyboard = Markup.inlineKeyboard([
     [
-      Markup.button.callback('🗑 Yes, Delete All', 'bond_del_all_do'),
-      Markup.button.callback('← Cancel', 'bond_list'),
+      Markup.button.callback(`🗑 ${t(lang, 'Yes, Delete All')}`, 'bond_del_all_do'),
+      Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list'),
     ],
   ]);
   await sendHtml(ctx, text, keyboard);
@@ -273,6 +278,8 @@ export async function handleBondDeleteAllExecute(ctx: Context): Promise<void> {
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
+
+  const lang = getLang(user);
 
   try {
     // Delete trades first, then strategies (FK constraint)
@@ -288,7 +295,7 @@ export async function handleBondDeleteAllExecute(ctx: Context): Promise<void> {
     await prisma.bondStrategy.deleteMany({ where: { userId: user.id } });
   } catch (err: any) {
     logger.error(`[bond] Failed to delete all strategies: ${err?.message}`);
-    await sendHtml(ctx, `❌ Failed to delete strategies. Please try again.`);
+    await sendHtml(ctx, t(lang, 'Failed to delete strategies. Please try again.'));
     return;
   }
   await handleBondList(ctx);
@@ -302,27 +309,29 @@ export async function handleBondRemovePrompt(ctx: Context): Promise<void> {
   const user = await getUserByTelegramId(telegramId);
   if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
+  const lang = getLang(user);
+
   const strategies = await prisma.bondStrategy.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'asc' },
   });
 
   if (strategies.length === 0) {
-    await ctx.answerCbQuery('No strategies to remove').catch(() => {});
+    await ctx.answerCbQuery(t(lang, 'No strategies to remove')).catch(() => {});
     return;
   }
   await ctx.answerCbQuery().catch(() => {});
 
   const buttons = strategies.map((s, i) => [
     Markup.button.callback(
-      `🗑 ${s.label || `Strategy-${i + 1}`}`,
+      `🗑 ${s.label || `${t(lang, 'Strategy')}-${i + 1}`}`,
       `bond_rm_${s.id}`
     ),
   ]);
-  buttons.push([Markup.button.callback('← Back', 'bond_list')]);
+  buttons.push([Markup.button.callback(`← ${t(lang, 'Back')}`, 'bond_list')]);
 
   await sendHtml(ctx,
-    `🗑 <b>Remove Strategy</b>\n\nSelect a strategy to remove:`,
+    `🗑 <b>${t(lang, 'Remove Strategy')}</b>\n\n${t(lang, 'Select a strategy to remove:')}`,
     Markup.inlineKeyboard(buttons),
   );
 }
@@ -346,6 +355,8 @@ export async function handleBondHistory(ctx: Context, limit: number): Promise<vo
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
+  const lang = getLang(user);
+
   const trades = await prisma.bondTrade.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
@@ -355,24 +366,24 @@ export async function handleBondHistory(ctx: Context, limit: number): Promise<vo
 
   if (trades.length === 0) {
     await sendHtml(ctx,
-      `📜 <b>Bond Trade History</b>\n\nNo trades yet.`,
-      Markup.inlineKeyboard([[Markup.button.callback('← Back', 'bond_list')]]),
+      `📜 <b>${t(lang, 'Bond Trade History')}</b>\n\n${t(lang, 'No trades yet.')}`,
+      Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'bond_list')]]),
     );
     return;
   }
 
-  const lines = [`📜 <b>Bond Trade History</b> (last ${trades.length})\n`];
-  for (const t of trades) {
-    const icon = t.status === 'filled' ? '✅' : t.status === 'failed' ? '❌' : '⏳';
-    const pct = (t.probability * 100).toFixed(1);
-    const q = t.question.length > 50 ? t.question.slice(0, 47) + '...' : t.question;
-    const stratLabel = (t as any).strategy?.label ? ` [${esc((t as any).strategy.label)}]` : '';
-    lines.push(`${icon} ${esc(q)}\n   ${t.outcome} @ ${pct}% · $${t.amount.toFixed(2)}${stratLabel}`);
+  const lines = [`📜 <b>${t(lang, 'Bond Trade History')}</b> (${t(lang, 'last')} ${trades.length})\n`];
+  for (const tr of trades) {
+    const icon = tr.status === 'filled' ? '✅' : tr.status === 'failed' ? '❌' : '⏳';
+    const pct = (tr.probability * 100).toFixed(1);
+    const q = tr.question.length > 50 ? tr.question.slice(0, 47) + '...' : tr.question;
+    const stratLabel = (tr as any).strategy?.label ? ` [${esc((tr as any).strategy.label)}]` : '';
+    lines.push(`${icon} ${esc(q)}\n   ${tr.outcome} @ ${pct}% · $${tr.amount.toFixed(2)}${stratLabel}`);
   }
 
   await sendHtml(ctx,
     lines.join('\n'),
-    Markup.inlineKeyboard([[Markup.button.callback('← Back', 'bond_list')]]),
+    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'bond_list')]]),
   );
 }
 
@@ -391,10 +402,12 @@ export async function handleBondStartAdd(ctx: Context): Promise<void> {
   const user = await getUserByTelegramId(telegramId);
   if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
+  const lang = getLang(user);
+
   const count = await prisma.bondStrategy.count({ where: { userId: user.id } });
   if (count >= MAX_STRATEGIES) {
-    await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
-    await sendHtml(ctx, `❌ Maximum ${MAX_STRATEGIES} strategies reached. Delete one first.`);
+    await ctx.answerCbQuery(t(lang, 'Max {{max}} strategies reached', { max: MAX_STRATEGIES })).catch(() => {});
+    await sendHtml(ctx, t(lang, 'Maximum {{max}} strategies reached. Delete one first.', { max: MAX_STRATEGIES }));
     return;
   }
   await ctx.answerCbQuery().catch(() => {});
@@ -405,32 +418,34 @@ export async function handleBondStartAdd(ctx: Context): Promise<void> {
   });
 
   await sendHtml(ctx,
-    `✏️ <b>Step 1/7: Strategy Name</b>\n\n` +
-    `Give your strategy a name (e.g. "Safe Bonds", "High Prob Scanner"):`,
+    `✏️ <b>${t(lang, 'Step 1/7: Strategy Name')}</b>\n\n` +
+    t(lang, 'Give your strategy a name (e.g. "Safe Bonds", "High Prob Scanner"):'),
     Markup.inlineKeyboard([
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
 
 // Step 2: Daily Budget
 async function showDailyBudgetStep(ctx: Context): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `💰 <b>Step 2/7: Daily Budget</b>\n\n` +
-    `How much USDC per day should this strategy spend?\n\n` +
-    `Enter an amount (e.g. 50, 100, 200):`,
+    `💰 <b>${t(lang, 'Step 2/7: Daily Budget')}</b>\n\n` +
+    t(lang, 'How much USDC per day should this strategy spend?') + `\n\n` +
+    t(lang, 'Enter an amount (e.g. 50, 100, 200):'),
     Markup.inlineKeyboard([
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
 
 // Step 3: Min probability
 async function showMinProbStep(ctx: Context): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `🎯 <b>Step 3/7: Min Probability</b>\n\n` +
-    `Only buy markets where the winning side is at least this likely.\n\n` +
-    `Choose a preset or enter custom:`,
+    `🎯 <b>${t(lang, 'Step 3/7: Min Probability')}</b>\n\n` +
+    t(lang, 'Only buy markets where the winning side is at least this likely.') + `\n\n` +
+    t(lang, 'Choose a preset or enter custom:'),
     Markup.inlineKeyboard([
       [
         Markup.button.callback('90%', 'bond_add_prob_90'),
@@ -438,18 +453,19 @@ async function showMinProbStep(ctx: Context): Promise<void> {
         Markup.button.callback('95%', 'bond_add_prob_95'),
         Markup.button.callback('97%', 'bond_add_prob_97'),
       ],
-      [Markup.button.callback('✏️ Custom', 'bond_add_prob_custom')],
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(`✏️ ${t(lang, 'Custom')}`, 'bond_add_prob_custom')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
 
 // Step 3: Time window
 async function showTimeWindowStep(ctx: Context): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `⏰ <b>Step 4/7: Time Window</b>\n\n` +
-    `Only buy markets that expire within this many hours.\n\n` +
-    `Choose a preset or enter custom:`,
+    `⏰ <b>${t(lang, 'Step 4/7: Time Window')}</b>\n\n` +
+    t(lang, 'Only buy markets that expire within this many hours.') + `\n\n` +
+    t(lang, 'Choose a preset or enter custom:'),
     Markup.inlineKeyboard([
       [
         Markup.button.callback('12h', 'bond_add_hours_12'),
@@ -457,90 +473,93 @@ async function showTimeWindowStep(ctx: Context): Promise<void> {
         Markup.button.callback('48h', 'bond_add_hours_48'),
         Markup.button.callback('72h', 'bond_add_hours_72'),
       ],
-      [Markup.button.callback('✏️ Custom', 'bond_add_hours_custom')],
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(`✏️ ${t(lang, 'Custom')}`, 'bond_add_hours_custom')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
 
 // Step 4: Max concurrent
 async function showMaxConcurrentStep(ctx: Context): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `📊 <b>Step 5/7: Max Concurrent Positions</b>\n\n` +
-    `Maximum number of open bond positions at once.`,
+    `📊 <b>${t(lang, 'Step 5/7: Max Concurrent Positions')}</b>\n\n` +
+    t(lang, 'Maximum number of open bond positions at once.'),
     Markup.inlineKeyboard([
       [
         Markup.button.callback('2', 'bond_add_conc_2'),
         Markup.button.callback('5', 'bond_add_conc_5'),
         Markup.button.callback('10', 'bond_add_conc_10'),
       ],
-      [Markup.button.callback('✏️ Custom', 'bond_add_conc_custom')],
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(`✏️ ${t(lang, 'Custom')}`, 'bond_add_conc_custom')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
 
 // Step 5: Market types
 async function showMarketsFilterStep(ctx: Context): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `🏈 <b>Step 6/7: Market Types</b>\n\n` +
-    `Include sports and/or short-term crypto up/down markets?`,
+    `🏈 <b>${t(lang, 'Step 6/7: Market Types')}</b>\n\n` +
+    t(lang, 'Include sports and/or short-term crypto up/down markets?'),
     Markup.inlineKeyboard([
-      [Markup.button.callback('Neither', 'bond_add_mkt_none')],
-      [Markup.button.callback('🏈 Sports Only', 'bond_add_mkt_sports')],
-      [Markup.button.callback('₿ Crypto Only', 'bond_add_mkt_crypto')],
-      [Markup.button.callback('Both', 'bond_add_mkt_both')],
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(t(lang, 'Neither'), 'bond_add_mkt_none')],
+      [Markup.button.callback(`🏈 ${t(lang, 'Sports Only')}`, 'bond_add_mkt_sports')],
+      [Markup.button.callback(`₿ ${t(lang, 'Crypto Only')}`, 'bond_add_mkt_crypto')],
+      [Markup.button.callback(t(lang, 'Both'), 'bond_add_mkt_both')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
 
 // Step 6: Review
 async function showReviewStep(ctx: Context, state: BondAddState): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   const lines = [
-    `📋 <b>Step 7/7: Review</b>\n`,
-    `✏️ Name: <b>${esc(state.name || 'Strategy')}</b>`,
-    `💰 Daily Budget: $${state.dailyBudget ?? 100}`,
-    `💵 Amount/Trade: $${state.fixedAmount ?? 25}`,
-    `🎯 Min Probability: ${(state.minProbability ?? 95).toFixed(1)}%`,
-    `🎯 Max Probability: ${(state.maxProbability ?? 99).toFixed(1)}%`,
-    `⏰ Time Window: ${state.maxHoursOut ?? 48}h`,
-    `📊 Max Positions: ${state.maxConcurrent ?? 5}`,
-    `🏈 Sports: ${state.includeSports ? '✅' : '❌'}  |  ₿ Crypto: ${state.includeCryptoUpDown ? '✅' : '❌'}`,
-    `⚡ Slippage: ${state.slippage ?? 5}%`,
-    `📡 Scan: ${state.scanInterval ?? 5}min`,
-    `🎲 Side: ${state.outcomeSide ?? 'auto'}`,
+    `📋 <b>${t(lang, 'Step 7/7: Review')}</b>\n`,
+    `✏️ ${t(lang, 'Name')}: <b>${esc(state.name || t(lang, 'Strategy'))}</b>`,
+    `💰 ${t(lang, 'Daily Budget')}: $${state.dailyBudget ?? 100}`,
+    `💵 ${t(lang, 'Amount/Trade')}: $${state.fixedAmount ?? 25}`,
+    `🎯 ${t(lang, 'Min Probability')}: ${(state.minProbability ?? 95).toFixed(1)}%`,
+    `🎯 ${t(lang, 'Max Probability')}: ${(state.maxProbability ?? 99).toFixed(1)}%`,
+    `⏰ ${t(lang, 'Time Window')}: ${state.maxHoursOut ?? 48}h`,
+    `📊 ${t(lang, 'Max Positions')}: ${state.maxConcurrent ?? 5}`,
+    `🏈 ${t(lang, 'Sports')}: ${state.includeSports ? '✅' : '❌'}  |  ₿ ${t(lang, 'Crypto')}: ${state.includeCryptoUpDown ? '✅' : '❌'}`,
+    `⚡ ${t(lang, 'Slippage')}: ${state.slippage ?? 5}%`,
+    `📡 ${t(lang, 'Scan')}: ${state.scanInterval ?? 5}min`,
+    `🎲 ${t(lang, 'Side')}: ${state.outcomeSide ?? 'auto'}`,
   ];
 
-  if (state.minLiquidity != null) lines.push(`💧 Min Liquidity: $${state.minLiquidity}`);
-  if (state.minVolume != null) lines.push(`📊 Min Volume: $${state.minVolume}`);
-  if (state.maxSpendPerMarket != null) lines.push(`💸 Per Market Max: $${state.maxSpendPerMarket}`);
-  if (state.maxSpendTotal != null) lines.push(`💸 Total Max: $${state.maxSpendTotal}`);
-  if (state.maxDailyLoss != null) lines.push(`📅 Max Daily Loss: $${state.maxDailyLoss}`);
+  if (state.minLiquidity != null) lines.push(`💧 ${t(lang, 'Min Liquidity')}: $${state.minLiquidity}`);
+  if (state.minVolume != null) lines.push(`📊 ${t(lang, 'Min Volume')}: $${state.minVolume}`);
+  if (state.maxSpendPerMarket != null) lines.push(`💸 ${t(lang, 'Per Market Max')}: $${state.maxSpendPerMarket}`);
+  if (state.maxSpendTotal != null) lines.push(`💸 ${t(lang, 'Total Max')}: $${state.maxSpendTotal}`);
+  if (state.maxDailyLoss != null) lines.push(`📅 ${t(lang, 'Max Daily Loss')}: $${state.maxDailyLoss}`);
 
-  lines.push(`🔔 Notifications: On`);
+  lines.push(`🔔 ${t(lang, 'Notifications')}: ${t(lang, 'On')}`);
 
   // Consistency warnings
   const fa = state.fixedAmount ?? 25;
   const db = state.dailyBudget ?? 100;
   if (fa > db) {
-    lines.push(`\n⚠️ Amount/trade ($${fa}) exceeds daily budget ($${db}).`);
+    lines.push(`\n⚠️ ${t(lang, 'Amount/trade (${{fa}}) exceeds daily budget (${{db}}).', { fa: String(fa), db: String(db) })}`);
   }
   const mspm = state.maxSpendPerMarket;
   if (mspm != null && mspm < fa) {
-    lines.push(`⚠️ Per-market max ($${mspm}) is less than amount/trade ($${fa}).`);
+    lines.push(`⚠️ ${t(lang, 'Per-market max (${{mspm}}) is less than amount/trade (${{fa}}).', { mspm: String(mspm), fa: String(fa) })}`);
   }
 
-  lines.push(`\nStrategy starts <b>paused</b>. Start it from the manage page.`);
+  lines.push(`\n${t(lang, 'Strategy starts <b>paused</b>. Start it from the manage page.')}`);
 
   await sendHtml(ctx,
     lines.join('\n'),
     Markup.inlineKeyboard([
       [
-        Markup.button.callback('✅ Confirm', 'bond_add_confirm'),
-        Markup.button.callback('⚙️ Advanced', 'bond_add_advanced'),
+        Markup.button.callback(`✅ ${t(lang, 'Confirm')}`, 'bond_add_confirm'),
+        Markup.button.callback(`⚙️ ${t(lang, 'Advanced')}`, 'bond_add_advanced'),
       ],
-      [Markup.button.callback('← Cancel', 'bond_list')],
+      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
     ]),
   );
 }
@@ -570,9 +589,10 @@ export async function handleAddProbCustom(ctx: Context): Promise<void> {
   state.step = 'min_prob_custom';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `🎯 <b>Custom Min Probability</b>\n\nEnter a value between 50 and 99:`,
-    Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
+    `🎯 <b>${t(lang, 'Custom Min Probability')}</b>\n\n${t(lang, 'Enter a value between 50 and 99:')}`,
+    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')]]),
   );
 }
 
@@ -599,9 +619,10 @@ export async function handleAddHoursCustom(ctx: Context): Promise<void> {
   state.step = 'time_window_custom';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `⏰ <b>Custom Time Window</b>\n\nEnter hours (1–168):`,
-    Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
+    `⏰ <b>${t(lang, 'Custom Time Window')}</b>\n\n${t(lang, 'Enter hours (1–168):')}`,
+    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')]]),
   );
 }
 
@@ -628,9 +649,10 @@ export async function handleAddConcCustom(ctx: Context): Promise<void> {
   state.step = 'max_concurrent_custom';
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `📊 <b>Custom Max Positions</b>\n\nEnter a number (1–50):`,
-    Markup.inlineKeyboard([[Markup.button.callback('← Cancel', 'bond_list')]]),
+    `📊 <b>${t(lang, 'Custom Max Positions')}</b>\n\n${t(lang, 'Enter a number (1–50):')}`,
+    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')]]),
   );
 }
 
@@ -682,43 +704,44 @@ export async function handleAddAdvanced(ctx: Context): Promise<void> {
 }
 
 async function showAdvMenu(ctx: Context, state: BondAddState): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   const lines = [
-    `⚙️ <b>Advanced Settings</b>\n`,
-    `💵 Amount/Trade: $${state.fixedAmount ?? 25}`,
-    `⚡ Slippage: ${state.slippage ?? 5}%`,
-    `💧 Min Liquidity: ${state.minLiquidity != null ? '$' + state.minLiquidity : '–'}`,
-    `📊 Min Volume: ${state.minVolume != null ? '$' + state.minVolume : '–'}`,
-    `💸 Per Market Max: ${state.maxSpendPerMarket != null ? '$' + state.maxSpendPerMarket : '–'}`,
-    `💸 Total Max: ${state.maxSpendTotal != null ? '$' + state.maxSpendTotal : '–'}`,
-    `📅 Max Daily Loss: ${state.maxDailyLoss != null ? '$' + state.maxDailyLoss : '–'}`,
-    `🎯 Max Probability: ${(state.maxProbability ?? 99).toFixed(1)}%`,
-    `📡 Scan Interval: ${state.scanInterval ?? 5}min`,
-    `🎲 Outcome Side: ${state.outcomeSide ?? 'auto'}`,
-    `\nTap a setting to change it:`,
+    `⚙️ <b>${t(lang, 'Advanced Settings')}</b>\n`,
+    `💵 ${t(lang, 'Amount/Trade')}: $${state.fixedAmount ?? 25}`,
+    `⚡ ${t(lang, 'Slippage')}: ${state.slippage ?? 5}%`,
+    `💧 ${t(lang, 'Min Liquidity')}: ${state.minLiquidity != null ? '$' + state.minLiquidity : '–'}`,
+    `📊 ${t(lang, 'Min Volume')}: ${state.minVolume != null ? '$' + state.minVolume : '–'}`,
+    `💸 ${t(lang, 'Per Market Max')}: ${state.maxSpendPerMarket != null ? '$' + state.maxSpendPerMarket : '–'}`,
+    `💸 ${t(lang, 'Total Max')}: ${state.maxSpendTotal != null ? '$' + state.maxSpendTotal : '–'}`,
+    `📅 ${t(lang, 'Max Daily Loss')}: ${state.maxDailyLoss != null ? '$' + state.maxDailyLoss : '–'}`,
+    `🎯 ${t(lang, 'Max Probability')}: ${(state.maxProbability ?? 99).toFixed(1)}%`,
+    `📡 ${t(lang, 'Scan Interval')}: ${state.scanInterval ?? 5}min`,
+    `🎲 ${t(lang, 'Outcome Side')}: ${state.outcomeSide ?? 'auto'}`,
+    `\n${t(lang, 'Tap a setting to change it:')}`,
   ];
 
   await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard([
     [
-      Markup.button.callback('💵 Amount', 'bond_adv_edit_amount'),
-      Markup.button.callback('⚡ Slippage', 'bond_adv_edit_slippage'),
+      Markup.button.callback(`💵 ${t(lang, 'Amount')}`, 'bond_adv_edit_amount'),
+      Markup.button.callback(`⚡ ${t(lang, 'Slippage')}`, 'bond_adv_edit_slippage'),
     ],
     [
-      Markup.button.callback('💧 Min Liq', 'bond_adv_edit_min_liq'),
-      Markup.button.callback('📊 Min Vol', 'bond_adv_edit_min_vol'),
+      Markup.button.callback(`💧 ${t(lang, 'Min Liq')}`, 'bond_adv_edit_min_liq'),
+      Markup.button.callback(`📊 ${t(lang, 'Min Vol')}`, 'bond_adv_edit_min_vol'),
     ],
     [
-      Markup.button.callback('💸 Mkt Max', 'bond_adv_edit_mkt_max'),
-      Markup.button.callback('💸 Total Max', 'bond_adv_edit_total_max'),
+      Markup.button.callback(`💸 ${t(lang, 'Mkt Max')}`, 'bond_adv_edit_mkt_max'),
+      Markup.button.callback(`💸 ${t(lang, 'Total Max')}`, 'bond_adv_edit_total_max'),
     ],
     [
-      Markup.button.callback('📅 Loss Limit', 'bond_adv_edit_loss'),
-      Markup.button.callback('🎯 Max Prob', 'bond_adv_edit_max_prob'),
+      Markup.button.callback(`📅 ${t(lang, 'Loss Limit')}`, 'bond_adv_edit_loss'),
+      Markup.button.callback(`🎯 ${t(lang, 'Max Prob')}`, 'bond_adv_edit_max_prob'),
     ],
     [
-      Markup.button.callback('📡 Scan Int.', 'bond_adv_edit_scan'),
-      Markup.button.callback('🎲 Side', 'bond_adv_edit_side'),
+      Markup.button.callback(`📡 ${t(lang, 'Scan Int.')}`, 'bond_adv_edit_scan'),
+      Markup.button.callback(`🎲 ${t(lang, 'Side')}`, 'bond_adv_edit_side'),
     ],
-    [Markup.button.callback('← Back to Review', 'bond_adv_back_review')],
+    [Markup.button.callback(`← ${t(lang, 'Back to Review')}`, 'bond_adv_back_review')],
   ]));
 }
 
@@ -761,6 +784,8 @@ export async function handleAdvEdit(ctx: Context, field: string): Promise<void> 
   const state = await bondAddState.get(telegramId);
   if (!state) return;
 
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+
   const stepMap: Record<string, BondAddState['step']> = {
     amount: 'adv_amount',
     slippage: 'adv_slippage',
@@ -783,7 +808,7 @@ export async function handleAdvEdit(ctx: Context, field: string): Promise<void> 
         Markup.button.callback('YES', 'bond_add_side_yes'),
         Markup.button.callback('NO', 'bond_add_side_no'),
       ],
-      [Markup.button.callback('← Back', 'bond_add_advanced')],
+      [Markup.button.callback(`← ${t(lang, 'Back')}`, 'bond_add_advanced')],
     ]));
     return;
   }
@@ -795,9 +820,9 @@ export async function handleAdvEdit(ctx: Context, field: string): Promise<void> 
   state.timestamp = Date.now();
   bondAddState.set(telegramId, state);
 
-  const prompt = ADV_PROMPTS[step] || 'Enter value:';
+  const prompt = ADV_PROMPTS[step] || `${t(lang, 'Enter value:')}`;
   await sendHtml(ctx, prompt, Markup.inlineKeyboard([
-    [Markup.button.callback('← Back', 'bond_add_advanced')],
+    [Markup.button.callback(`← ${t(lang, 'Back')}`, 'bond_add_advanced')],
   ]));
 }
 
@@ -807,10 +832,12 @@ export async function handleBondConfirmAdd(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
 
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+
   const state = await bondAddState.get(telegramId);
   if (!state) {
     await ctx.answerCbQuery().catch(() => {});
-    await ctx.reply('Session expired. Try again.');
+    await ctx.reply(t(lang, 'Session expired. Try again.'));
     return;
   }
 
@@ -818,14 +845,14 @@ export async function handleBondConfirmAdd(ctx: Context): Promise<void> {
   const minProb = state.minProbability ?? 95;
   const maxProb = state.maxProbability ?? 99;
   if (maxProb < minProb) {
-    await ctx.answerCbQuery('Invalid probability range').catch(() => {});
+    await ctx.answerCbQuery(t(lang, 'Invalid probability range')).catch(() => {});
     await sendHtml(ctx,
-      `⚠️ <b>Invalid Settings</b>\n\n` +
-      `Max Probability (${maxProb}%) cannot be less than Min Probability (${minProb}%).\n` +
-      `Please adjust in Advanced Settings.`,
+      `⚠️ <b>${t(lang, 'Invalid Settings')}</b>\n\n` +
+      t(lang, 'Max Probability ({{max}}%) cannot be less than Min Probability ({{min}}%).', { max: String(maxProb), min: String(minProb) }) + `\n` +
+      t(lang, 'Please adjust in Advanced Settings.'),
       Markup.inlineKeyboard([
-        [Markup.button.callback('⚙️ Advanced', 'bond_add_advanced')],
-        [Markup.button.callback('← Cancel', 'bond_list')],
+        [Markup.button.callback(`⚙️ ${t(lang, 'Advanced')}`, 'bond_add_advanced')],
+        [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'bond_list')],
       ]),
     );
     return;
@@ -843,7 +870,7 @@ export async function handleBondConfirmAdd(ctx: Context): Promise<void> {
       return tx.bondStrategy.create({
         data: {
           userId: user.id,
-          label: state.name || 'Strategy',
+          label: state.name || t(lang, 'Strategy'),
           fixedAmount: state.fixedAmount ?? 25,
           dailyBudget: state.dailyBudget ?? 100,
           maxDailyLoss: state.maxDailyLoss ?? null,
@@ -866,12 +893,12 @@ export async function handleBondConfirmAdd(ctx: Context): Promise<void> {
     });
   } catch (err: any) {
     logger.error(`[bond] Failed to create strategy: ${err?.message}`);
-    await sendHtml(ctx, `❌ Failed to create strategy. Please try again.`);
+    await sendHtml(ctx, t(lang, 'Failed to create strategy. Please try again.'));
     return;
   }
 
   if (!created) {
-    await sendHtml(ctx, `❌ Maximum ${MAX_STRATEGIES} strategies reached. Delete one first.`);
+    await sendHtml(ctx, t(lang, 'Maximum {{max}} strategies reached. Delete one first.', { max: MAX_STRATEGIES }));
     return;
   }
 
@@ -888,13 +915,14 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
   const state = await bondAddState.get(telegramId);
   if (!state) return false;
 
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   const num = parseNumber(text);
 
   switch (state.step) {
     case 'name': {
       const name = text.trim();
       if (!name || name.length < 1 || name.length > 32) {
-        await ctx.reply('Enter a name (1–32 characters).');
+        await ctx.reply(t(lang, 'Enter a name (1–32 characters).'));
         return true;
       }
       state.name = name;
@@ -907,7 +935,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'daily_budget': {
       if (num == null || num < 1 || num > 100_000) {
-        await ctx.reply('❌ Enter a valid amount ($1–$100,000).');
+        await ctx.reply(t(lang, 'Enter a valid amount ($1–$100,000).'));
         return true;
       }
       state.dailyBudget = num;
@@ -920,7 +948,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'min_prob_custom': {
       if (num == null || num < 50 || num > 99) {
-        await ctx.reply('❌ Enter a value between 50 and 99.');
+        await ctx.reply(t(lang, 'Enter a value between 50 and 99.'));
         return true;
       }
       state.minProbability = num;
@@ -933,7 +961,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'time_window_custom': {
       if (num == null || num < 1 || num > 168) {
-        await ctx.reply('❌ Enter hours between 1 and 168.');
+        await ctx.reply(t(lang, 'Enter hours between 1 and 168.'));
         return true;
       }
       state.maxHoursOut = Math.round(num);
@@ -946,7 +974,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'max_concurrent_custom': {
       if (num == null || num < 1 || num > 50) {
-        await ctx.reply('❌ Enter a number between 1 and 50.');
+        await ctx.reply(t(lang, 'Enter a number between 1 and 50.'));
         return true;
       }
       state.maxConcurrent = Math.round(num);
@@ -960,7 +988,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
     // Advanced steps text input
     case 'adv_amount': {
       if (num == null || num < 1 || num > 10_000) {
-        await ctx.reply('❌ Enter a valid amount ($1–$10,000).');
+        await ctx.reply(t(lang, 'Enter a valid amount ($1–$10,000).'));
         return true;
       }
       state.fixedAmount = num;
@@ -969,7 +997,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_slippage': {
       if (num == null || num < 0.1 || num > 50) {
-        await ctx.reply('❌ Enter slippage between 0.1% and 50%.');
+        await ctx.reply(t(lang, 'Enter slippage between 0.1% and 50%.'));
         return true;
       }
       state.slippage = num;
@@ -978,7 +1006,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_min_liq': {
       if (num == null || num < 0) {
-        await ctx.reply('❌ Enter a valid amount.');
+        await ctx.reply(t(lang, 'Enter a valid amount.'));
         return true;
       }
       state.minLiquidity = num;
@@ -987,7 +1015,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_min_vol': {
       if (num == null || num < 0) {
-        await ctx.reply('❌ Enter a valid amount.');
+        await ctx.reply(t(lang, 'Enter a valid amount.'));
         return true;
       }
       state.minVolume = num;
@@ -996,7 +1024,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_max_spend_market': {
       if (num == null || num < 1) {
-        await ctx.reply('❌ Enter a valid amount (min $1).');
+        await ctx.reply(t(lang, 'Enter a valid amount (min $1).'));
         return true;
       }
       state.maxSpendPerMarket = num;
@@ -1005,7 +1033,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_max_spend_total': {
       if (num == null || num < 1) {
-        await ctx.reply('❌ Enter a valid amount (min $1).');
+        await ctx.reply(t(lang, 'Enter a valid amount (min $1).'));
         return true;
       }
       state.maxSpendTotal = num;
@@ -1014,7 +1042,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_max_daily_loss': {
       if (num == null || num < 1) {
-        await ctx.reply('❌ Enter a valid amount (min $1).');
+        await ctx.reply(t(lang, 'Enter a valid amount (min $1).'));
         return true;
       }
       state.maxDailyLoss = num;
@@ -1023,12 +1051,12 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_max_prob': {
       if (num == null || num < 50 || num > 100) {
-        await ctx.reply('❌ Enter a value between 50 and 100.');
+        await ctx.reply(t(lang, 'Enter a value between 50 and 100.'));
         return true;
       }
       const minP = state.minProbability ?? 95;
       if (num < minP) {
-        await ctx.reply(`❌ Max probability must be >= min probability (${minP}%).`);
+        await ctx.reply(t(lang, 'Max probability must be >= min probability ({{min}}%).', { min: String(minP) }));
         return true;
       }
       state.maxProbability = num;
@@ -1037,7 +1065,7 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
 
     case 'adv_scan_interval': {
       if (num == null || num < 1 || num > 10) {
-        await ctx.reply('❌ Enter minutes between 1 and 10.');
+        await ctx.reply(t(lang, 'Enter minutes between 1 and 10.'));
         return true;
       }
       state.scanInterval = Math.round(num);
@@ -1072,81 +1100,83 @@ async function verifyBondOwnership(ctx: Context, stratId: string) {
 export async function handleBondManage(ctx: Context, stratId: string): Promise<void> {
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+
   const strat = await verifyBondOwnership(ctx, stratId);
   if (!strat) {
-    await ctx.reply('❌ Strategy not found.');
+    await ctx.reply(t(lang, 'Strategy not found.'));
     return;
   }
 
-  const statusStr = strat.isActive && !strat.isPaused ? '🟢 Running' : '🔴 Paused';
+  const statusStr = strat.isActive && !strat.isPaused ? `🟢 ${t(lang, 'Running')}` : `🔴 ${t(lang, 'Paused')}`;
   const name = strat.label || strat.id.slice(0, 8);
 
   const lines = [
-    `⚙️ <b>Strategy: ${esc(name)}</b>\n`,
-    `📊 Status: ${statusStr}`,
-    `💰 Daily Budget: $${strat.dailyBudget}`,
-    `💵 Amount/Trade: $${strat.fixedAmount}`,
-    `🎯 Min Probability: ${strat.minProbability.toFixed(1)}%`,
-    `🎯 Max Probability: ${strat.maxProbability.toFixed(1)}%`,
-    `⏰ Time Window: ${strat.maxHoursOut}h`,
-    `📊 Max Positions: ${strat.maxConcurrent}`,
-    `🏈 Sports: ${strat.includeSports ? '✅' : '❌'}  |  ₿ Crypto: ${strat.includeCryptoUpDown ? '✅' : '❌'}`,
-    `⚡ Slippage: ${strat.slippage}%`,
-    `📡 Scan: ${strat.scanInterval}min`,
-    `🎲 Side: ${strat.outcomeSide}`,
-    `💧 Min Liquidity: ${fmtVal(strat.minLiquidity)}`,
-    `📊 Min Volume: ${fmtVal(strat.minVolume)}`,
-    `💸 Per Market Max: ${fmtVal(strat.maxSpendPerMarket)}`,
-    `💸 Total Max: ${fmtVal(strat.maxSpendTotal)}`,
-    `📅 Max Daily Loss: ${fmtVal(strat.maxDailyLoss)}`,
-    `🔔 Notifications: ${onOff(strat.notificationsEnabled)}`,
+    `⚙️ <b>${t(lang, 'Strategy')}: ${esc(name)}</b>\n`,
+    `📊 ${t(lang, 'Status')}: ${statusStr}`,
+    `💰 ${t(lang, 'Daily Budget')}: $${strat.dailyBudget}`,
+    `💵 ${t(lang, 'Amount/Trade')}: $${strat.fixedAmount}`,
+    `🎯 ${t(lang, 'Min Probability')}: ${strat.minProbability.toFixed(1)}%`,
+    `🎯 ${t(lang, 'Max Probability')}: ${strat.maxProbability.toFixed(1)}%`,
+    `⏰ ${t(lang, 'Time Window')}: ${strat.maxHoursOut}h`,
+    `📊 ${t(lang, 'Max Positions')}: ${strat.maxConcurrent}`,
+    `🏈 ${t(lang, 'Sports')}: ${strat.includeSports ? '✅' : '❌'}  |  ₿ ${t(lang, 'Crypto')}: ${strat.includeCryptoUpDown ? '✅' : '❌'}`,
+    `⚡ ${t(lang, 'Slippage')}: ${strat.slippage}%`,
+    `📡 ${t(lang, 'Scan')}: ${strat.scanInterval}min`,
+    `🎲 ${t(lang, 'Side')}: ${strat.outcomeSide}`,
+    `💧 ${t(lang, 'Min Liquidity')}: ${fmtVal(strat.minLiquidity)}`,
+    `📊 ${t(lang, 'Min Volume')}: ${fmtVal(strat.minVolume)}`,
+    `💸 ${t(lang, 'Per Market Max')}: ${fmtVal(strat.maxSpendPerMarket)}`,
+    `💸 ${t(lang, 'Total Max')}: ${fmtVal(strat.maxSpendTotal)}`,
+    `📅 ${t(lang, 'Max Daily Loss')}: ${fmtVal(strat.maxDailyLoss)}`,
+    `🔔 ${t(lang, 'Notifications')}: ${onOff(strat.notificationsEnabled)}`,
   ];
 
   const id = strat.id;
   const toggleBtn = strat.isPaused
-    ? Markup.button.callback('▶️ Start', `bpm_start_${id}`)
-    : Markup.button.callback('⏹ Pause', `bpm_pause_${id}`);
+    ? Markup.button.callback(`▶️ ${t(lang, 'Start')}`, `bpm_start_${id}`)
+    : Markup.button.callback(`⏹ ${t(lang, 'Pause')}`, `bpm_pause_${id}`);
 
   const buttons = [
     [toggleBtn],
     [
-      Markup.button.callback('💰 Budget', `bpm_budget_${id}`),
-      Markup.button.callback('💵 Amount', `bpm_amount_${id}`),
+      Markup.button.callback(`💰 ${t(lang, 'Budget')}`, `bpm_budget_${id}`),
+      Markup.button.callback(`💵 ${t(lang, 'Amount')}`, `bpm_amount_${id}`),
     ],
     [
-      Markup.button.callback('🎯 Min Prob', `bpm_pmin_${id}`),
-      Markup.button.callback('🎯 Max Prob', `bpm_pmax_${id}`),
+      Markup.button.callback(`🎯 ${t(lang, 'Min Prob')}`, `bpm_pmin_${id}`),
+      Markup.button.callback(`🎯 ${t(lang, 'Max Prob')}`, `bpm_pmax_${id}`),
     ],
     [
-      Markup.button.callback('⏰ Window', `bpm_window_${id}`),
-      Markup.button.callback('📊 Max Pos', `bpm_maxpos_${id}`),
-      Markup.button.callback('⚡ Slippage', `bpm_slip_${id}`),
+      Markup.button.callback(`⏰ ${t(lang, 'Window')}`, `bpm_window_${id}`),
+      Markup.button.callback(`📊 ${t(lang, 'Max Pos')}`, `bpm_maxpos_${id}`),
+      Markup.button.callback(`⚡ ${t(lang, 'Slippage')}`, `bpm_slip_${id}`),
     ],
     [
-      Markup.button.callback('📡 Interval', `bpm_interval_${id}`),
-      Markup.button.callback('🎲 Side', `bpm_side_${id}`),
+      Markup.button.callback(`📡 ${t(lang, 'Interval')}`, `bpm_interval_${id}`),
+      Markup.button.callback(`🎲 ${t(lang, 'Side')}`, `bpm_side_${id}`),
     ],
     [
-      Markup.button.callback('🏈 Sports', `bpm_sports_${id}`),
-      Markup.button.callback('₿ Crypto', `bpm_crypto_${id}`),
+      Markup.button.callback(`🏈 ${t(lang, 'Sports')}`, `bpm_sports_${id}`),
+      Markup.button.callback(`₿ ${t(lang, 'Crypto')}`, `bpm_crypto_${id}`),
     ],
     [
-      Markup.button.callback('💧 Liquidity', `bpm_liq_${id}`),
-      Markup.button.callback('📊 Volume', `bpm_vol_${id}`),
+      Markup.button.callback(`💧 ${t(lang, 'Liquidity')}`, `bpm_liq_${id}`),
+      Markup.button.callback(`📊 ${t(lang, 'Volume')}`, `bpm_vol_${id}`),
     ],
     [
-      Markup.button.callback('💸 Mkt Max', `bpm_mktmax_${id}`),
-      Markup.button.callback('💸 Total Max', `bpm_totmax_${id}`),
+      Markup.button.callback(`💸 ${t(lang, 'Mkt Max')}`, `bpm_mktmax_${id}`),
+      Markup.button.callback(`💸 ${t(lang, 'Total Max')}`, `bpm_totmax_${id}`),
     ],
     [
-      Markup.button.callback('📅 Loss Limit', `bpm_loss_${id}`),
-      Markup.button.callback('🔔 Notify', `bpm_notify_${id}`),
+      Markup.button.callback(`📅 ${t(lang, 'Loss Limit')}`, `bpm_loss_${id}`),
+      Markup.button.callback(`🔔 ${t(lang, 'Notify')}`, `bpm_notify_${id}`),
     ],
     [
-      Markup.button.callback('✏️ Rename', `bpm_rename_${id}`),
-      Markup.button.callback('🗑 Delete', `bpm_del_${id}`),
+      Markup.button.callback(`✏️ ${t(lang, 'Rename')}`, `bpm_rename_${id}`),
+      Markup.button.callback(`🗑 ${t(lang, 'Delete')}`, `bpm_del_${id}`),
     ],
-    [Markup.button.callback('← Back to List', 'bond_list')],
+    [Markup.button.callback(`← ${t(lang, 'Back to List')}`, 'bond_list')],
   ];
 
   await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
@@ -1216,22 +1246,24 @@ export async function handleManageEditPrompt(
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   bondEditState.set(telegramId, { step, stratId: id, timestamp: Date.now() });
 
   await sendHtml(ctx, prompt, Markup.inlineKeyboard([
-    [Markup.button.callback('← Cancel', `bond_task_${id}`)],
+    [Markup.button.callback(`← ${t(lang, 'Cancel')}`, `bond_task_${id}`)],
   ]));
 }
 
 // Delete
 export async function handleManageDelete(ctx: Context, id: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `⚠️ <b>Delete Strategy</b>\n\nAre you sure? This cannot be undone.`,
+    `⚠️ <b>${t(lang, 'Delete Strategy')}</b>\n\n${t(lang, 'Are you sure? This cannot be undone.')}`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback('🗑 Yes, Delete', `bpm_deldo_${id}`),
-        Markup.button.callback('← Cancel', `bond_task_${id}`),
+        Markup.button.callback(`🗑 ${t(lang, 'Yes, Delete')}`, `bpm_deldo_${id}`),
+        Markup.button.callback(`← ${t(lang, 'Cancel')}`, `bond_task_${id}`),
       ],
     ]),
   );
@@ -1241,12 +1273,13 @@ export async function handleManageDeleteExecute(ctx: Context, id: string): Promi
   await ctx.answerCbQuery().catch(() => {});
   const strat = await verifyBondOwnership(ctx, id);
   if (!strat) return;
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   try {
     await prisma.bondTrade.deleteMany({ where: { strategyId: id } });
     await prisma.bondStrategy.delete({ where: { id } });
   } catch (err: any) {
     logger.error(`[bond] Failed to delete strategy ${id}: ${err?.message}`);
-    await sendHtml(ctx, `❌ Failed to delete strategy. Please try again.`);
+    await sendHtml(ctx, t(lang, 'Failed to delete strategy. Please try again.'));
     return;
   }
   await handleBondList(ctx);
@@ -1254,8 +1287,9 @@ export async function handleManageDeleteExecute(ctx: Context, id: string): Promi
 
 // Rename prompt
 export async function handleManageRename(ctx: Context, id: string): Promise<void> {
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await handleManageEditPrompt(ctx, id, 'awaiting_rename',
-    `✏️ <b>Rename Strategy</b>\n\nEnter a new name:`);
+    `✏️ <b>${t(lang, 'Rename Strategy')}</b>\n\n${t(lang, 'Enter a new name:')}`);
 }
 
 // ─── Edit Text Input Handler ────────────────────────────────────────────────
@@ -1267,11 +1301,13 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
   const state = await bondEditState.get(telegramId);
   if (!state) return false;
 
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+
   // Verify ownership before any update
   const owned = await verifyBondOwnership(ctx, state.stratId);
   if (!owned) {
     bondEditState.delete(telegramId);
-    await ctx.reply('❌ Strategy not found.');
+    await ctx.reply(t(lang, 'Strategy not found.'));
     return true;
   }
 
@@ -1282,7 +1318,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
     switch (state.step) {
       case 'awaiting_budget': {
         if (num == null || num < 1 || num > 100_000) {
-          await ctx.reply('❌ Enter $1–$100,000.');
+          await ctx.reply(t(lang, 'Enter $1–$100,000.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { dailyBudget: num } });
@@ -1290,7 +1326,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_amount': {
         if (num == null || num < 1 || num > 10_000) {
-          await ctx.reply('❌ Enter $1–$10,000.');
+          await ctx.reply(t(lang, 'Enter $1–$10,000.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { fixedAmount: num } });
@@ -1298,7 +1334,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_slippage': {
         if (num == null || num < 0.1 || num > 50) {
-          await ctx.reply('❌ Enter 0.1%–50%.');
+          await ctx.reply(t(lang, 'Enter 0.1%–50%.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { slippage: num } });
@@ -1306,12 +1342,12 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_min_prob': {
         if (num == null || num < 50 || num > 99) {
-          await ctx.reply('❌ Enter 50–99.');
+          await ctx.reply(t(lang, 'Enter 50–99.'));
           return true;
         }
         const stratForMin = await prisma.bondStrategy.findUnique({ where: { id }, select: { maxProbability: true } });
         if (stratForMin && num > stratForMin.maxProbability) {
-          await ctx.reply(`❌ Min probability must be <= max probability (${stratForMin.maxProbability}%).`);
+          await ctx.reply(t(lang, 'Min probability must be <= max probability ({{max}}%).', { max: String(stratForMin.maxProbability) }));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { minProbability: num } });
@@ -1319,12 +1355,12 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_max_prob': {
         if (num == null || num < 50 || num > 100) {
-          await ctx.reply('❌ Enter 50–100.');
+          await ctx.reply(t(lang, 'Enter 50–100.'));
           return true;
         }
         const stratForMax = await prisma.bondStrategy.findUnique({ where: { id }, select: { minProbability: true } });
         if (stratForMax && num < stratForMax.minProbability) {
-          await ctx.reply(`❌ Max probability must be >= min probability (${stratForMax.minProbability}%).`);
+          await ctx.reply(t(lang, 'Max probability must be >= min probability ({{min}}%).', { min: String(stratForMax.minProbability) }));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxProbability: num } });
@@ -1332,7 +1368,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_window': {
         if (num == null || num < 1 || num > 168) {
-          await ctx.reply('❌ Enter 1–168 hours.');
+          await ctx.reply(t(lang, 'Enter 1–168 hours.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxHoursOut: Math.round(num) } });
@@ -1340,7 +1376,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_max_pos': {
         if (num == null || num < 1 || num > 50) {
-          await ctx.reply('❌ Enter 1–50.');
+          await ctx.reply(t(lang, 'Enter 1–50.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxConcurrent: Math.round(num) } });
@@ -1348,7 +1384,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_interval': {
         if (num == null || num < 1 || num > 10) {
-          await ctx.reply('❌ Enter 1–10 minutes.');
+          await ctx.reply(t(lang, 'Enter 1–10 minutes.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { scanInterval: Math.round(num) } });
@@ -1356,7 +1392,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_min_liq': {
         if (num == null || num < 0) {
-          await ctx.reply('❌ Enter a valid amount.');
+          await ctx.reply(t(lang, 'Enter a valid amount.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { minLiquidity: num ?? null } });
@@ -1364,7 +1400,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_min_vol': {
         if (num == null || num < 0) {
-          await ctx.reply('❌ Enter a valid amount.');
+          await ctx.reply(t(lang, 'Enter a valid amount.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { minVolume: num ?? null } });
@@ -1372,7 +1408,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_mkt_max': {
         if (num == null || num < 1) {
-          await ctx.reply('❌ Enter min $1.');
+          await ctx.reply(t(lang, 'Enter min $1.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxSpendPerMarket: num } });
@@ -1380,7 +1416,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_total_max': {
         if (num == null || num < 1) {
-          await ctx.reply('❌ Enter min $1.');
+          await ctx.reply(t(lang, 'Enter min $1.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxSpendTotal: num } });
@@ -1388,7 +1424,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       }
       case 'awaiting_loss_limit': {
         if (num == null || num < 1) {
-          await ctx.reply('❌ Enter min $1.');
+          await ctx.reply(t(lang, 'Enter min $1.'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxDailyLoss: num } });
@@ -1397,7 +1433,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
       case 'awaiting_rename': {
         const name = text.trim().slice(0, 30);
         if (!name) {
-          await ctx.reply('❌ Enter a name (max 30 chars).');
+          await ctx.reply(t(lang, 'Enter a name (max 30 chars).'));
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { label: name } });
@@ -1412,7 +1448,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
     return true;
   } catch (err: any) {
     logger.error(`[bond] Edit error: ${err?.message}`);
-    await ctx.reply('❌ Failed to update. Please try again.');
+    await ctx.reply(t(lang, 'Failed to update. Please try again.'));
     return true;
   }
 }

@@ -1,16 +1,20 @@
 import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
+import { getUserByTelegramId } from '../../services/user';
+import { t, Locale } from '../../i18n';
 
 export async function handleHelp(ctx: Context): Promise<void> {
-  const helpMessage =
-    '📚 <b>PolyTech Sniper Bot — Help</b>\n\n' +
-    'Need help or have questions?\n' +
-    'Join our community group for support!';
+  const telegramId = ctx.from?.id.toString();
+  let lang: Locale = 'en';
+  if (telegramId) {
+    const user = await getUserByTelegramId(telegramId);
+    if (user?.language) lang = user.language as Locale;
+  }
 
-  await ctx.reply(helpMessage, {
+  await ctx.reply(t(lang, 'help.title'), {
     parse_mode: 'HTML',
     ...Markup.inlineKeyboard([
-      [Markup.button.url('💬 Join @tradepolytech', 'https://t.me/tradepolytech')],
+      [Markup.button.url(t(lang, 'help.joinBtn'), 'https://t.me/tradepolytech')],
     ]),
   });
 }

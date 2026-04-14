@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger';
 import { decrypt } from '../../utils/encryption';
 import { sendPage } from '../../utils/telegram';
 import { RedisBackedState } from '../../utils/redisState';
+import { t, Locale, LOCALE_LABELS, SUPPORTED_LOCALES } from '../../i18n';
 
 const IMG_SETTINGS = path.join(__dirname, '../img/settings.PNG');
 
@@ -14,6 +15,11 @@ export const settingsAmountState = new RedisBackedState<{ timestamp: number }>('
 
 // Tracks users who are waiting to type a custom slippage tolerance value (TTL: 10 min)
 export const settingsSlippageState = new RedisBackedState<{ timestamp: number }>('settingsSlippage', 600);
+
+/** Get locale from user object */
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 /**
  * Shows settings menu
@@ -24,52 +30,50 @@ export async function handleSettingsMenu(ctx: Context): Promise<void> {
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await sendPage(ctx, '❌ User not found. Use /start to create your wallet.', {
+      await sendPage(ctx, t('en', 'common.userNotFound'), {
         parse_mode: 'Markdown',
       });
       return;
     }
 
-    const twoFAStatus    = user.twoFactorEnabled ? '✅ Enabled' : '❌ Disabled';
+    const lang = getLang(user);
+    const twoFAStatus    = user.twoFactorEnabled ? t(lang, 'settings.twoFAEnabled') : t(lang, 'settings.twoFADisabled');
     const defaultAmount  = user.defaultTradeAmount || 25;
     const slippagePct    = user.slippageTolerance ?? 1.0;
 
     const message =
-      '⚙️ *Settings*\n\n' +
-      'Manage your account security and preferences.\n\n' +
-      `🔐 *2FA Status:* ${twoFAStatus} _(Optional)_\n` +
-      `💰 *Default Trade Amount:* $${defaultAmount}\n` +
-      `⚡ *Slippage Tolerance:* ${slippagePct}%\n\n` +
-      '💡 *Available Options:*\n' +
-      '• View your private key\n' +
-      '• Change default trade amount\n' +
-      '• Configure slippage tolerance for market orders\n' +
-      '• Configure Two-Factor Authentication (optional)\n\n' +
-      '⚠️ Keep your private key safe and never share it with anyone.';
+      t(lang, 'settings.title') +
+      t(lang, 'settings.subtitle') +
+      t(lang, 'settings.twoFAStatus', { status: twoFAStatus }) +
+      t(lang, 'settings.defaultAmount', { amount: defaultAmount }) +
+      t(lang, 'settings.slippage', { pct: slippagePct }) +
+      t(lang, 'settings.options') +
+      t(lang, 'settings.keyWarning');
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       image_path: IMG_SETTINGS,
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('🔑 Show Secret Key',       'settings_show_key')],
-        [Markup.button.callback('💰 Change Default Amount', 'settings_change_amount')],
-        [Markup.button.callback('⚡ Slippage Tolerance',    'settings_change_slippage')],
-        [Markup.button.callback('🔐 2FA Settings',          '2fa_menu')],
-        [Markup.button.callback('« Back to Wallet',         'wallet_page')],
-        [Markup.button.callback('🏠 Main Menu',               'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.showSecretKey'),       'settings_show_key')],
+        [Markup.button.callback(t(lang, 'btn.changeDefaultAmount'), 'settings_change_amount')],
+        [Markup.button.callback(t(lang, 'btn.slippageTolerance'),    'settings_change_slippage')],
+        [Markup.button.callback(t(lang, 'btn.twoFASettings'),          '2fa_menu')],
+        [Markup.button.callback(t(lang, 'btn.language'),             'settings_language')],
+        [Markup.button.callback(t(lang, 'btn.backToWallet'),         'wallet_page')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'),               'back_to_menu')],
       ]),
     });
 
     logger.info(`Settings menu shown to user: ${telegramId}`);
   } catch (error) {
     logger.error('Error showing settings menu:', error);
-    await ctx.reply('❌ An error occurred while loading settings.');
+    await ctx.reply(t('en', 'settings.errorLoading'));
   }
 }
 
@@ -82,47 +86,41 @@ export async function handleShowSecretKey(ctx: Context): Promise<void> {
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await sendPage(ctx, '❌ User not found.', {
+      await sendPage(ctx, t('en', 'common.userNotFoundShort'), {
         parse_mode: 'Markdown',
       });
       return;
     }
 
+    const lang = getLang(user);
     const privateKey = decrypt(user.encryptedPrivateKey);
 
     const message =
-      '🔑 *Your Secret Key (Private Key)*\n\n' +
-      '⚠️ *CRITICAL SECURITY WARNING:*\n' +
-      '• Never share this key with anyone\n' +
-      '• Anyone with this key can access your funds\n' +
-      '• Delete this message after copying\n' +
-      '• Store it securely offline\n\n' +
-      `🔐 *Private Key:*\n\`${privateKey}\`\n\n` +
-      '💡 *What you can do with this key:*\n' +
-      '• Import wallet to MetaMask or other wallets\n' +
-      '• Recover your account on any device\n' +
-      '• Backup your wallet\n\n' +
-      '🚨 *Never enter this key on untrusted websites!*';
+      t(lang, 'settings.secretKey.title') +
+      t(lang, 'settings.secretKey.warning') +
+      t(lang, 'settings.secretKey.key', { key: privateKey }) +
+      t(lang, 'settings.secretKey.uses') +
+      t(lang, 'settings.secretKey.neverShare');
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('🗑 Delete This Message', 'settings_delete_key_msg')],
-        [Markup.button.callback('« Back to Settings', 'settings_menu')],
-        [Markup.button.callback('🏠 Main Menu',        'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.deleteMessage'), 'settings_delete_key_msg')],
+        [Markup.button.callback(t(lang, 'btn.backToSettings'), 'settings_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'),        'back_to_menu')],
       ]),
     });
 
     logger.info(`Secret key shown to user: ${telegramId}`);
   } catch (error) {
     logger.error('Error showing secret key:', error);
-    await ctx.reply('❌ An error occurred while retrieving your secret key.');
+    await ctx.reply(t('en', 'settings.secretKey.errorLoading'));
   }
 }
 
@@ -140,16 +138,17 @@ export async function handleChangeDefaultAmount(ctx: Context): Promise<void> {
     const user = await getUserByTelegramId(telegramId);
 
     if (!user) {
-      await sendPage(ctx, '❌ User not found.');
+      await sendPage(ctx, t('en', 'common.userNotFoundShort'));
       return;
     }
 
+    const lang = getLang(user);
     const currentAmount = user.defaultTradeAmount || 25;
 
     const message =
-      '💰 *Default Trade Amount*\n\n' +
-      `Current: *$${currentAmount}*\n\n` +
-      'Pick a preset or type any amount:';
+      t(lang, 'settings.amount.title') +
+      t(lang, 'settings.amount.current', { amount: currentAmount }) +
+      t(lang, 'settings.amount.prompt');
 
     settingsAmountState.set(telegramId, { timestamp: Date.now() });
 
@@ -162,15 +161,15 @@ export async function handleChangeDefaultAmount(ctx: Context): Promise<void> {
           Markup.button.callback('$50',  'settings_amount_50'),
           Markup.button.callback('$100', 'settings_amount_100'),
         ],
-        [Markup.button.callback('« Back', 'settings_menu')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.back'), 'settings_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
       ]),
     });
 
     logger.info(`Default amount selection shown to user: ${telegramId}`);
   } catch (error) {
     logger.error('Error showing default amount selection:', error);
-    await ctx.reply('❌ An error occurred.');
+    await ctx.reply(t('en', 'common.errorGeneric'));
   }
 }
 
@@ -179,7 +178,7 @@ export async function handleChangeDefaultAmount(ctx: Context): Promise<void> {
  */
 export async function handleSetDefaultAmount(ctx: Context, amount: number): Promise<void> {
   try {
-    await ctx.answerCbQuery(`Default set to $${amount}`);
+    await ctx.answerCbQuery(t('en', 'settings.amount.setCb', { amount }));
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
@@ -201,7 +200,7 @@ export async function handleSetDefaultAmount(ctx: Context, amount: number): Prom
     await handleSettingsMenu(ctx);
   } catch (error) {
     logger.error('Error updating default amount:', error);
-    await ctx.answerCbQuery('❌ Error updating amount');
+    await ctx.answerCbQuery(t('en', 'settings.amount.errorCb'));
   }
 }
 
@@ -215,6 +214,9 @@ export async function handleCustomAmountInput(ctx: Context, text: string): Promi
 
   settingsAmountState.delete(telegramId);
 
+  const user = await getUserByTelegramId(telegramId);
+  const lang = getLang(user);
+
   // Locale-aware parse: handles "1,5" (EU) → 1.5 and "1,000" (US) → 1000
   const raw = text.trim().replace(/[^\d.,]/g, '');
   const lastComma = raw.lastIndexOf(',');
@@ -226,12 +228,12 @@ export async function handleCustomAmountInput(ctx: Context, text: string): Promi
 
   if (isNaN(amount) || amount < 1) {
     await sendPage(ctx,
-      '❌ *Invalid amount*\n\nPlease enter a number of at least $1.',
+      t(lang, 'settings.amount.invalid'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Try Again', 'settings_change_amount')],
-          [Markup.button.callback('« Back', 'settings_menu')],
+          [Markup.button.callback(t(lang, 'btn.tryAgainAmount'), 'settings_change_amount')],
+          [Markup.button.callback(t(lang, 'btn.back'), 'settings_menu')],
         ]),
       }
     );
@@ -240,11 +242,11 @@ export async function handleCustomAmountInput(ctx: Context, text: string): Promi
 
   if (amount > 100_000) {
     await sendPage(ctx,
-      '❌ *Amount too large*\n\nMaximum default amount is $100,000.',
+      t(lang, 'settings.amount.tooLarge'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Try Again', 'settings_change_amount')],
+          [Markup.button.callback(t(lang, 'btn.tryAgainAmount'), 'settings_change_amount')],
         ]),
       }
     );
@@ -266,12 +268,12 @@ export async function handleCustomAmountInput(ctx: Context, text: string): Promi
   logger.info(`Default trade amount updated to $${rounded} for user: ${telegramId}`);
 
   await sendPage(ctx,
-    `✅ *Default trade amount set to $${rounded}*\n\nAll your quick trades will now default to this amount.`,
+    t(lang, 'settings.amount.success', { amount: rounded }),
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('⚙️ Settings', 'settings_menu')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.settings'), 'settings_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
       ]),
     }
   );
@@ -291,18 +293,18 @@ export async function handleChangeSlippage(ctx: Context): Promise<void> {
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await sendPage(ctx, '❌ User not found.');
+      await sendPage(ctx, t('en', 'common.userNotFoundShort'));
       return;
     }
 
+    const lang = getLang(user);
     const current = user.slippageTolerance ?? 1.0;
 
     const message =
-      '⚡ *Slippage Tolerance*\n\n' +
-      `Current: *${current}%*\n\n` +
-      'Slippage is the maximum price increase you accept for a market buy order.\n' +
-      '_Higher slippage → better fill chance. Lower slippage → price protection._\n\n' +
-      'Pick a preset or type a value (e.g. `2.5`):';
+      t(lang, 'settings.slippageTitle') +
+      t(lang, 'settings.slippageCurrent', { pct: current }) +
+      t(lang, 'settings.slippageDesc') +
+      t(lang, 'settings.slippagePrompt');
 
     settingsSlippageState.set(telegramId, { timestamp: Date.now() });
 
@@ -315,15 +317,15 @@ export async function handleChangeSlippage(ctx: Context): Promise<void> {
           Markup.button.callback('2%',   'settings_slippage_2'),
           Markup.button.callback('5%',   'settings_slippage_5'),
         ],
-        [Markup.button.callback('« Back', 'settings_menu')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.back'), 'settings_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
       ]),
     });
 
     logger.info(`Slippage selection shown to user: ${telegramId}`);
   } catch (error) {
     logger.error('Error showing slippage selection:', error);
-    await ctx.reply('❌ An error occurred.');
+    await ctx.reply(t('en', 'common.errorGeneric'));
   }
 }
 
@@ -332,7 +334,7 @@ export async function handleChangeSlippage(ctx: Context): Promise<void> {
  */
 export async function handleSetSlippage(ctx: Context, pct: number): Promise<void> {
   try {
-    await ctx.answerCbQuery(`Slippage set to ${pct}%`);
+    await ctx.answerCbQuery(t('en', 'settings.slippageCb', { pct }));
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
@@ -354,7 +356,7 @@ export async function handleSetSlippage(ctx: Context, pct: number): Promise<void
     await handleSettingsMenu(ctx);
   } catch (error) {
     logger.error('Error updating slippage:', error);
-    await ctx.answerCbQuery('❌ Error updating slippage');
+    await ctx.answerCbQuery(t('en', 'settings.slippageErrorCb'));
   }
 }
 
@@ -368,6 +370,9 @@ export async function handleCustomSlippageInput(ctx: Context, text: string): Pro
 
   settingsSlippageState.delete(telegramId);
 
+  const user = await getUserByTelegramId(telegramId);
+  const lang = getLang(user);
+
   const raw = text.trim().replace(/[^\d.,]/g, '');
   const lastComma = raw.lastIndexOf(',');
   const lastDot   = raw.lastIndexOf('.');
@@ -378,12 +383,12 @@ export async function handleCustomSlippageInput(ctx: Context, text: string): Pro
 
   if (isNaN(value) || value < 0.1) {
     await sendPage(ctx,
-      '❌ *Invalid slippage*\n\nMinimum slippage is 0.1%.\n\nExample: `1` or `2.5`',
+      t(lang, 'settings.slippageInvalid'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('⚡ Try Again', 'settings_change_slippage')],
-          [Markup.button.callback('« Back', 'settings_menu')],
+          [Markup.button.callback(t(lang, 'btn.tryAgainSlippage'), 'settings_change_slippage')],
+          [Markup.button.callback(t(lang, 'btn.back'), 'settings_menu')],
         ]),
       }
     );
@@ -392,11 +397,11 @@ export async function handleCustomSlippageInput(ctx: Context, text: string): Pro
 
   if (value > 25) {
     await sendPage(ctx,
-      '❌ *Slippage too high*\n\nMaximum slippage is 25%.',
+      t(lang, 'settings.slippageTooHigh'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('⚡ Try Again', 'settings_change_slippage')],
+          [Markup.button.callback(t(lang, 'btn.tryAgainSlippage'), 'settings_change_slippage')],
         ]),
       }
     );
@@ -418,12 +423,12 @@ export async function handleCustomSlippageInput(ctx: Context, text: string): Pro
   logger.info(`Slippage tolerance updated to ${rounded}% for user: ${telegramId}`);
 
   await sendPage(ctx,
-    `✅ *Slippage tolerance set to ${rounded}%*\n\nAll market buy orders will now use at most ${rounded}% above the current price.`,
+    t(lang, 'settings.slippageSuccess', { pct: rounded }),
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('⚙️ Settings', 'settings_menu')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.settings'), 'settings_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
       ]),
     }
   );
@@ -434,18 +439,21 @@ export async function handleCustomSlippageInput(ctx: Context, text: string): Pro
  */
 export async function handleDeleteKeyMessage(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery('Message deleted for security');
+    const telegramId = ctx.from?.id.toString();
+    const user = telegramId ? await getUserByTelegramId(telegramId) : null;
+    const lang = getLang(user);
+
+    await ctx.answerCbQuery(t(lang, 'settings.secretKey.deletedCb'));
 
     await ctx.deleteMessage();
 
     await sendPage(ctx,
-      '✅ *Secret key message deleted*\n\n' +
-      'Your private key has been removed from the chat for security.',
+      t(lang, 'settings.secretKey.deleted'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('⚙️ Settings', 'settings_menu')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'btn.settings'), 'settings_menu')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
         ]),
       }
     );
@@ -453,6 +461,77 @@ export async function handleDeleteKeyMessage(ctx: Context): Promise<void> {
     logger.info(`Secret key message deleted for user: ${ctx.from?.id}`);
   } catch (error) {
     logger.error('Error deleting key message:', error);
-    await ctx.reply('❌ Could not delete message. Please delete it manually.');
+    await ctx.reply(t('en', 'settings.secretKey.deleteFailed'));
+  }
+}
+
+// ─── Language Selection ──────────────────────────────────────────────────────
+
+/**
+ * Shows language selection menu
+ */
+export async function handleLanguageMenu(ctx: Context): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
+    const currentLabel = LOCALE_LABELS[lang];
+
+    const message =
+      t(lang, 'settings.language.title') +
+      t(lang, 'settings.language.current', { lang: currentLabel }) +
+      t(lang, 'settings.language.prompt');
+
+    const buttons = SUPPORTED_LOCALES.map(locale => {
+      const label = locale === lang
+        ? `✅ ${LOCALE_LABELS[locale]}`
+        : LOCALE_LABELS[locale];
+      return [Markup.button.callback(label, `settings_lang_${locale}`)];
+    });
+    buttons.push([Markup.button.callback(t(lang, 'btn.backToSettings'), 'settings_menu')]);
+
+    await sendPage(ctx, message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(buttons),
+    });
+  } catch (error) {
+    logger.error('Error showing language menu:', error);
+    await ctx.reply(t('en', 'common.errorGeneric'));
+  }
+}
+
+/**
+ * Updates user's language preference
+ */
+export async function handleSetLanguage(ctx: Context, locale: Locale): Promise<void> {
+  try {
+    await ctx.answerCbQuery(t(locale, 'settings.language.changed', { lang: LOCALE_LABELS[locale] }));
+
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const { prisma } = await import('../../database/prisma');
+    const { invalidateUserCache } = await import('../../services/user');
+
+    const updatedUser = await prisma.user.update({
+      where: { telegramId },
+      data: { language: locale },
+    });
+
+    await invalidateUserCache(updatedUser);
+
+    // Update context language for this request
+    (ctx as any).userLanguage = locale;
+
+    logger.info(`Language updated to ${locale} for user: ${telegramId}`);
+
+    await handleSettingsMenu(ctx);
+  } catch (error) {
+    logger.error('Error updating language:', error);
+    await ctx.answerCbQuery(t('en', 'common.errorGeneric'));
   }
 }

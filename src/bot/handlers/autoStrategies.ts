@@ -2,6 +2,11 @@ import { Context, Markup } from 'telegraf';
 import { prisma } from '../../database/prisma';
 import { getUserByTelegramId } from '../../services/user';
 import { sendPage } from '../../utils/telegram';
+import { t, Locale } from '../../i18n';
+
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 /**
  * Auto Strategies umbrella page — shows all strategy types with their status.
@@ -14,12 +19,14 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
   if (!telegramId) return;
 
   const user = await getUserByTelegramId(telegramId);
-  if (!user) { await ctx.reply('❌ User not found. Use /start first.'); return; }
+  if (!user) { await ctx.reply(t(((ctx as any).userLanguage as Locale) || 'en', 'common.userNotFoundStart')); return; }
+
+  const lang = getLang(user);
 
   const walletAddr = user.polymarketProxyAddress || user.walletAddress;
   const shortWallet = walletAddr
     ? `${walletAddr.slice(0, 6)}...${walletAddr.slice(-4)}`
-    : 'Not set';
+    : t(lang, 'Not set');
 
   // Fetch bond + updown strategies in parallel
   const [bondStrategies, updownStrategies] = await Promise.all([
@@ -31,48 +38,47 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
   const bondTotal = bondStrategies.length;
   let bondStatus: string;
   if (bondTotal === 0) {
-    bondStatus = '💤 No strategies yet';
+    bondStatus = t(lang, 'No strategies yet', { count: '0' });
   } else if (bondRunning > 0) {
-    bondStatus = `🟢 ${bondRunning}/${bondTotal} running`;
+    bondStatus = `${bondRunning}/${bondTotal} ${t(lang, 'running')}`;
   } else {
-    bondStatus = `🔴 ${bondTotal} paused`;
+    bondStatus = `${bondTotal} ${t(lang, 'paused')}`;
   }
 
   const updownRunning = updownStrategies.filter(s => s.isActive && !s.isPaused).length;
   const updownTotal = updownStrategies.length;
   let updownStatus: string;
   if (updownTotal === 0) {
-    updownStatus = '💤 No strategies yet';
+    updownStatus = t(lang, 'No strategies yet', { count: '0' });
   } else if (updownRunning > 0) {
-    updownStatus = `🟢 ${updownRunning}/${updownTotal} running`;
+    updownStatus = `${updownRunning}/${updownTotal} ${t(lang, 'running')}`;
   } else {
-    updownStatus = `🔴 ${updownTotal} paused`;
+    updownStatus = `${updownTotal} ${t(lang, 'paused')}`;
   }
 
   const totalStrats = bondTotal + updownTotal;
   const totalRunning = bondRunning + updownRunning;
 
   const lines = [
-    `🧠 <b>Auto Strategies</b>`,
+    `🧠 <b>${t(lang, 'Auto Strategies')}</b>`,
     ``,
     `👛 <code>${shortWallet}</code>`,
-    `⚡ ${totalRunning}/${totalStrats} active strategies`,
+    `⚡ ${totalRunning}/${totalStrats} ${t(lang, 'active strategies')}`,
     ``,
-    `🎯 <b>Bonding</b>`,
-    `└ ${bondStatus}`,
+    `🎯 <b>${t(lang, 'Bonding')}</b>`,
+    `└ ${bondTotal === 0 ? '💤' : bondRunning > 0 ? '🟢' : '🔴'} ${bondStatus}`,
     ``,
-    `📊 <b>Up-Down</b>`,
-    `└ ${updownStatus}`,
+    `📊 <b>${t(lang, 'Up-Down')}</b>`,
+    `└ ${updownTotal === 0 ? '💤' : updownRunning > 0 ? '🟢' : '🔴'} ${updownStatus}`,
   ];
 
   const buttons = [
     [
-      Markup.button.callback('🎯 Bonding', 'bond_list'),
-      Markup.button.callback('📊 Up-Down', 'updown_list'),
+      Markup.button.callback(`🎯 ${t(lang, 'Bonding')}`, 'bond_list'),
+      Markup.button.callback(`📊 ${t(lang, 'Up-Down')}`, 'updown_list'),
     ],
-    [Markup.button.callback('🔙 Main Menu', 'back_to_menu')],
+    [Markup.button.callback(`🔙 ${t(lang, 'Main Menu')}`, 'back_to_menu')],
   ];
 
   await sendPage(ctx, lines.join('\n'), { ...Markup.inlineKeyboard(buttons), parse_mode: 'HTML' });
 }
-

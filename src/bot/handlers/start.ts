@@ -9,6 +9,7 @@ import { mainMenuKeyboard, buildMainMenuText } from './markets';
 import { ce, EMOJI } from '../../utils/customEmoji';
 import { getMainMenuStats, getBalance } from '../../services/portfolio';
 import { config } from '../../config';
+import { t, Locale } from '../../i18n';
 
 const MENU_IMAGE = path.join(__dirname, '../img/opening.jpg');
 const BEAT_THE_ODDS_IMAGE = path.join(__dirname, '../img/beattheodds.JPG');
@@ -48,7 +49,7 @@ export async function handleStart(ctx: Context): Promise<void> {
     const lastName = ctx.from?.last_name;
 
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
 
@@ -100,7 +101,7 @@ export async function handleStart(ctx: Context): Promise<void> {
       const rest = startParam.slice(6); // strip 'limit_'
       const lastUnderscore = rest.lastIndexOf('_');
       if (lastUnderscore < 1) {
-        await ctx.reply('❌ Invalid limit order link.');
+        await ctx.reply(t('en', 'start.invalidLimitLink'));
         return;
       }
       const marketId = rest.slice(0, lastUnderscore);
@@ -112,7 +113,7 @@ export async function handleStart(ctx: Context): Promise<void> {
         return;
       }
       if (outcomeStr !== 'yes' && outcomeStr !== 'no') {
-        await ctx.reply('❌ Invalid limit order link.');
+        await ctx.reply(t('en', 'start.invalidLimitLink'));
         return;
       }
       logger.info(`Deep link to limit order for ${marketId}/${outcomeStr} from user: ${telegramId}`);
@@ -190,17 +191,19 @@ export async function handleStart(ctx: Context): Promise<void> {
 
       const user = await getUserByTelegramId(telegramId);
       if (!user) {
-        await ctx.reply('❌ User not found. Use /start to create your wallet.');
+        await ctx.reply(t('en', 'common.userNotFound'));
         return;
       }
+
+      const lang = (user?.language as Locale) || 'en';
 
       // Ensure position cache is populated
       const { positionListCache, positionTradeState } = await import('./positionTrade');
       let positions = positionListCache.get(telegramId);
       if (!positions || positions.length === 0) {
         if (!user.polymarketProxyAddress) {
-          await ctx.reply('⚠️ No trading wallet found. Go to 💼 My Wallet to set up your account first.', {
-            ...Markup.inlineKeyboard([[Markup.button.callback('💼 My Wallet', 'wallet_page')]]),
+          await ctx.reply(t(lang, 'start.noTradingWallet'), {
+            ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.wallet'), 'wallet_page')]]),
           });
           return;
         }
@@ -211,8 +214,8 @@ export async function handleStart(ctx: Context): Promise<void> {
 
       const pos = positions && !isNaN(idx) && idx >= 0 && idx < positions.length ? positions[idx] : null;
       if (!pos) {
-        await ctx.reply('❌ Position not found. Please open your Positions page and try again.', {
-          ...Markup.inlineKeyboard([[Markup.button.callback('📊 My Positions', 'portfolio_open_1')]]),
+        await ctx.reply(t(lang, 'start.positionNotFound'), {
+          ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')]]),
         });
         return;
       }
@@ -232,34 +235,34 @@ export async function handleStart(ctx: Context): Promise<void> {
           ? new Date(pos.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
           : 'N/A';
 
-        let msg = `📊 *Position Detail*\n\n`;
+        let msg = t(lang, 'position.detail');
         msg += `*${pos.outcome}* — ${pos.title}\n\n`;
-        msg += `💰 *Position*\n`;
-        msg += `├ Shares: ${pos.size.toFixed(4)}\n`;
-        msg += `├ Avg Buy Price: ${(pos.avgPrice * 100).toFixed(2)}¢\n`;
-        msg += `├ Current Price: ${(pos.curPrice * 100).toFixed(2)}¢\n`;
-        msg += `├ Invested: $${pos.initialValue.toFixed(2)}\n`;
-        msg += `└ Current Value: $${pos.currentValue.toFixed(2)}\n\n`;
-        msg += `📈 *P&L*\n`;
-        msg += `├ ${pnlEmoji} Unrealized: ${pnlSign}$${pos.cashPnl.toFixed(2)}\n`;
+        msg += t(lang, '💰 *Position*\n');
+        msg += `├ ${t(lang, 'Shares')}: ${pos.size.toFixed(4)}\n`;
+        msg += `├ ${t(lang, 'Avg Buy Price')}: ${(pos.avgPrice * 100).toFixed(2)}¢\n`;
+        msg += `├ ${t(lang, 'Current Price')}: ${(pos.curPrice * 100).toFixed(2)}¢\n`;
+        msg += `├ ${t(lang, 'Invested')}: $${pos.initialValue.toFixed(2)}\n`;
+        msg += `└ ${t(lang, 'Current Value')}: $${pos.currentValue.toFixed(2)}\n\n`;
+        msg += t(lang, '📈 *P&L*\n');
+        msg += `├ ${pnlEmoji} ${t(lang, 'Unrealized')}: ${pnlSign}$${pos.cashPnl.toFixed(2)}\n`;
         msg += `├ ROI: ${pnlSign}${pos.percentPnl.toFixed(1)}%\n`;
-        msg += `└ Realized: $${pos.realizedPnl.toFixed(2)}\n\n`;
-        msg += `⏰ Market ends: ${endDate}`;
-        if (pos.redeemable) msg += `\n✅ _Market Resolved — Claim your USDC below_`;
+        msg += `└ ${t(lang, 'Realized')}: $${pos.realizedPnl.toFixed(2)}\n\n`;
+        msg += `⏰ ${t(lang, 'Market ends')}: ${endDate}`;
+        if (pos.redeemable) msg += `\n${t(lang, 'position.marketResolved')}`;
 
         const viewButtons = pos.redeemable
           ? [
-              [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
-              [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
-              [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+              [Markup.button.callback(t(lang, 'btn.redeemIt'), `pos_redeem_${idx}`)],
+              [Markup.button.callback(t(lang, 'btn.pnl'), `pos_pnl_${idx}`)],
+              [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
             ]
           : [
               [
-                Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
-                Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+                Markup.button.callback(t(lang, 'btn.buyMore'), `pos_buy_${idx}`),
+                Markup.button.callback(t(lang, 'btn.sell'), `pos_sell_${idx}`),
               ],
-              [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
-              [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+              [Markup.button.callback(t(lang, 'btn.pnl'), `pos_pnl_${idx}`)],
+              [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
             ];
 
         await ctx.reply(msg, {
@@ -286,13 +289,13 @@ export async function handleStart(ctx: Context): Promise<void> {
 
         if (action === 'ps') {
           const msg =
-            `📉 *Sell Position*\n\n` +
+            `📉 *${t(lang, 'Sell Position')}*\n\n` +
             `*${pos.outcome}* — ${truncTitle}\n\n` +
-            `You hold: *${pos.size.toFixed(4)} shares* @ avg ${(pos.avgPrice * 100).toFixed(1)}¢\n` +
-            `Current price: *${curCents}¢*  ·  Value: *$${pos.currentValue.toFixed(2)}*\n\n` +
-            `*Enter number of shares to sell:*\n` +
-            `Example: \`${pos.size.toFixed(2)}\` (sell all)\n\n` +
-            `Or choose a quick amount:`;
+            `${t(lang, 'You hold')}: *${pos.size.toFixed(4)} ${t(lang, 'shares')}* @ avg ${(pos.avgPrice * 100).toFixed(1)}¢\n` +
+            `${t(lang, 'Current price')}: *${curCents}¢*  ·  ${t(lang, 'Value')}: *$${pos.currentValue.toFixed(2)}*\n\n` +
+            `*${t(lang, 'Enter number of shares to sell')}:*\n` +
+            `${t(lang, 'Example')}: \`${pos.size.toFixed(2)}\` (${t(lang, 'sell all')})\n\n` +
+            t(lang, 'Or choose a quick amount') + ':';
 
           await ctx.reply(msg, {
             parse_mode: 'Markdown',
@@ -303,7 +306,7 @@ export async function handleStart(ctx: Context): Promise<void> {
                 Markup.button.callback('75%', `pos_pct_${idx}_75`),
                 Markup.button.callback('100%', `pos_pct_${idx}_100`),
               ],
-              [Markup.button.callback('❌ Cancel', 'pos_cancel')],
+              [Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel')],
             ]),
           });
         } else {
@@ -314,17 +317,17 @@ export async function handleStart(ctx: Context): Promise<void> {
 
           const estimatedShares = (10 / pos.curPrice).toFixed(1);
           const msg =
-            `📈 *Buy More*\n\n` +
+            `📈 *${t(lang, 'Buy More')}*\n\n` +
             `*${pos.outcome}* — ${truncTitle}\n\n` +
-            `You already hold: *${pos.size.toFixed(4)} shares*\n` +
-            `Current price: *${curCents}¢*\n` +
-            `💼 Balance: *$${balanceStr}*\n\n` +
-            `*Enter USDC amount to spend:*\n` +
-            `Example: \`10\` → buys ~${estimatedShares} shares at ${curCents}¢`;
+            `${t(lang, 'You already hold')}: *${pos.size.toFixed(4)} ${t(lang, 'shares')}*\n` +
+            `${t(lang, 'Current price')}: *${curCents}¢*\n` +
+            `💼 ${t(lang, 'Balance')}: *$${balanceStr}*\n\n` +
+            `*${t(lang, 'Enter USDC amount to spend')}:*\n` +
+            `${t(lang, 'Example')}: \`10\` → ${t(lang, 'buys')} ~${estimatedShares} ${t(lang, 'shares')} ${t(lang, 'at')} ${curCents}¢`;
 
           await ctx.reply(msg, {
             parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'pos_cancel')]]),
+            ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel')]]),
           });
         }
       }
@@ -340,32 +343,28 @@ export async function handleStart(ctx: Context): Promise<void> {
       if (existingUser) {
         logger.info(`User already exists: ${telegramId}`);
 
-        let welcomeMessage =
-          '✅ *Welcome back!*\n\n' +
-          'Your Polymarket account is ready.\n\n';
+        const lang = (existingUser?.language as Locale) || 'en';
+
+        let welcomeMessage = t(lang, 'start.welcomeBack');
 
         // Show deposit addresses from Bridge API
         if (existingUser.depositAddressEvm) {
           welcomeMessage +=
-            '*💰 Deposit Addresses:*\n' +
-            `• EVM (Ethereum/Arbitrum/Base): \`${existingUser.depositAddressEvm}\`\n` +
-            `• Solana: \`${existingUser.depositAddressSvm}\`\n` +
-            `• Bitcoin: \`${existingUser.depositAddressBtc}\`\n` +
-            `• Tron: \`${existingUser.depositAddressTvm}\`\n\n` +
-            '💸 _Send USDC or other assets → Auto-converts to USDC.e on Polygon_\n\n';
+            t(lang, 'start.depositAddresses') +
+            t(lang, 'start.depositEvm', { address: existingUser.depositAddressEvm }) +
+            t(lang, 'start.depositSolana', { address: existingUser.depositAddressSvm }) +
+            t(lang, 'start.depositBtc', { address: existingUser.depositAddressBtc }) +
+            t(lang, 'start.depositTron', { address: existingUser.depositAddressTvm }) +
+            t(lang, 'start.depositNote');
         }
 
         if (existingUser.polymarketProxyAddress) {
-          welcomeMessage +=
-            '*🏦 Polymarket Trading Wallet:*\n' +
-            `📍 \`${existingUser.polymarketProxyAddress}\`\n` +
-            `🔗 [View on Polymarket](https://polymarket.com/profile/${existingUser.polymarketProxyAddress})\n\n`;
+          welcomeMessage += t(lang, 'start.tradingWallet', { address: existingUser.polymarketProxyAddress });
         }
 
         welcomeMessage +=
-          '*📍 Owner Wallet (EOA):*\n' +
-          `\`${existingUser.walletAddress}\`\n\n` +
-          '💡 Use the buttons below or /help to see commands.';
+          t(lang, 'start.ownerWallet', { address: existingUser.walletAddress }) +
+          t(lang, 'start.helpHint');
 
         const stats = await getMainMenuStats(
           existingUser.encryptedPrivateKey,
@@ -380,17 +379,17 @@ export async function handleStart(ctx: Context): Promise<void> {
           await ctx.replyWithPhoto(
             { source: fs.createReadStream(MENU_IMAGE) },
             {
-              caption: buildMainMenuText(stats),
+              caption: buildMainMenuText(stats, lang),
               parse_mode: 'HTML',
-              ...mainMenuKeyboard(),
+              ...mainMenuKeyboard(lang),
             }
           );
         } catch (photoErr: any) {
           // Fallback to text if image fails (too large, not found, etc.)
           logger.warn(`[start] Photo send failed, falling back to text: ${photoErr?.message}`);
-          await ctx.reply(buildMainMenuText(stats), {
+          await ctx.reply(buildMainMenuText(stats, lang), {
             parse_mode: 'HTML',
-            ...mainMenuKeyboard(),
+            ...mainMenuKeyboard(lang),
           });
         }
         return;
@@ -398,7 +397,7 @@ export async function handleStart(ctx: Context): Promise<void> {
 
       // Prevent duplicate creation if user spams /start
       if (_creatingWallet.has(telegramId)) {
-        await ctx.reply('⏳ Your wallet is already being created. Please wait...');
+        await ctx.reply(t('en', 'start.alreadyCreating'));
         return;
       }
       _creatingWallet.add(telegramId);
@@ -421,19 +420,18 @@ export async function handleStart(ctx: Context): Promise<void> {
         });
 
         const joinCaption =
-          `${ce(EMOJI.cherry, '🏆')} <b>Welcome to PolyTech!</b>\n\n` +
-          `${ce(EMOJI.loading, '⏳')} <b>Your Polymarket wallet is being created...</b>\n\n` +
-          `${ce(EMOJI.star, '🔒')} <b>One Last Step</b>\n` +
-          `Join our official community to activate your account.\n` +
-          `Get trading signals, market updates & live support.\n\n` +
-          `${ce(EMOJI.lightning, '⚡')} Your wallet will be ready by the time you join!`;
+          `${ce(EMOJI.cherry, '🏆')} <b>${t('en', 'Welcome to PolyTech!')}</b>\n\n` +
+          `${ce(EMOJI.loading, '⏳')} <b>${t('en', 'Your Polymarket wallet is being created...')}</b>\n\n` +
+          `${ce(EMOJI.star, '🔒')} <b>${t('en', 'One Last Step')}</b>\n` +
+          `${t('en', 'Join our official community to activate your account.\nGet trading signals, market updates & live support.')}\n\n` +
+          `${ce(EMOJI.lightning, '⚡')} ${t('en', 'Your wallet will be ready by the time you join!')}`;
 
         const keyboard: any = { inline_keyboard: [] };
         if (config.telegram.requiredGroupLink) {
-          keyboard.inline_keyboard.push([{ text: '📢 Join Community', url: config.telegram.requiredGroupLink }]);
+          keyboard.inline_keyboard.push([{ text: t('en', 'btn.joinCommunity'), url: config.telegram.requiredGroupLink }]);
         }
         keyboard.inline_keyboard.push([
-          { text: "✅ I've Joined, Check", callback_data: 'check_membership' },
+          { text: t('en', 'btn.checkMembership'), callback_data: 'check_membership' },
         ]);
 
         try {
@@ -448,7 +446,7 @@ export async function handleStart(ctx: Context): Promise<void> {
       }
 
       // Already in group — normal flow
-      await ctx.reply('🔄 Creating your Polymarket wallet...\n\nPlease wait a moment.');
+      await ctx.reply(t('en', 'start.creatingWallet'));
 
       const result = await createUserWithWallet(telegramId, username, firstName, lastName);
 
@@ -476,11 +474,7 @@ export async function handleStart(ctx: Context): Promise<void> {
       logger.error('Error in start command:', error);
 
       await ctx.reply(
-        '❌ *Error Creating Wallet*\n\n' +
-        'We encountered an error while creating your wallet. ' +
-        'This might be a temporary issue.\n\n' +
-        'Please try again in a few moments. If the problem persists, ' +
-        'contact support.',
+        t('en', 'start.errorCreating'),
         { parse_mode: 'Markdown' }
       );
     }
@@ -488,9 +482,7 @@ export async function handleStart(ctx: Context): Promise<void> {
     logger.error('Unexpected error in start handler:', error);
 
     try {
-      await ctx.reply(
-        '❌ An unexpected error occurred. Please try again later.'
-      );
+      await ctx.reply(t('en', 'start.unexpectedError'));
     } catch (replyError) {
       logger.error('Error sending error message:', replyError);
     }
@@ -500,14 +492,12 @@ export async function handleStart(ctx: Context): Promise<void> {
 /** Send the private key + main menu after successful wallet creation. */
 async function sendWalletSuccess(ctx: Context, result: UserWithCredentials): Promise<void> {
   const successMessage =
-    `${ce(EMOJI.cherry, '🎉')} <b>Your Account is Ready!</b>\n\n` +
-    `${ce(EMOJI.refCode, '🔑')} <b>Private Key — Save it now:</b>\n` +
+    `${ce(EMOJI.cherry, '🎉')} <b>${t('en', 'Your Account is Ready!')}</b>\n\n` +
+    `${ce(EMOJI.refCode, '🔑')} <b>${t('en', 'Private Key — Save it now:')}</b>\n` +
     `<code>${result.walletInfo.privateKey}</code>\n\n` +
-    `${ce(EMOJI.loading, '⚠️')} <b>Save this key — it is shown only once.</b>\n` +
-    `This is your system wallet key used for on-chain operations. ` +
-    `Your trading funds are held in your platform account and are NOT stored in this wallet.\n` +
-    `<b>Never share this key with anyone.</b>\n\n` +
-    `Use the menu below to deposit and start trading.`;
+    `${ce(EMOJI.loading, '⚠️')} <b>${t('en', 'Save this key — it is shown only once.')}</b>\n` +
+    `${t('en', 'start.keyExplanation')}\n\n` +
+    t('en', 'start.useMenuBelow');
 
   await ctx.reply(successMessage, { parse_mode: 'HTML' });
 
@@ -533,7 +523,7 @@ export async function handleCheckMembership(ctx: Context): Promise<void> {
   const inGroup = await checkGroupMembership(userId);
 
   if (!inGroup) {
-    await ctx.answerCbQuery("❌ You haven't joined yet. Join the group and try again.", { show_alert: true });
+    await ctx.answerCbQuery(t('en', 'start.notJoined'), { show_alert: true });
     return;
   }
 
@@ -542,15 +532,15 @@ export async function handleCheckMembership(ctx: Context): Promise<void> {
   if (!pending) {
     // No pending wallet — generic acknowledgment
     await ctx.editMessageCaption(
-      '✅ <b>Membership Verified!</b>\n\nType /start to begin.',
+      t('en', 'start.membershipVerified'),
       { parse_mode: 'HTML' }
-    ).catch(() => ctx.reply('✅ Membership verified! Type /start to begin.').catch(() => {}));
+    ).catch(() => ctx.reply(t('en', 'start.membershipVerifiedShort')).catch(() => {}));
     return;
   }
 
   // Update message to show finalizing state
   await ctx.editMessageCaption(
-    `${ce(EMOJI.loading, '⏳')} <b>Almost there!</b>\n\nFinalizing your wallet...`,
+    `${ce(EMOJI.loading, '⏳')} <b>${t('en', 'Almost there!')}</b>\n\n${t('en', 'Finalizing your wallet...')}`,
     { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
   ).catch(() => {});
 
@@ -579,7 +569,7 @@ export async function handleCheckMembership(ctx: Context): Promise<void> {
     _creatingWallet.delete(telegramId);
     logger.error(`[checkMembership] Wallet creation failed for ${telegramId}:`, error);
     await ctx.reply(
-      '❌ <b>Wallet creation failed.</b>\n\nThis is usually a temporary issue. Please tap /start to try again.',
+      t('en', 'start.walletFailed'),
       { parse_mode: 'HTML' }
     );
   } finally {

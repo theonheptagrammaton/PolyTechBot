@@ -98,6 +98,8 @@ import {
   handleChangeSlippage,
   handleSetSlippage,
   handleCustomSlippageInput,
+  handleLanguageMenu,
+  handleSetLanguage,
 } from './handlers/settings';
 import {
   handleOutcomeSelection,
@@ -379,6 +381,11 @@ export class TelegramBot {
         if ('callback_query' in ctx.update) await ctx.answerCbQuery().catch(() => {});
         await ctx.reply('👋 Please use /start to create your account first.');
         return;
+      }
+
+      // Attach user language to context for downstream handlers
+      if (user) {
+        (ctx as any).userLanguage = user.language || 'en';
       }
 
       return next();
@@ -681,6 +688,12 @@ export class TelegramBot {
     this.bot.action('settings_slippage_1',  async (ctx) => await handleSetSlippage(ctx, 1.0));
     this.bot.action('settings_slippage_2',  async (ctx) => await handleSetSlippage(ctx, 2.0));
     this.bot.action('settings_slippage_5',  async (ctx) => await handleSetSlippage(ctx, 5.0));
+
+    // Language selection
+    this.bot.action('settings_language', handleLanguageMenu);
+    this.bot.action('settings_lang_en', async (ctx) => await handleSetLanguage(ctx, 'en'));
+    this.bot.action('settings_lang_zh', async (ctx) => await handleSetLanguage(ctx, 'zh'));
+    this.bot.action('settings_lang_ru', async (ctx) => await handleSetLanguage(ctx, 'ru'));
 
 
     // Trade handlers

@@ -10,6 +10,12 @@ import {
   CASHBACK_RATE,
 } from '../../services/cashback';
 import { logger } from '../../utils/logger';
+import { t, Locale } from '../../i18n';
+
+/** Get locale from user object */
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 const CASHBACK_IMAGE = path.join(__dirname, '..', 'img', 'cashback.jpeg');
 
@@ -22,24 +28,25 @@ export async function handleCashbackPage(ctx: Context): Promise<void> {
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await ctx.reply('❌ User not found. Use /start first.');
+      await ctx.reply(t('en', 'common.userNotFoundStart'));
       return;
     }
 
+    const lang = getLang(user);
     const stats = await getCashbackStats(user.id);
     const cashbackPct = (CASHBACK_RATE * 100).toFixed(0); // "10"
 
-    let msg = `💰 <b>Cashback</b>\n\n`;
-    msg += `🎁 <b>Rate:</b> ${cashbackPct}% of every platform fee\n`;
-    msg += `<i>(You pay 1% fee per trade → get ${cashbackPct}% of that back)</i>\n\n`;
+    let msg = `💰 <b>${t(lang, 'Cashback')}</b>\n\n`;
+    msg += `🎁 <b>${t(lang, 'Rate:')}</b> ${cashbackPct}% ${t(lang, 'of every platform fee')}\n`;
+    msg += `<i>(${t(lang, 'You pay 1% fee per trade → get {{pct}}% of that back', { pct: cashbackPct })})</i>\n\n`;
     msg += `━━━━━━━━━━━━━━━\n`;
-    msg += `💵 <b>Claimable:</b> <b>$${esc(stats.claimable.toFixed(2))}</b>\n`;
-    msg += `📈 <b>Total Earned:</b> <b>$${esc(stats.earnedTotal.toFixed(2))}</b>\n\n`;
-    msg += `<i>Minimum withdrawal: $${CASHBACK_MIN_CLAIM}</i>`;
+    msg += `💵 <b>${t(lang, 'Claimable:')}</b> <b>$${esc(stats.claimable.toFixed(2))}</b>\n`;
+    msg += `📈 <b>${t(lang, 'Total Earned:')}</b> <b>$${esc(stats.earnedTotal.toFixed(2))}</b>\n\n`;
+    msg += `<i>${t(lang, 'Minimum withdrawal: ${{min}}', { min: CASHBACK_MIN_CLAIM })}</i>`;
 
     const claimLabel = stats.claimable >= CASHBACK_MIN_CLAIM
-      ? `💸 Withdraw ($${stats.claimable.toFixed(2)})`
-      : `💸 Withdraw (Min $${CASHBACK_MIN_CLAIM})`;
+      ? t(lang, 'btn.withdrawCashback', { amount: stats.claimable.toFixed(2) })
+      : t(lang, 'btn.withdrawCashbackMin', { min: CASHBACK_MIN_CLAIM });
 
     await sendPage(ctx, msg, {
       parse_mode: 'HTML',
@@ -47,15 +54,15 @@ export async function handleCashbackPage(ctx: Context): Promise<void> {
       ...Markup.inlineKeyboard([
         [Markup.button.callback(claimLabel, 'cashback_claim')],
         [
-          Markup.button.callback('🔄 Refresh', 'cashback_page'),
-          Markup.button.callback('💼 Wallet',  'wallet_page'),
+          Markup.button.callback(t(lang, 'btn.refresh'), 'cashback_page'),
+          Markup.button.callback(t(lang, 'btn.wallet'),  'wallet_page'),
         ],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
       ]),
     });
   } catch (err) {
     logger.error('[cashback] handleCashbackPage error:', err);
-    await ctx.reply('❌ An error occurred. Please try again.');
+    await ctx.reply(t('en', 'cashback.errorGeneric'));
   }
 }
 
@@ -66,24 +73,27 @@ export async function handleCashbackClaim(ctx: Context): Promise<void> {
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await ctx.answerCbQuery('❌ User not found.').catch(() => {});
+      await ctx.answerCbQuery(t('en', 'common.userNotFoundShort')).catch(() => {});
       return;
     }
+
+    const lang = getLang(user);
 
     if (!user.polymarketProxyAddress) {
-      await ctx.answerCbQuery('❌ No wallet found.').catch(() => {});
+      await ctx.answerCbQuery(t(lang, '❌ No wallet found.')).catch(() => {});
       return;
     }
 
-    await ctx.answerCbQuery('⏳ Processing...').catch(() => {});
+    await ctx.answerCbQuery(t(lang, 'common.processing')).catch(() => {});
 
     const result = await claimCashback(user.id, user.polymarketProxyAddress);
 
     if (result.success) {
       const msg =
-        `✅ <b>Withdrawal Successful!</b>\n\n` +
-        `💵 Amount: <b>$${result.amount?.toFixed(2)}</b>\n` +
-        `📍 Sent to: <code>${esc(user.polymarketProxyAddress)}</code>\n\n` +
+        t(lang, 'cashback.withdrawSuccess', {
+          amount: result.amount?.toFixed(2) ?? '0.00',
+          address: esc(user.polymarketProxyAddress),
+        }) +
         (result.txHash
           ? `🔗 <a href="https://polygonscan.com/tx/${result.txHash}">View on Polygonscan</a>`
           : '');
@@ -91,8 +101,8 @@ export async function handleCashbackClaim(ctx: Context): Promise<void> {
       await sendPage(ctx, msg, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Back to Cashback', 'cashback_page')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'btn.backToCashback'), 'cashback_page')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
         ]),
       });
     } else if (result.insufficientTreasury) {
@@ -100,21 +110,21 @@ export async function handleCashbackClaim(ctx: Context): Promise<void> {
       await sendPage(ctx, `❌ ${esc(result.error ?? '')}`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Back to Cashback', 'cashback_page')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'btn.backToCashback'), 'cashback_page')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
         ]),
       });
     } else {
-      await sendPage(ctx, `❌ ${esc(result.error ?? 'An error occurred.')}`, {
+      await sendPage(ctx, `❌ ${esc(result.error ?? t(lang, 'common.errorGeneric'))}`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Back to Cashback', 'cashback_page')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'btn.backToCashback'), 'cashback_page')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
         ]),
       });
     }
   } catch (err) {
     logger.error('[cashback] handleCashbackClaim error:', err);
-    await ctx.reply('❌ An error occurred. Please try again.');
+    await ctx.reply(t('en', 'cashback.errorGeneric'));
   }
 }

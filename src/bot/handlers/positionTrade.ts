@@ -9,6 +9,11 @@ import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/te
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { generatePositionPnlImage } from '../../services/pnlImage';
 import { RedisBackedState } from '../../utils/redisState';
+import { t, Locale } from '../../i18n';
+
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 // ─── Helpers: image fetching ────────────────────────────────────────────────
 
@@ -91,17 +96,19 @@ function truncate(s: string, n: number): string {
 
 export async function handleOpenPositionsFull(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery('Loading...');
+    await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'common.loading'));
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) return;
 
+    const lang = getLang(user);
+
     if (!user.polymarketProxyAddress) {
-      await sendPage(ctx, '📊 *Active Positions*\n\n⚠️ No trading wallet found.\n\nGo to 💼 My Wallet to set up your account first.', {
+      await sendPage(ctx, t(lang, 'position.noTradingWallet'), {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('💼 My Wallet', 'wallet_page')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.wallet'), 'wallet_page')]]),
       });
       return;
     }
@@ -110,30 +117,30 @@ export async function handleOpenPositionsFull(ctx: Context): Promise<void> {
     positionListCache.set(telegramId, positions);
 
     if (positions.length === 0) {
-      await sendPage(ctx, '📊 *Active Positions*\n\n📭 No active positions.', {
+      await sendPage(ctx, t(lang, 'position.noActive'), {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.back'), 'portfolio_open_1')]]),
       });
       return;
     }
 
-    let message = `📊 *All Active Positions* (${positions.length})\n\n`;
+    let message = `📊 *${t(lang, 'All Active Positions')}* (${positions.length})\n\n`;
     for (let i = 0; i < positions.length; i++) {
       const pos = positions[i];
       const pnlSign = pos.cashPnl >= 0 ? '+' : '';
       const pnlEmoji = pos.cashPnl >= 0 ? '🟢' : '🔴';
       message += `${i + 1}) *${pos.outcome}* — ${truncate(pos.title, 45)}\n`;
-      message += `   💵 ${pos.size.toFixed(2)} shares · ${(pos.curPrice * 100).toFixed(1)}¢ · $${pos.currentValue.toFixed(2)}\n`;
+      message += `   💵 ${pos.size.toFixed(2)} ${t(lang, 'shares')} · ${(pos.curPrice * 100).toFixed(1)}¢ · $${pos.currentValue.toFixed(2)}\n`;
       message += `   ${pnlEmoji} P&L: ${pnlSign}$${pos.cashPnl.toFixed(2)} (${pnlSign}${pos.percentPnl.toFixed(1)}%)\n\n`;
       if (message.length > 3800) {
-        message += `_... and ${positions.length - i - 1} more_`;
+        message += `_... ${t(lang, 'and')} ${positions.length - i - 1} ${t(lang, 'more')}_`;
         break;
       }
     }
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]),
+      ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')]]),
     });
   } catch (error) {
     logger.error('Error showing full positions:', error);
@@ -150,9 +157,13 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
 
     const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
       return;
     }
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
 
     const pnlSign = pos.cashPnl >= 0 ? '+' : '';
     const pnlEmoji = pos.cashPnl >= 0 ? '🟢' : '🔴';
@@ -160,20 +171,20 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
       ? new Date(pos.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
       : 'N/A';
 
-    let msg = `📊 *Position Detail*\n\n`;
+    let msg = `📊 *${t(lang, 'Position Detail')}*\n\n`;
     msg += `*${pos.outcome}* — ${pos.title}\n\n`;
-    msg += `💰 *Position*\n`;
-    msg += `├ Shares: ${pos.size.toFixed(4)}\n`;
-    msg += `├ Avg Buy Price: ${(pos.avgPrice * 100).toFixed(2)}¢\n`;
-    msg += `├ Current Price: ${(pos.curPrice * 100).toFixed(2)}¢\n`;
-    msg += `├ Invested: $${pos.initialValue.toFixed(2)}\n`;
-    msg += `└ Current Value: $${pos.currentValue.toFixed(2)}\n\n`;
+    msg += `💰 *${t(lang, 'Position')}*\n`;
+    msg += `├ ${t(lang, 'Shares')}: ${pos.size.toFixed(4)}\n`;
+    msg += `├ ${t(lang, 'Avg Buy Price')}: ${(pos.avgPrice * 100).toFixed(2)}¢\n`;
+    msg += `├ ${t(lang, 'Current Price')}: ${(pos.curPrice * 100).toFixed(2)}¢\n`;
+    msg += `├ ${t(lang, 'Invested')}: $${pos.initialValue.toFixed(2)}\n`;
+    msg += `└ ${t(lang, 'Current Value')}: $${pos.currentValue.toFixed(2)}\n\n`;
     msg += `📈 *P&L*\n`;
-    msg += `├ ${pnlEmoji} Unrealized: ${pnlSign}$${pos.cashPnl.toFixed(2)}\n`;
+    msg += `├ ${pnlEmoji} ${t(lang, 'Unrealized')}: ${pnlSign}$${pos.cashPnl.toFixed(2)}\n`;
     msg += `├ ROI: ${pnlSign}${pos.percentPnl.toFixed(1)}%\n`;
-    msg += `└ Realized: $${pos.realizedPnl.toFixed(2)}\n\n`;
-    msg += `⏰ Market ends: ${endDate}\n`;
-    if (pos.redeemable) msg += `✅ _Market Resolved — Claim your USDC below_\n`;
+    msg += `└ ${t(lang, 'Realized')}: $${pos.realizedPnl.toFixed(2)}\n\n`;
+    msg += `⏰ ${t(lang, 'Market ends')}: ${endDate}\n`;
+    if (pos.redeemable) msg += `${t(lang, 'position.marketResolved')}\n`;
 
     const viewMarketUrl = (pos.eventSlug || pos.slug)
       ? `https://polymarket.com/event/${pos.eventSlug || pos.slug}`
@@ -181,19 +192,19 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
 
     const detailButtons = pos.redeemable
       ? [
-          [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
-          [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
-          ...(viewMarketUrl ? [[Markup.button.url('🔗 View on Polymarket', viewMarketUrl)]] : []),
-          [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+          [Markup.button.callback(t(lang, 'btn.redeemIt'), `pos_redeem_${idx}`)],
+          [Markup.button.callback(`📊 P&L`, `pos_pnl_${idx}`)],
+          ...(viewMarketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), viewMarketUrl)]] : []),
+          [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
         ]
       : [
           [
-            Markup.button.callback('📈 Buy More', `pos_buy_${idx}`),
-            Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+            Markup.button.callback(t(lang, 'btn.buyMore'), `pos_buy_${idx}`),
+            Markup.button.callback(t(lang, 'btn.sell'), `pos_sell_${idx}`),
           ],
-          [Markup.button.callback('📊 P&L', `pos_pnl_${idx}`)],
-          ...(viewMarketUrl ? [[Markup.button.url('🔗 View on Polymarket', viewMarketUrl)]] : []),
-          [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+          [Markup.button.callback(`📊 P&L`, `pos_pnl_${idx}`)],
+          ...(viewMarketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), viewMarketUrl)]] : []),
+          [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
         ];
 
     await sendPage(ctx, msg, {
@@ -227,9 +238,13 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
     }
 
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
       return;
     }
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
 
     // Build sender's referral share URL for Telegram's native share dialog
     let shareUrl = '';
@@ -251,16 +266,16 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
 
     const pnlKeyboard = Markup.inlineKeyboard([
       [
-        Markup.button.callback('📈 Buy', `pos_buy_${idx}`),
-        Markup.button.callback('📉 Sell', `pos_sell_${idx}`),
+        Markup.button.callback(`📈 ${t(lang, 'Buy')}`, `pos_buy_${idx}`),
+        Markup.button.callback(`📉 ${t(lang, 'Sell')}`, `pos_sell_${idx}`),
       ],
       [
-        Markup.button.callback('🔄 Refresh', `pos_pnl_${idx}`),
-        ...(shareUrl ? [Markup.button.url('📤 Share', shareUrl)] : []),
+        Markup.button.callback(t(lang, 'btn.refresh'), `pos_pnl_${idx}`),
+        ...(shareUrl ? [Markup.button.url(t(lang, 'btn.share'), shareUrl)] : []),
       ],
-      ...(marketUrl ? [[Markup.button.url('🔗 View on Polymarket', marketUrl)]] : []),
-      [Markup.button.callback('🛑 Stop Loss', `pos_sl_${idx}`)],
-      [Markup.button.callback('« Back', `pos_view_${idx}`)],
+      ...(marketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), marketUrl)]] : []),
+      [Markup.button.callback(t(lang, 'btn.stopLoss'), `pos_sl_${idx}`)],
+      [Markup.button.callback(t(lang, 'btn.back'), `pos_view_${idx}`)],
     ]);
 
     // Build rich HTML caption
@@ -269,12 +284,12 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
     const pctSign = pos.percentPnl >= 0 ? '+' : '';
     const escTitle = pos.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    let caption = `${ce(EMOJI.pnlChart, '📊')} <b>Position P&amp;L</b>\n\n`;
+    let caption = `${ce(EMOJI.pnlChart, '📊')} <b>${t(lang, 'Position P&L')}</b>\n\n`;
     caption += `${ce(EMOJI.fire, '🔥')} <b>${pos.outcome}</b> — ${escTitle}\n\n`;
     caption += `${ce(EMOJI.diamond, '💎')} <b>P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${pos.cashPnl.toFixed(2)}</b>\n`;
     caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${pos.percentPnl.toFixed(1)}%\n\n`;
-    caption += `${ce(EMOJI.target, '🎯')} <b>Entry:</b>  ${(pos.avgPrice * 100).toFixed(1)}¢\n`;
-    caption += `${ce(EMOJI.trophy, '🏆')} <b>Current:</b>  ${(pos.curPrice * 100).toFixed(1)}¢`;
+    caption += `${ce(EMOJI.target, '🎯')} <b>${t(lang, 'Entry')}:</b>  ${(pos.avgPrice * 100).toFixed(1)}¢\n`;
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>${t(lang, 'Current')}:</b>  ${(pos.curPrice * 100).toFixed(1)}¢`;
 
     // Try image generation
     try {
@@ -317,7 +332,8 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
     });
   } catch (error) {
     logger.error('Error in handlePositionPnl:', error);
-    await ctx.reply('❌ Failed to generate P&L. Please try again.').catch(() => {});
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(`❌ ${t(lang, 'Failed to generate P&L. Please try again.')}`).catch(() => {});
   }
 }
 
@@ -326,13 +342,14 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
  */
 export async function handlePositionPnlShare(ctx: Context, idx: number): Promise<void> {
   try {
-    await ctx.answerCbQuery('Generating share image...').catch(() => {});
+    await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'Generating share image...')).catch(() => {});
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
     const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(`⚠️ ${t(lang, 'Position not found.')}`);
       return;
     }
 
@@ -378,11 +395,13 @@ export async function handlePositionPnlShare(ctx: Context, idx: number): Promise
         { caption: shareCaption, parse_mode: 'HTML' },
       );
     } else {
-      await ctx.answerCbQuery('No PNL templates available yet.', { show_alert: true });
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.answerCbQuery(t(lang, 'No PNL templates available yet.'), { show_alert: true });
     }
   } catch (error) {
     logger.error('Error in handlePositionPnlShare:', error);
-    await ctx.reply('❌ Failed to generate share image.');
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(`❌ ${t(lang, 'Failed to generate share image.')}`);
   }
 }
 
@@ -396,20 +415,24 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
 
     const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
       return;
     }
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
 
     // Redeemable positions (resolved markets) can't be sold — they need to be claimed
     if (pos.redeemable) {
       await ctx.reply(
-        `✅ *Market Resolved*\n\n*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-        `This market has resolved. Use the Redeem button to claim your USDC.`,
+        `✅ *${t(lang, 'Market Resolved')}*\n\n*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
+        t(lang, 'This market has resolved. Use the Redeem button to claim your USDC.'),
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('💰 Redeem It', `pos_redeem_${idx}`)],
-            [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+            [Markup.button.callback(t(lang, 'btn.redeemIt'), `pos_redeem_${idx}`)],
+            [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
           ]),
         }
       );
@@ -431,13 +454,13 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
 
     const curCents = (pos.curPrice * 100).toFixed(1);
     const msg =
-      `📉 *Sell Position*\n\n` +
+      `📉 *${t(lang, 'Sell Position')}*\n\n` +
       `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-      `You hold: *${pos.size.toFixed(4)} shares* @ avg ${(pos.avgPrice * 100).toFixed(1)}¢\n` +
-      `Current price: *${curCents}¢*  ·  Value: *$${pos.currentValue.toFixed(2)}*\n\n` +
-      `*Enter number of shares to sell:*\n` +
-      `Example: \`${pos.size.toFixed(2)}\` (sell all)\n\n` +
-      `Or choose a quick amount:`;
+      `${t(lang, 'You hold')}: *${pos.size.toFixed(4)} ${t(lang, 'shares')}* @ ${t(lang, 'avg')} ${(pos.avgPrice * 100).toFixed(1)}¢\n` +
+      `${t(lang, 'Current price')}: *${curCents}¢*  ·  ${t(lang, 'Value')}: *$${pos.currentValue.toFixed(2)}*\n\n` +
+      `*${t(lang, 'Enter number of shares to sell')}:*\n` +
+      `${t(lang, 'Example')}: \`${pos.size.toFixed(2)}\` (${t(lang, 'sell all')})\n\n` +
+      `${t(lang, 'Or choose a quick amount')}:`;
 
     await ctx.reply(msg, {
       parse_mode: 'Markdown',
@@ -448,12 +471,13 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
           Markup.button.callback('75%', `pos_pct_${idx}_75`),
           Markup.button.callback('100%', `pos_pct_${idx}_100`),
         ],
-        [Markup.button.callback('❌ Cancel', 'pos_cancel')],
+        [Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel')],
       ]),
     });
   } catch (error) {
     logger.error('Error starting sell flow:', error);
-    await ctx.reply('❌ Could not start sell flow. Please try again.').catch(() => {});
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(`❌ ${t(lang, 'Could not start sell flow. Please try again.')}`).catch(() => {});
   }
 }
 
@@ -461,30 +485,33 @@ export async function handlePositionSell(ctx: Context, idx: number): Promise<voi
 
 export async function handlePositionRedeem(ctx: Context, idx: number): Promise<void> {
   try {
-    if (ctx.callbackQuery) await ctx.answerCbQuery('Claiming...').catch(() => {});
+    if (ctx.callbackQuery) await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'Claiming...')).catch(() => {});
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
 
     const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. You may have no active positions.');
-      return;
-    }
-
-    if (!pos.redeemable) {
-      await ctx.reply('⚠️ This position is not redeemable yet. The market has not resolved.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
       return;
     }
 
     const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
+
+    if (!pos.redeemable) {
+      await ctx.reply(`⚠️ ${t(lang, 'This position is not redeemable yet. The market has not resolved.')}`);
+      return;
+    }
+
     if (!user || !user.polymarketProxyAddress) {
-      await ctx.reply('❌ User or wallet not found.');
+      await ctx.reply(t(lang, 'common.userNotFoundShort'));
       return;
     }
 
     // Show claiming in progress
     const loadingMsg = await ctx.reply(
-      `${ce(EMOJI.loading, '⏳')} <b>Claiming position...</b>\n\n<b>${esc(pos.outcome)}</b> — ${esc(truncate(pos.title, 50))}\n\n<i>This may take up to 60 seconds.</i>`,
+      `${ce(EMOJI.loading, '⏳')} <b>${t(lang, 'Claiming position...')}</b>\n\n<b>${esc(pos.outcome)}</b> — ${esc(truncate(pos.title, 50))}\n\n<i>${t(lang, 'This may take up to 60 seconds.')}</i>`,
       { parse_mode: 'HTML' }
     ).catch(() => null);
 
@@ -507,35 +534,36 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
 
       const truncTitle = pos.title.length > 50 ? pos.title.slice(0, 50) + '…' : pos.title;
       await ctx.reply(
-        `✅ *Position Claimed!*\n\n` +
+        `✅ *${t(lang, 'Position Claimed!')}*\n\n` +
         `*${pos.outcome}* — ${truncTitle}\n\n` +
-        `💵 USDC.e has been returned to your wallet.`,
+        `💵 ${t(lang, 'USDC.e has been returned to your wallet.')}`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+            [Markup.button.callback(`📊 ${t(lang, 'My Positions')}`, 'portfolio_open_1')],
+            [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
           ]),
         }
       );
     } else {
       await ctx.reply(
-        `❌ *Claim Failed*\n\n` +
+        `❌ *${t(lang, 'Claim Failed')}*\n\n` +
         `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-        `${result.error || 'Unknown error'}\n\n_Please try again._`,
+        `${result.error || t(lang, 'Unknown error')}\n\n_${t(lang, 'Please try again.')}_`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Try Again', `pos_redeem_${idx}`)],
-            [Markup.button.callback('« Back to Positions', 'portfolio_open_1')],
+            [Markup.button.callback(t(lang, 'btn.tryAgain'), `pos_redeem_${idx}`)],
+            [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
           ]),
         }
       );
     }
   } catch (error) {
     logger.error('Error in manual redeem:', error);
-    await ctx.reply('❌ An error occurred while claiming. Please try again.', {
-      ...Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]),
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(`❌ ${t(lang, 'An error occurred while claiming. Please try again.')}`, {
+      ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')]]),
     }).catch(() => {});
   }
 }
@@ -550,9 +578,13 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
 
     const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
       return;
     }
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
 
     positionTradeState.set(telegramId, {
       action: 'buy',
@@ -568,7 +600,6 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
     });
 
     // Fetch balance for display
-    const user = await getUserByTelegramId(telegramId);
     const balanceStr = user
       ? await getBalance(user.encryptedPrivateKey, user.encryptedApiKey, user.encryptedApiSecret, user.encryptedPassphrase, user.predexonUserId ?? undefined).catch(() => '0.00')
       : '0.00';
@@ -576,17 +607,17 @@ export async function handlePositionBuy(ctx: Context, idx: number): Promise<void
     const curCents = (pos.curPrice * 100).toFixed(1);
     const estimatedShares = (10 / pos.curPrice).toFixed(1);
     const msg =
-      `📈 *Buy More*\n\n` +
+      `📈 *${t(lang, 'Buy More')}*\n\n` +
       `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-      `You already hold: *${pos.size.toFixed(4)} shares*\n` +
-      `Current price: *${curCents}¢*\n` +
-      `💼 Balance: *$${balanceStr}*\n\n` +
-      `*Enter USDC amount to spend:*\n` +
-      `Example: \`10\` → buys ~${estimatedShares} shares at ${curCents}¢`;
+      `${t(lang, 'You already hold')}: *${pos.size.toFixed(4)} ${t(lang, 'shares')}*\n` +
+      `${t(lang, 'Current price')}: *${curCents}¢*\n` +
+      `💼 ${t(lang, 'Balance')}: *$${balanceStr}*\n\n` +
+      `*${t(lang, 'Enter USDC amount to spend')}:*\n` +
+      `${t(lang, 'Example')}: \`10\` → ${t(lang, 'buys')} ~${estimatedShares} ${t(lang, 'shares')} ${t(lang, 'at')} ${curCents}¢`;
 
     await ctx.reply(msg, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'pos_cancel')]]),
+      ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel')]]),
     });
   } catch (error) {
     logger.error('Error starting buy flow:', error);
@@ -603,9 +634,13 @@ export async function handlePositionStopLoss(ctx: Context, idx: number): Promise
 
     const pos = await getPosOrFetch(telegramId, idx);
     if (!pos) {
-      await ctx.reply('⚠️ Position not found. You may have no active positions.');
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
       return;
     }
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
 
     positionTradeState.set(telegramId, {
       action: 'stop_loss',
@@ -624,17 +659,17 @@ export async function handlePositionStopLoss(ctx: Context, idx: number): Promise
     const suggestSl = ((pos.curPrice * 0.8) * 100).toFixed(0); // 20% below as example
 
     const msg =
-      `🛑 *Stop Loss*\n\n` +
+      `🛑 *${t(lang, 'Stop Loss')}*\n\n` +
       `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-      `You hold: *${pos.size.toFixed(4)} shares*\n` +
-      `Current price: *${curCents}¢*\n\n` +
-      `Enter the *stop loss price in cents* (must be below current price).\n` +
-      `A GTC limit sell order will be placed for all your shares.\n\n` +
-      `Example: \`${suggestSl}\` → sells at ${suggestSl}¢`;
+      `${t(lang, 'You hold')}: *${pos.size.toFixed(4)} ${t(lang, 'shares')}*\n` +
+      `${t(lang, 'Current price')}: *${curCents}¢*\n\n` +
+      `${t(lang, 'Enter the stop loss price in cents (must be below current price).')}` + `\n` +
+      `${t(lang, 'A GTC limit sell order will be placed for all your shares.')}\n\n` +
+      `${t(lang, 'Example')}: \`${suggestSl}\` → ${t(lang, 'sells at')} ${suggestSl}¢`;
 
     await ctx.reply(msg, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'pos_cancel')]]),
+      ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel')]]),
     });
   } catch (error) {
     logger.error('Error starting stop loss flow:', error);
@@ -647,6 +682,9 @@ async function showStopLossConfirmation(
   state: PositionTradeState,
   slPrice: number,
 ): Promise<void> {
+  const user = await getUserByTelegramId(telegramId);
+  const lang = getLang(user);
+
   positionTradeState.set(telegramId, { ...state, price: slPrice, timestamp: Date.now() });
 
   const slCents   = (slPrice * 100).toFixed(1);
@@ -655,21 +693,21 @@ async function showStopLossConfirmation(
   const dropPct   = (((state.curPrice - slPrice) / state.curPrice) * 100).toFixed(1);
 
   const msg =
-    `🛑 *Stop Loss Confirmation*\n\n` +
+    `🛑 *${t(lang, 'Stop Loss Confirmation')}*\n\n` +
     `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-    `📦 Shares to sell: *${state.currentSize.toFixed(4)}*\n` +
-    `📊 Current price: *${curCents}¢*\n` +
-    `🎯 Stop loss price: *${slCents}¢* (${dropPct}% below)\n` +
-    `💰 Est. proceeds: ~$${estValue}\n\n` +
-    `_A GTC limit SELL order will be placed at ${slCents}¢._\n` +
-    `_It will fill automatically when the price drops to this level._`;
+    `📦 ${t(lang, 'Shares to sell')}: *${state.currentSize.toFixed(4)}*\n` +
+    `📊 ${t(lang, 'Current price')}: *${curCents}¢*\n` +
+    `🎯 ${t(lang, 'Stop loss price')}: *${slCents}¢* (${dropPct}% ${t(lang, 'below')})\n` +
+    `💰 ${t(lang, 'Est. proceeds')}: ~$${estValue}\n\n` +
+    `_${t(lang, 'A GTC limit SELL order will be placed at')} ${slCents}¢._\n` +
+    `_${t(lang, 'It will fill automatically when the price drops to this level.')}_`;
 
   await ctx.reply(msg, {
     parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([
       [
-        Markup.button.callback('✅ Place Stop Loss', 'pos_execute_sl'),
-        Markup.button.callback('❌ Cancel', 'pos_cancel'),
+        Markup.button.callback(`✅ ${t(lang, 'Place Stop Loss')}`, 'pos_execute_sl'),
+        Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel'),
       ],
     ]),
   });
@@ -678,11 +716,12 @@ async function showStopLossConfirmation(
 export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
-  await ctx.answerCbQuery('Placing stop loss…').catch(() => {});
+  await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'Placing stop loss...')).catch(() => {});
 
   const state = await positionTradeState.get(telegramId);
   if (!state || state.action !== 'stop_loss' || !state.price) {
-    await ctx.reply('❌ Session expired. Please start again.').catch(() => {});
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(t(lang, 'common.sessionExpired')).catch(() => {});
     return;
   }
   positionTradeState.delete(telegramId);
@@ -690,9 +729,12 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
   try {
     const user = await getUserByTelegramId(telegramId);
     if (!user?.polymarketProxyAddress) {
-      await ctx.reply('❌ Trading wallet not set up.').catch(() => {});
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(`❌ ${t(lang, 'Trading wallet not set up.')}`).catch(() => {});
       return;
     }
+
+    const lang = getLang(user);
 
     const { ensurePredexonUser } = await import('../../services/user');
     const { placeOrder: predexonPlaceOrder } = await import('../../services/predexon');
@@ -725,17 +767,17 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
 
     const slCents = (snappedPrice * 100).toFixed(1);
     await ctx.reply(
-      `✅ *Stop Loss Placed*\n\n` +
+      `✅ *${t(lang, 'Stop Loss Placed')}*\n\n` +
       `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-      `🛑 Trigger price: *${slCents}¢*\n` +
-      `📦 Shares: *${shares}*\n\n` +
-      `_GTC limit sell order resting on the book. Cancel it from Open Orders if needed._`,
+      `🛑 ${t(lang, 'Trigger price')}: *${slCents}¢*\n` +
+      `📦 ${t(lang, 'Shares')}: *${shares}*\n\n` +
+      `_${t(lang, 'GTC limit sell order resting on the book. Cancel it from Open Orders if needed.')}_`,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('📋 Open Orders', 'portfolio_orders_1')],
-          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'btn.openOrders'), 'portfolio_orders_1')],
+          [Markup.button.callback(`📊 ${t(lang, 'My Positions')}`, 'portfolio_open_1')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
         ]),
       },
     ).catch(() => {});
@@ -745,8 +787,9 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
     );
   } catch (error: any) {
     logger.error('[stopLoss] Error executing stop loss:', error);
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
     await ctx.reply(
-      `❌ *Stop Loss Failed*\n\n${error?.message || 'Unknown error'}\n\nPlease try again.`,
+      `❌ *${t(lang, 'Stop Loss Failed')}*\n\n${error?.message || t(lang, 'Unknown error')}\n\n${t(lang, 'Please try again.')}`,
       { parse_mode: 'Markdown' },
     ).catch(() => {});
   }
@@ -766,7 +809,8 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     if (!state || !pos) {
       pos = await getPosOrFetch(telegramId, idx);
       if (!pos) {
-        await ctx.answerCbQuery('⚠️ Position not found. Please refresh.', { show_alert: true });
+        const lang = ((ctx as any).userLanguage as Locale) || 'en';
+        await ctx.answerCbQuery(`⚠️ ${t(lang, 'Position not found. Please refresh.')}`, { show_alert: true });
         return;
       }
       state = {
@@ -811,7 +855,8 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     await showSellConfirmation(ctx, telegramId, state, price, shares);
   } catch (error) {
     logger.error('Error in quick pct sell:', error);
-    try { await ctx.answerCbQuery('❌ An error occurred. Please try again.', { show_alert: true }); } catch {}
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    try { await ctx.answerCbQuery(`❌ ${t(lang, 'An error occurred. Please try again.')}`, { show_alert: true }); } catch {}
   }
 }
 
@@ -824,9 +869,12 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
   const state = await positionTradeState.get(telegramId);
   if (!state) return;
 
+  const user = await getUserByTelegramId(telegramId);
+  const lang = getLang(user);
+
   if (Date.now() - state.timestamp > 10 * 60 * 1000) {
     positionTradeState.delete(telegramId);
-    await ctx.reply('❌ Session expired. Please start again.');
+    await ctx.reply(t(lang, 'common.sessionExpired'));
     return;
   }
 
@@ -835,10 +883,10 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
   if (isNaN(val) || val <= 0) {
     await ctx.reply(
       state.action === 'sell'
-        ? '❌ Enter the number of shares to sell. Example: `7.5`'
+        ? `❌ ${t(lang, 'Enter the number of shares to sell. Example:')} \`7.5\``
         : state.action === 'stop_loss'
-        ? '❌ Enter the stop loss price in cents. Example: `35` for 35¢'
-        : '❌ Enter the USDC amount to spend. Example: `10`',
+        ? `❌ ${t(lang, 'Enter the stop loss price in cents. Example:')} \`35\` ${t(lang, 'for')} 35¢`
+        : `❌ ${t(lang, 'Enter the USDC amount to spend. Example:')} \`10\``,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -849,14 +897,14 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
     const slPrice = val > 1 ? val / 100 : val; // support both 35 and 0.35
     if (slPrice >= state.curPrice) {
       await ctx.reply(
-        `❌ Stop loss price must be *below* current price.\n\n` +
-        `Current: *${(state.curPrice * 100).toFixed(1)}¢*\nYou entered: *${(slPrice * 100).toFixed(1)}¢*`,
+        `❌ ${t(lang, 'Stop loss price must be below current price.')}\n\n` +
+        `${t(lang, 'Current')}: *${(state.curPrice * 100).toFixed(1)}¢*\n${t(lang, 'You entered')}: *${(slPrice * 100).toFixed(1)}¢*`,
         { parse_mode: 'Markdown' }
       );
       return;
     }
     if (slPrice < 0.01) {
-      await ctx.reply('❌ Minimum price is 1¢.', { parse_mode: 'Markdown' });
+      await ctx.reply(`❌ ${t(lang, 'Minimum price is 1¢.')}`, { parse_mode: 'Markdown' });
       return;
     }
     await showStopLossConfirmation(ctx, telegramId, state, slPrice);
@@ -867,13 +915,13 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
     // Floor to 4 decimals — never sell more than owned
     const shares = Math.floor(val * 10000) / 10000;
     if (shares > state.currentSize * 1.001) {
-      await ctx.reply(`❌ You only have ${state.currentSize.toFixed(4)} shares. Cannot sell ${shares}.`);
+      await ctx.reply(`❌ ${t(lang, 'You only have')} ${state.currentSize.toFixed(4)} ${t(lang, 'shares')}. ${t(lang, 'Cannot sell')} ${shares}.`);
       return;
     }
     if (shares < MIN_ORDER_SIZE) {
       await ctx.reply(
-        `❌ Minimum order size is *${MIN_ORDER_SIZE} shares*. You entered ${shares.toFixed(4)} shares.\n\n` +
-        `Your position: ${state.currentSize.toFixed(4)} shares — enter at least ${MIN_ORDER_SIZE}.`,
+        `❌ ${t(lang, 'Minimum order size is')} *${MIN_ORDER_SIZE} ${t(lang, 'shares')}*. ${t(lang, 'You entered')} ${shares.toFixed(4)} ${t(lang, 'shares')}.\n\n` +
+        `${t(lang, 'Your position')}: ${state.currentSize.toFixed(4)} ${t(lang, 'shares')} — ${t(lang, 'enter at least')} ${MIN_ORDER_SIZE}.`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -896,7 +944,7 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
     if (estimatedShares < MIN_ORDER_SIZE) {
       const minUsd = (MIN_ORDER_SIZE * price).toFixed(2);
       await ctx.reply(
-        `❌ Minimum order size is *${MIN_ORDER_SIZE} shares*. At ${(state.curPrice * 100).toFixed(1)}¢, you need at least *$${minUsd}*.`,
+        `❌ ${t(lang, 'Minimum order size is')} *${MIN_ORDER_SIZE} ${t(lang, 'shares')}*. ${t(lang, 'At')} ${(state.curPrice * 100).toFixed(1)}¢, ${t(lang, 'you need at least')} *$${minUsd}*.`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -914,6 +962,9 @@ async function showSellConfirmation(
   price: number,
   shares: number
 ): Promise<void> {
+  const user = await getUserByTelegramId(telegramId);
+  const lang = getLang(user);
+
   positionTradeState.set(telegramId, { ...state, price, size: shares });
 
   const estProceeds = shares * price;
@@ -921,21 +972,21 @@ async function showSellConfirmation(
   const netProceeds = estProceeds - commissionAmt;
 
   const msg =
-    `⚠️ *Confirm SELL Order*\n\n` +
+    `⚠️ *${t(lang, 'Confirm SELL Order')}*\n\n` +
     `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-    `📉 Sell: *${shares.toFixed(4)} shares*\n` +
-    `💰 Min price: *${(price * 100).toFixed(2)}¢*\n` +
-    `💵 Est. proceeds: *$${estProceeds.toFixed(2)}*\n` +
-    `📊 Platform fee (1%): *-$${commissionAmt.toFixed(2)}*\n` +
-    `💰 Net to wallet: *$${netProceeds.toFixed(2)}*\n\n` +
-    `_Market order — executes immediately at the best available price._`;
+    `📉 ${t(lang, 'Sell')}: *${shares.toFixed(4)} ${t(lang, 'shares')}*\n` +
+    `💰 ${t(lang, 'Min price')}: *${(price * 100).toFixed(2)}¢*\n` +
+    `💵 ${t(lang, 'Est. proceeds')}: *$${estProceeds.toFixed(2)}*\n` +
+    `📊 ${t(lang, 'Platform fee')} (1%): *-$${commissionAmt.toFixed(2)}*\n` +
+    `💰 ${t(lang, 'Net to wallet')}: *$${netProceeds.toFixed(2)}*\n\n` +
+    `_${t(lang, 'Market order — executes immediately at the best available price.')}_`;
 
   await ctx.reply(msg, {
     parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([
       [
-        Markup.button.callback('✅ Confirm Sell', 'pos_execute_sell'),
-        Markup.button.callback('❌ Cancel', 'pos_cancel'),
+        Markup.button.callback(`✅ ${t(lang, 'Confirm Sell')}`, 'pos_execute_sell'),
+        Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel'),
       ],
     ]),
   });
@@ -949,12 +1000,15 @@ async function showBuyConfirmation(
   usdAmount: number,
   slippagePct: number = 1.0
 ): Promise<void> {
+  const user = await getUserByTelegramId(telegramId);
+  const lang = getLang(user);
+
   const commissionAmt = usdAmount * COMMISSION_RATE;
   const tradeAmount = usdAmount - commissionAmt;
 
   if (tradeAmount < 1.0) {
     await ctx.reply(
-      `❌ *Minimum order is $1.00*\n\nAfter the 1% platform fee, your trade amount would be $${tradeAmount.toFixed(2)}. Please enter at least $1.02.`,
+      `❌ *${t(lang, 'Minimum order is $1.00')}*\n\n${t(lang, 'After the 1% platform fee, your trade amount would be')} $${tradeAmount.toFixed(2)}. ${t(lang, 'Please enter at least')} $1.02.`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -964,21 +1018,21 @@ async function showBuyConfirmation(
   positionTradeState.set(telegramId, { ...state, price, size: shares });
 
   const msg =
-    `⚠️ *Confirm BUY Order*\n\n` +
+    `⚠️ *${t(lang, 'Confirm BUY Order')}*\n\n` +
     `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-    `📈 Buy: *~${shares.toFixed(4)} shares*\n` +
-    `💰 Max price: *${(price * 100).toFixed(2)}¢* (slippage: ${slippagePct}%)\n` +
-    `💵 Total: *$${usdAmount.toFixed(2)}*\n` +
-    `📊 Platform fee (1%): *-$${commissionAmt.toFixed(2)}*\n` +
-    `💰 Trade amount: *$${tradeAmount.toFixed(2)}*\n\n` +
-    `_FAK market order — fills immediately at best available ask._`;
+    `📈 ${t(lang, 'Buy')}: *~${shares.toFixed(4)} ${t(lang, 'shares')}*\n` +
+    `💰 ${t(lang, 'Max price')}: *${(price * 100).toFixed(2)}¢* (${t(lang, 'slippage')}: ${slippagePct}%)\n` +
+    `💵 ${t(lang, 'Total')}: *$${usdAmount.toFixed(2)}*\n` +
+    `📊 ${t(lang, 'Platform fee')} (1%): *-$${commissionAmt.toFixed(2)}*\n` +
+    `💰 ${t(lang, 'Trade amount')}: *$${tradeAmount.toFixed(2)}*\n\n` +
+    `_${t(lang, 'FAK market order — fills immediately at best available ask.')}_`;
 
   await ctx.reply(msg, {
     parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([
       [
-        Markup.button.callback('✅ Confirm Buy', 'pos_execute_buy'),
-        Markup.button.callback('❌ Cancel', 'pos_cancel'),
+        Markup.button.callback(`✅ ${t(lang, 'Confirm Buy')}`, 'pos_execute_buy'),
+        Markup.button.callback(t(lang, 'btn.cancel'), 'pos_cancel'),
       ],
     ]),
   });
@@ -988,15 +1042,16 @@ async function showBuyConfirmation(
 
 export async function handlePositionCancel(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery('Cancelled');
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.answerCbQuery(t(lang, 'Cancelled'));
     const telegramId = ctx.from?.id.toString();
     if (telegramId) positionTradeState.delete(telegramId);
 
-    const keyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back to Positions', 'portfolio_open_1')]]);
+    const keyboard = Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')]]);
     try {
-      await ctx.editMessageText('❌ Trade cancelled.', { ...keyboard });
+      await ctx.editMessageText(`❌ ${t(lang, 'Trade cancelled.')}`, { ...keyboard });
     } catch {
-      await ctx.reply('❌ Trade cancelled.', { ...keyboard });
+      await ctx.reply(`❌ ${t(lang, 'Trade cancelled.')}`, { ...keyboard });
     }
   } catch (error) {
     logger.error('Error cancelling position trade:', error);
@@ -1013,17 +1068,21 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
 
     const state = await positionTradeState.get(telegramId);
     if (!state || state.price === undefined || state.size === undefined) {
-      await ctx.reply('❌ Session expired. Please start again.', {
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'common.sessionExpired'), {
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.back'), 'portfolio_open_1')]]),
       });
       return;
     }
     positionTradeState.delete(telegramId);
 
-    try { await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ' Placing sell order...', { parse_mode: 'HTML' }); } catch { await ctx.reply(ce(EMOJI.loading, '⏳') + ' Placing sell order...', { parse_mode: 'HTML' }); }
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    try { await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ` ${t(lang, 'Placing sell order...')}`, { parse_mode: 'HTML' }); } catch { await ctx.reply(ce(EMOJI.loading, '⏳') + ` ${t(lang, 'Placing sell order...')}`, { parse_mode: 'HTML' }); }
 
     const user = await getUserByTelegramId(telegramId);
-    if (!user) { await ctx.reply('❌ User not found.'); return; }
+    if (!user) { await ctx.reply(t(lang, 'common.userNotFoundShort')); return; }
+
+    const userLang = getLang(user);
 
     try {
       // Grab pos from cache BEFORE deleting it (needed for PNL card avgPrice)
@@ -1040,26 +1099,26 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
       } catch {}
 
       const doneKeyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(`📊 ${t(userLang, 'My Positions')}`, 'portfolio_open_1')],
+        [Markup.button.callback(t(userLang, 'btn.mainMenu'), 'back_to_menu')],
       ]);
 
       const sellSize  = state.size!;
       const sellPrice = state.price!;
       const buildSellMsg = (txLine: string) =>
-        `✅ *Sell Executed!*\n\n` +
+        `✅ *${t(userLang, 'Sell Executed!')}*\n\n` +
         `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-        `📉 Shares: *${sellSize.toFixed(4)}*\n` +
-        `💰 Min price: *${(sellPrice * 100).toFixed(2)}¢*\n` +
-        `💵 Est. proceeds: *$${(sellSize * sellPrice).toFixed(2)}*\n` +
+        `📉 ${t(userLang, 'Shares')}: *${sellSize.toFixed(4)}*\n` +
+        `💰 ${t(userLang, 'Min price')}: *${(sellPrice * 100).toFixed(2)}¢*\n` +
+        `💵 ${t(userLang, 'Est. proceeds')}: *$${(sellSize * sellPrice).toFixed(2)}*\n` +
         txLine +
-        `_Market sell executed — your position has been closed or reduced._`;
+        `_${t(userLang, 'Market sell executed — your position has been closed or reduced.')}_`;
 
       let sentMsg: any;
       try {
-        sentMsg = await ctx.editMessageText(buildSellMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...doneKeyboard });
+        sentMsg = await ctx.editMessageText(buildSellMsg(`🔗 ${t(userLang, 'Transaction Hash')}: _${t(userLang, 'fetching...')}_\n`), { parse_mode: 'Markdown', ...doneKeyboard });
       } catch {
-        sentMsg = await ctx.reply(buildSellMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...doneKeyboard });
+        sentMsg = await ctx.reply(buildSellMsg(`🔗 ${t(userLang, 'Transaction Hash')}: _${t(userLang, 'fetching...')}_\n`), { parse_mode: 'Markdown', ...doneKeyboard });
       }
 
       // Fire-and-forget: fetch on-chain tx hash and update message
@@ -1074,7 +1133,7 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
             try {
               const txHash = await fetchTxHashForOrder(proxyAddr, assetId, placedAt);
               const txLine = txHash
-                ? `🔗 [Transaction Hash](https://polygonscan.com/tx/${txHash})\n`
+                ? `🔗 [${t(userLang, 'Transaction Hash')}](https://polygonscan.com/tx/${txHash})\n`
                 : ``;
               await ctx.telegram.editMessageText(
                 chatId, msgId, undefined,
@@ -1117,7 +1176,7 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
             if (imgBuffer) {
               await ctx.replyWithPhoto(
                 { source: imgBuffer },
-                { caption: `${cashPnl >= 0 ? '🟢' : '🔴'} <b>Realized P&L: ${cashPnl >= 0 ? '+' : ''}$${cashPnl.toFixed(2)}</b>`, parse_mode: 'HTML' }
+                { caption: `${cashPnl >= 0 ? '🟢' : '🔴'} <b>${t(userLang, 'Realized P&L')}: ${cashPnl >= 0 ? '+' : ''}$${cashPnl.toFixed(2)}</b>`, parse_mode: 'HTML' }
               );
             }
           } catch (pnlErr) {
@@ -1127,8 +1186,8 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
       }
     } catch (err: any) {
       logger.error('[positionTrade] Sell failed:', err);
-      const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]);
-      const errMsg = '❌ *Sell Failed*\n\nOrder could not be placed. Check your balance and try again.';
+      const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback(t(userLang, 'btn.back'), 'portfolio_open_1')]]);
+      const errMsg = `❌ *${t(userLang, 'Sell Failed')}*\n\n${t(userLang, 'Order could not be placed. Check your balance and try again.')}`;
       try {
         await ctx.editMessageText(errMsg, { parse_mode: 'Markdown', ...errKeyboard });
       } catch {
@@ -1150,17 +1209,21 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
 
     const state = await positionTradeState.get(telegramId);
     if (!state || state.price === undefined || state.size === undefined) {
-      await ctx.reply('❌ Session expired. Please start again.', {
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]),
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'common.sessionExpired'), {
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.back'), 'portfolio_open_1')]]),
       });
       return;
     }
     positionTradeState.delete(telegramId);
 
-    try { await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ' Placing buy order...', { parse_mode: 'HTML' }); } catch { await ctx.reply(ce(EMOJI.loading, '⏳') + ' Placing buy order...', { parse_mode: 'HTML' }); }
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    try { await ctx.editMessageText(ce(EMOJI.loading, '⏳') + ` ${t(lang, 'Placing buy order...')}`, { parse_mode: 'HTML' }); } catch { await ctx.reply(ce(EMOJI.loading, '⏳') + ` ${t(lang, 'Placing buy order...')}`, { parse_mode: 'HTML' }); }
 
     const user = await getUserByTelegramId(telegramId);
-    if (!user) { await ctx.reply('❌ User not found.'); return; }
+    if (!user) { await ctx.reply(t(lang, 'common.userNotFoundShort')); return; }
+
+    const userLang = getLang(user);
 
     try {
       const result = await executePositionOrder(user, state.assetId, state.conditionId, state.negRisk, 'buy', state.price, state.size);
@@ -1177,24 +1240,24 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
       const usdAmount = buySize * buyPrice;
 
       const buyDoneKeyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(`📊 ${t(userLang, 'My Positions')}`, 'portfolio_open_1')],
+        [Markup.button.callback(t(userLang, 'btn.mainMenu'), 'back_to_menu')],
       ]);
 
       const buildBuyMsg = (txLine: string) =>
-        `✅ *Buy Order Placed!*\n\n` +
+        `✅ *${t(userLang, 'Buy Order Placed!')}*\n\n` +
         `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
-        `📈 Shares: *~${buySize.toFixed(4)}*\n` +
-        `💰 Price: *${(buyPrice * 100).toFixed(2)}¢*\n` +
+        `📈 ${t(userLang, 'Shares')}: *~${buySize.toFixed(4)}*\n` +
+        `💰 ${t(userLang, 'Price')}: *${(buyPrice * 100).toFixed(2)}¢*\n` +
         `💵 USDC: *$${usdAmount.toFixed(2)}*\n` +
         txLine +
-        `_Order will be filled when matched._`;
+        `_${t(userLang, 'Order will be filled when matched.')}_`;
 
       let sentBuyMsg: any;
       try {
-        sentBuyMsg = await ctx.editMessageText(buildBuyMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...buyDoneKeyboard });
+        sentBuyMsg = await ctx.editMessageText(buildBuyMsg(`🔗 ${t(userLang, 'Transaction Hash')}: _${t(userLang, 'fetching...')}_\n`), { parse_mode: 'Markdown', ...buyDoneKeyboard });
       } catch {
-        sentBuyMsg = await ctx.reply(buildBuyMsg('🔗 Transaction Hash: _fetching…_\n'), { parse_mode: 'Markdown', ...buyDoneKeyboard });
+        sentBuyMsg = await ctx.reply(buildBuyMsg(`🔗 ${t(userLang, 'Transaction Hash')}: _${t(userLang, 'fetching...')}_\n`), { parse_mode: 'Markdown', ...buyDoneKeyboard });
       }
 
       // Fire-and-forget: fetch on-chain tx hash and update message
@@ -1209,7 +1272,7 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
             try {
               const txHash = await fetchTxHashForOrder(proxyAddr, assetId, placedAt);
               const txLine = txHash
-                ? `🔗 [Transaction Hash](https://polygonscan.com/tx/${txHash})\n`
+                ? `🔗 [${t(userLang, 'Transaction Hash')}](https://polygonscan.com/tx/${txHash})\n`
                 : ``;
               await ctx.telegram.editMessageText(
                 chatId, msgId, undefined,
@@ -1224,8 +1287,8 @@ export async function handlePositionExecuteBuy(ctx: Context): Promise<void> {
       }
     } catch (err: any) {
       logger.error('[positionTrade] Buy failed:', err);
-      const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback('« Back', 'portfolio_open_1')]]);
-      const errMsg = '❌ *Buy Failed*\n\nOrder could not be placed. Check your balance and try again.';
+      const errKeyboard = Markup.inlineKeyboard([[Markup.button.callback(t(userLang, 'btn.back'), 'portfolio_open_1')]]);
+      const errMsg = `❌ *${t(userLang, 'Buy Failed')}*\n\n${t(userLang, 'Order could not be placed. Check your balance and try again.')}`;
       try {
         await ctx.editMessageText(errMsg, { parse_mode: 'Markdown', ...errKeyboard });
       } catch {

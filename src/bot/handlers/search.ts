@@ -3,6 +3,25 @@ import { Markup } from 'telegraf';
 import { getEventBySlug, searchEventsByKeyword, formatVolume, Event } from '../../services/market';
 import { logger } from '../../utils/logger';
 import { sendPage } from '../../utils/telegram';
+import { getUserByTelegramId } from '../../services/user';
+import { t, Locale } from '../../i18n';
+
+/** Get locale from user object */
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
+
+/** Try to resolve locale for the current context user */
+async function resolveLocale(ctx: Context): Promise<Locale> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (telegramId) {
+      const user = await getUserByTelegramId(telegramId);
+      if (user) return getLang(user);
+    }
+  } catch { /* fallback to 'en' */ }
+  return 'en';
+}
 
 // Matches polymarket.com/event/<slug> anywhere in a message
 const POLYMARKET_EVENT_RE = /polymarket\.com\/event\/([a-zA-Z0-9_-]+)/i;
@@ -15,21 +34,20 @@ export async function handleSearchPrompt(ctx: Context): Promise<void> {
   try {
     await ctx.answerCbQuery();
 
+    const lang = await resolveLocale(ctx);
+
     await sendPage(ctx,
-      '🔗 *Paste Event Link*\n\n' +
-      'Send a Polymarket event link anytime and I\'ll show the markets ready to trade.\n\n' +
-      '*Example:*\n' +
-      '`https://polymarket.com/event/will-trump-be-impeached`',
+      t(lang, 'search.prompt'),
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('« Back', 'back_to_menu')],
+          [Markup.button.callback(t(lang, 'btn.back'), 'back_to_menu')],
         ]),
       }
     );
   } catch (error) {
     logger.error('Error showing link prompt:', error);
-    await ctx.reply('❌ An error occurred. Please try again.');
+    await ctx.reply(t('en', 'common.error'));
   }
 }
 
@@ -47,7 +65,8 @@ export function detectPolymarketLink(text: string): string | null {
  * Called whenever any message contains a polymarket.com/event link.
  */
 export async function handleLinkInput(ctx: Context, slug: string): Promise<void> {
-  const loadingMsg = await ctx.reply('🔍 Loading event...');
+  const lang = await resolveLocale(ctx);
+  const loadingMsg = await ctx.reply(t(lang, 'search.loading'));
 
   try {
     const event = await getEventBySlug(slug);
@@ -58,12 +77,11 @@ export async function handleLinkInput(ctx: Context, slug: string): Promise<void>
 
     if (!event) {
       await ctx.reply(
-        '❌ *Event Not Found*\n\n' +
-        'No active event found for this link. It may have ended or the link may be incorrect.',
+        t(lang, 'search.eventNotFound'),
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+            [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
           ]),
         }
       );
@@ -78,9 +96,9 @@ export async function handleLinkInput(ctx: Context, slug: string): Promise<void>
     try {
       await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
     } catch { /* non-critical */ }
-    await ctx.reply('❌ Failed to load the event. Please try again.', {
+    await ctx.reply(t(lang, 'search.failed'), {
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
       ]),
     });
   }
@@ -148,7 +166,8 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
   const trimmed = query.trim();
   if (trimmed.length < 2) return; // too short — silently ignore
 
-  const loadingMsg = await ctx.reply('🔍 Searching...');
+  const lang = await resolveLocale(ctx);
+  const loadingMsg = await ctx.reply(t(lang, 'search.searching'));
 
   try {
     const events = await searchEventsByKeyword(trimmed, 5);
@@ -161,21 +180,19 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
 
     if (events.length === 0) {
       await ctx.reply(
-        `🔍 *No results for "${safeQuery(trimmed)}"*\n\n` +
-        'No active events matched your search.\n\n' +
-        '💡 Try a different keyword or browse by category.',
+        t(lang, 'search.noResults', { query: safeQuery(trimmed) }),
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('📂 Browse Categories', 'show_categories')],
-            [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+            [Markup.button.callback(t(lang, 'btn.categories'), 'show_categories')],
+            [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
           ]),
         }
       );
       return;
     }
 
-    let message = `🔍 *Results for "${safeQuery(trimmed)}"* (${events.length})\n\n`;
+    let message = `🔍 *${t(lang, 'Results for "{{query}}"', { query: safeQuery(trimmed) })}* (${events.length})\n\n`;
     events.forEach((event, idx) => {
       message += buildSearchCard(event, idx + 1, botUsername);
     });
@@ -191,8 +208,8 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
       ...Markup.inlineKeyboard([
         tradeRow,
         [
-          Markup.button.callback('📂 Categories', 'show_categories'),
-          Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+          Markup.button.callback(t(lang, '📂 Categories'), 'show_categories'),
+          Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
         ],
       ]),
     });
@@ -202,8 +219,8 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
     try {
       await ctx.telegram.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
     } catch { /* non-critical */ }
-    await ctx.reply('❌ Search failed. Please try again.', {
-      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'back_to_menu')]]),
+    await ctx.reply(t('en', 'search.searchFailed'), {
+      ...Markup.inlineKeyboard([[Markup.button.callback(t('en', 'btn.mainMenu'), 'back_to_menu')]]),
     });
   }
 }
@@ -215,8 +232,9 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
 export async function handlePriceCommand(ctx: Context, keyword: string): Promise<void> {
   const trimmed = (keyword || '').trim();
   if (trimmed.length < 2) {
+    const lang = await resolveLocale(ctx);
     await ctx.reply(
-      '📈 *Usage:* `/price <keyword>`\n\n*Example:* `/price bitcoin`',
+      t(lang, 'search.priceUsage'),
       { parse_mode: 'Markdown' }
     );
     return;

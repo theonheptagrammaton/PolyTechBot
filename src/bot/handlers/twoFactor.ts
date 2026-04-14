@@ -12,6 +12,24 @@ import {
   getRemainingBackupCodes,
 } from '../../services/twoFactor';
 import { RedisBackedState } from '../../utils/redisState';
+import { t, Locale } from '../../i18n';
+
+/** Get locale from user object */
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
+
+/** Try to resolve locale for the current context user */
+async function resolveLocale(ctx: Context): Promise<Locale> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (telegramId) {
+      const user = await getUserByTelegramId(telegramId);
+      if (user) return getLang(user);
+    }
+  } catch { /* fallback to 'en' */ }
+  return 'en';
+}
 
 // 2FA setup temporary state — TTL 10 min (matches setup window)
 const twoFactorSetupCache = new RedisBackedState<{ secret: string; backupCodes: string[]; timestamp: number }>('twoFactorSetup', 600);
@@ -28,51 +46,46 @@ export async function handleTwoFactorMenu(ctx: Context): Promise<void> {
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
 
     const user = await getUserByTelegramId(telegramId);
     if (!user) {
-      await sendPage(ctx, '❌ User not found. Use /start to create your wallet.', {
+      await sendPage(ctx, t('en', 'common.userNotFound'), {
         parse_mode: 'Markdown',
       });
       return;
     }
 
+    const lang = getLang(user);
+
     // Always fetch fresh 2FA status from database (bypass cache)
     const is2FAEnabled = await isTwoFactorEnabled(telegramId);
     const backupCodesCount = await getRemainingBackupCodes(telegramId);
 
-    let message = '🔐 *Two-Factor Authentication (2FA)*\n\n';
+    let message = t(lang, 'twoFA.title');
 
     if (is2FAEnabled) {
-      message += '✅ *Status:* Enabled\n\n';
-      message += '🔒 2FA is currently protecting your account.\n\n';
-      message += `🔑 *Backup Codes:* ${backupCodesCount} remaining\n\n`;
-      message += '💡 *Tip:* Keep your backup codes safe. They can be used if you lose access to your authenticator app.';
+      message += t(lang, 'twoFA.statusEnabled');
+      message += t(lang, 'twoFA.backupCodesCount', { count: backupCodesCount });
+      message += t(lang, 'twoFA.tipEnabled');
     } else {
-      message += '❌ *Status:* Disabled\n\n';
-      message += '🔓 *2FA is completely optional.*\n\n';
-      message += '💡 *Benefits if you enable it:*\n';
-      message += '• Extra layer of security for your account\n';
-      message += '• Additional protection for your funds\n';
-      message += '• Peace of mind with two-factor authentication\n\n';
-      message += '📱 *You will need:*\n';
-      message += '• Google Authenticator or similar app\n';
-      message += '• Your phone to scan a QR code';
+      message += t(lang, 'twoFA.statusDisabled');
+      message += t(lang, 'twoFA.benefits');
+      message += t(lang, 'twoFA.youNeed');
     }
 
     const buttons = [];
 
     if (is2FAEnabled) {
-      buttons.push([Markup.button.callback('🔑 View Backup Codes', '2fa_backup_codes')]);
-      buttons.push([Markup.button.callback('❌ Disable 2FA', '2fa_disable')]);
+      buttons.push([Markup.button.callback(t(lang, 'btn.viewBackupCodes'), '2fa_backup_codes')]);
+      buttons.push([Markup.button.callback(t(lang, 'btn.disable2FA'), '2fa_disable')]);
     } else {
-      buttons.push([Markup.button.callback('✅ Enable 2FA', '2fa_enable')]);
+      buttons.push([Markup.button.callback(t(lang, 'btn.enable2FA'), '2fa_enable')]);
     }
 
-    buttons.push([Markup.button.callback('« Back to Wallet', 'wallet_page')]);
+    buttons.push([Markup.button.callback(t(lang, 'btn.backToWallet'), 'wallet_page')]);
 
     await sendPage(ctx, message, {
       parse_mode: 'Markdown',
@@ -82,7 +95,7 @@ export async function handleTwoFactorMenu(ctx: Context): Promise<void> {
     logger.info(`2FA menu shown to user: ${telegramId}`);
   } catch (error) {
     logger.error('Error showing 2FA menu:', error);
-    await ctx.reply('❌ An error occurred while loading 2FA settings.');
+    await ctx.reply(t('en', 'twoFA.errorLoading'));
   }
 }
 
@@ -97,16 +110,18 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
     const username = ctx.from?.username;
 
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
+
+    const lang = await resolveLocale(ctx);
 
     // Check if already enabled
     const isEnabled = await isTwoFactorEnabled(telegramId);
     if (isEnabled) {
-      await ctx.reply('✅ 2FA is already enabled for your account.', {
+      await ctx.reply(t(lang, 'twoFA.alreadyEnabled'), {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', '2fa_menu')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.back'), '2fa_menu')]]),
       });
       return;
     }
@@ -122,13 +137,7 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
     });
 
     // Send QR code as photo
-    const message =
-      '🔐 *Enable Two-Factor Authentication*\n\n' +
-      '*Step 1:* Scan the QR code, or enter this key manually:\n' +
-      `\`${secret}\`\n\n` +
-      '*Step 2:* After adding, enter the 6-digit code shown in your app\n\n' +
-      '*Step 3:* Send me the 6-digit code to verify\n\n' +
-      '💡 *Tip:* The code changes every 30 seconds';
+    const message = t(lang, 'twoFA.setupStart', { secret });
 
     await ctx.deleteMessage();
     await ctx.replyWithPhoto(
@@ -137,8 +146,8 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
         caption: message,
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔑 Manual Key', '2fa_show_key')],
-          [Markup.button.callback('❌ Cancel', '2fa_menu')],
+          [Markup.button.callback(t(lang, 'btn.manualKey'), '2fa_show_key')],
+          [Markup.button.callback(t(lang, 'btn.cancel'), '2fa_menu')],
         ]),
       }
     );
@@ -152,7 +161,7 @@ export async function handleEnableTwoFactor(ctx: Context): Promise<void> {
     logger.info(`2FA setup started for user: ${telegramId}`);
   } catch (error) {
     logger.error('Error starting 2FA setup:', error);
-    await ctx.reply('❌ An error occurred while starting 2FA setup.');
+    await ctx.reply(t('en', 'twoFA.errorSetup'));
   }
 }
 
@@ -166,19 +175,20 @@ export async function handleVerifyTwoFactorSetup(
   try {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
+
+    const lang = await resolveLocale(ctx);
 
     // Get from cache
     const setupData = await twoFactorSetupCache.get(telegramId);
     if (!setupData) {
       await ctx.reply(
-        '❌ *Setup Expired*\n\n' +
-        'Your 2FA setup session has expired. Please start again.',
+        t(lang, 'twoFA.setupExpired'),
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('🔐 2FA Settings', '2fa_menu')]]),
+          ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backTo2FA'), '2fa_menu')]]),
         }
       );
       return;
@@ -188,11 +198,10 @@ export async function handleVerifyTwoFactorSetup(
     if (Date.now() - setupData.timestamp > 10 * 60 * 1000) {
       twoFactorSetupCache.delete(telegramId);
       await ctx.reply(
-        '❌ *Setup Expired*\n\n' +
-        'Your 2FA setup session has expired. Please start again.',
+        t(lang, 'twoFA.setupExpired'),
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('🔐 2FA Settings', '2fa_menu')]]),
+          ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backTo2FA'), '2fa_menu')]]),
         }
       );
       return;
@@ -208,9 +217,7 @@ export async function handleVerifyTwoFactorSetup(
 
     if (!success) {
       await ctx.reply(
-        '❌ *Invalid Code*\n\n' +
-        'The code you entered is incorrect. Please try again.\n\n' +
-        '💡 Make sure you\'re entering the 6-digit code from your authenticator app.',
+        t(lang, 'twoFA.invalidCode'),
         { parse_mode: 'Markdown' }
       );
       return;
@@ -220,32 +227,27 @@ export async function handleVerifyTwoFactorSetup(
     twoFactorSetupCache.delete(telegramId);
 
     // Show backup codes
-    let message = '✅ *2FA Enabled Successfully!*\n\n';
-    message += '🔑 *IMPORTANT: Save Your Backup Codes*\n\n';
-    message += 'These codes can be used if you lose access to your authenticator app.\n\n';
-    message += '*Your Backup Codes:*\n';
+    let message = t(lang, 'twoFA.enableSuccess');
+    message += t(lang, 'twoFA.saveBackupCodes');
+    message += t(lang, 'twoFA.backupCodesTitle');
     message += '```\n';
     setupData.backupCodes.forEach((code, index) => {
       message += `${index + 1}. ${code}\n`;
     });
     message += '```\n\n';
-    message += '⚠️ *Keep these codes safe and secure!*\n';
-    message += '• Write them down\n';
-    message += '• Store in a password manager\n';
-    message += '• Never share them with anyone\n\n';
-    message += 'Each backup code can only be used once.';
+    message += t(lang, 'twoFA.keepCodesSafe');
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ I Saved My Codes', '2fa_menu')],
+        [Markup.button.callback(t(lang, 'btn.iSavedCodes'), '2fa_menu')],
       ]),
     });
 
     logger.info(`2FA enabled successfully for user: ${telegramId}`);
   } catch (error) {
     logger.error('Error verifying 2FA setup:', error);
-    await ctx.reply('❌ An error occurred while verifying your code.');
+    await ctx.reply(t('en', 'twoFA.errorVerify'));
   }
 }
 
@@ -258,18 +260,20 @@ export async function handleShowManualKey(ctx: Context): Promise<void> {
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
+
+    const lang = await resolveLocale(ctx);
 
     const setupData = await twoFactorSetupCache.get(telegramId);
     if (!setupData || Date.now() - setupData.timestamp > 10 * 60 * 1000) {
       twoFactorSetupCache.delete(telegramId!);
       await ctx.reply(
-        '❌ *Setup Expired*\n\nYour 2FA setup session has expired. Please start again.',
+        t(lang, 'twoFA.setupExpired'),
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('🔐 2FA Settings', '2fa_menu')]]),
+          ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backTo2FA'), '2fa_menu')]]),
         }
       );
       return;
@@ -278,24 +282,15 @@ export async function handleShowManualKey(ctx: Context): Promise<void> {
     // Format secret in groups of 4 for easier manual entry
     const formattedSecret = setupData.secret.match(/.{1,4}/g)?.join(' ') || setupData.secret;
 
-    const message =
-      '🔑 *Manual 2FA Setup*\n\n' +
-      'In Google Authenticator or any TOTP app:\n\n' +
-      '1️⃣ Open the app → tap *"+"* or *"Add account"*\n' +
-      '2️⃣ Select *"Enter a setup key"*\n' +
-      '3️⃣ Enter any name for the account\n' +
-      '4️⃣ Copy and paste the key below:\n\n' +
-      `\`${formattedSecret}\`\n\n` +
-      '5️⃣ After adding, send me the *6-digit code* shown in your app\n\n' +
-      '💡 Key type: *Time-based (TOTP)*';
+    const message = t(lang, 'twoFA.manualSetup', { secret: formattedSecret });
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', '2fa_menu')]]),
+      ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.cancel'), '2fa_menu')]]),
     });
   } catch (error) {
     logger.error('Error showing manual key:', error);
-    await ctx.reply('❌ An error occurred.');
+    await ctx.reply(t('en', 'common.errorGeneric'));
   }
 }
 
@@ -308,18 +303,17 @@ export async function handleDisableTwoFactor(ctx: Context): Promise<void> {
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
 
+    const lang = await resolveLocale(ctx);
+
     await sendPage(ctx,
-      '⚠️ *Disable Two-Factor Authentication*\n\n' +
-      'Are you sure you want to disable 2FA?\n\n' +
-      'This will reduce the security of your account.\n\n' +
-      'To confirm, please enter your 6-digit code from your authenticator app:',
+      t(lang, 'twoFA.disableConfirm'),
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Cancel', '2fa_menu')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.cancel'), '2fa_menu')]]),
       }
     );
 
@@ -332,7 +326,7 @@ export async function handleDisableTwoFactor(ctx: Context): Promise<void> {
     logger.info(`2FA disable requested for user: ${telegramId}`);
   } catch (error) {
     logger.error('Error starting 2FA disable:', error);
-    await ctx.reply('❌ An error occurred.');
+    await ctx.reply(t('en', 'common.errorGeneric'));
   }
 }
 
@@ -346,19 +340,20 @@ export async function handleConfirmDisableTwoFactor(
   try {
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
+
+    const lang = await resolveLocale(ctx);
 
     // Verify code
     const isValid = await verifyUserTwoFactorToken(telegramId, code);
     if (!isValid) {
       await ctx.reply(
-        '❌ *Invalid Code*\n\n' +
-        'The code you entered is incorrect. 2FA was not disabled.',
+        t(lang, 'twoFA.disableInvalidCode'),
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('🔐 Back to 2FA', '2fa_menu')]]),
+          ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.back2FA'), '2fa_menu')]]),
         }
       );
       return;
@@ -368,19 +363,17 @@ export async function handleConfirmDisableTwoFactor(
     await disableTwoFactor(telegramId);
 
     await ctx.reply(
-      '✅ *2FA Disabled*\n\n' +
-      'Two-factor authentication has been disabled for your account.\n\n' +
-      '💡 You can enable it again at any time from your wallet settings.',
+      t(lang, 'twoFA.disabled'),
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back to Wallet', 'wallet_page')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.backToWallet'), 'wallet_page')]]),
       }
     );
 
     logger.info(`2FA disabled for user: ${telegramId}`);
   } catch (error) {
     logger.error('Error confirming 2FA disable:', error);
-    await ctx.reply('❌ An error occurred while disabling 2FA.');
+    await ctx.reply(t('en', 'twoFA.errorDisable'));
   }
 }
 
@@ -393,25 +386,22 @@ export async function handleShowBackupCodes(ctx: Context): Promise<void> {
 
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) {
-      await ctx.reply('❌ Could not identify your Telegram account.');
+      await ctx.reply(t('en', 'common.cannotIdentify'));
       return;
     }
 
+    const lang = await resolveLocale(ctx);
+
     await sendPage(ctx,
-      '🔑 *View Backup Codes*\n\n' +
-      '⚠️ For security reasons, backup codes cannot be displayed again.\n\n' +
-      'If you lost your backup codes, you can:\n' +
-      '• Disable 2FA (requires current authenticator code)\n' +
-      '• Re-enable 2FA to get new backup codes\n\n' +
-      '💡 *Tip:* Keep your backup codes in a secure password manager.',
+      t(lang, 'twoFA.viewBackupCodes'),
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([[Markup.button.callback('« Back', '2fa_menu')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.back'), '2fa_menu')]]),
       }
     );
   } catch (error) {
     logger.error('Error showing backup codes info:', error);
-    await ctx.reply('❌ An error occurred.');
+    await ctx.reply(t('en', 'common.errorGeneric'));
   }
 }
 
@@ -420,17 +410,16 @@ export async function handleShowBackupCodes(ctx: Context): Promise<void> {
  */
 export async function prompt2FACode(ctx: Context, action: string): Promise<void> {
   try {
-    const message =
-      '🔐 *Two-Factor Authentication Required*\n\n' +
-      `To complete this ${action}, please enter your 6-digit code from your authenticator app:\n\n` +
-      '💡 You can also use a backup code if you don\'t have access to your authenticator.';
+    const lang = await resolveLocale(ctx);
+
+    const message = t(lang, 'twoFA.required', { action });
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'back_to_menu')]]),
+      ...Markup.inlineKeyboard([[Markup.button.callback(t(lang, 'btn.cancel'), 'back_to_menu')]]),
     });
   } catch (error) {
     logger.error('Error prompting 2FA code:', error);
-    await ctx.reply('❌ An error occurred.');
+    await ctx.reply(t('en', 'common.errorGeneric'));
   }
 }

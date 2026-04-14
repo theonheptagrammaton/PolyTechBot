@@ -5,6 +5,11 @@ import { logger } from '../../utils/logger';
 import { getUpDownMarkets, formatVolume, UpDownMarket } from '../../services/market';
 import { isBenignTelegramError, sendPage } from '../../utils/telegram';
 import { config } from '../../config';
+import { t, Locale } from '../../i18n';
+
+function getLang(user: any): Locale {
+  return (user?.language as Locale) || 'en';
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -38,23 +43,24 @@ function esc(s: string): string {
 
 export async function handleUpDownCrypto(ctx: Context): Promise<void> {
   try {
-    await ctx.answerCbQuery('Loading…');
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.answerCbQuery(t(lang, 'Loading...'));
 
     const markets     = await getUpDownMarkets();
     const botUsername = ctx.botInfo?.username ?? config.telegram.botUsername ?? 'PolymarketBot';
 
     if (markets.length === 0) {
       await sendPage(ctx,
-        '<b>📈 Crypto Up/Down Markets</b>\n\n' +
-        '😔 No active Up/Down markets right now.\n\n' +
-        '<i>These markets are created daily on Polymarket. Try again shortly.</i>',
+        `<b>📈 ${t(lang, 'Crypto Up/Down Markets')}</b>\n\n` +
+        `😔 ${t(lang, 'No active Up/Down markets right now.')}\n\n` +
+        `<i>${t(lang, 'These markets are created daily on Polymarket. Try again shortly.')}</i>`,
         {
           parse_mode: 'HTML',
           image_path: IMG_CRYPTO,
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Refresh',      'crypto_updown')],
-            [Markup.button.callback('« Crypto Menu',   'category_crypto_sub')],
-            [Markup.button.callback('🏠 Main Menu',    'back_to_menu')],
+            [Markup.button.callback(`🔄 ${t(lang, 'Refresh')}`,      'crypto_updown')],
+            [Markup.button.callback(`« ${t(lang, 'Crypto Menu')}`,   'category_crypto_sub')],
+            [Markup.button.callback(`🏠 ${t(lang, 'Main Menu')}`,    'back_to_menu')],
           ]),
         }
       );
@@ -69,7 +75,7 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
       if (!existing.some(e => e.coin === m.coin)) existing.push(m);
     }
 
-    let msg = `<b>📈 Up/Down Crypto Markets</b>\n\n`;
+    let msg = `<b>📈 ${t(lang, 'Up/Down Crypto Markets')}</b>\n\n`;
 
     for (const [timeframe, tfMarkets] of byTimeframe) {
       const emoji = TIMEFRAME_EMOJI[timeframe] ?? '📊';
@@ -88,10 +94,10 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
       image_path: IMG_CRYPTO,
       ...Markup.inlineKeyboard([
         [
-          Markup.button.callback('🔄 Refresh',    'crypto_updown'),
-          Markup.button.callback('« Crypto Menu', 'category_crypto_sub'),
+          Markup.button.callback(`🔄 ${t(lang, 'Refresh')}`,    'crypto_updown'),
+          Markup.button.callback(`« ${t(lang, 'Crypto Menu')}`, 'category_crypto_sub'),
         ],
-        [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+        [Markup.button.callback(`🏠 ${t(lang, 'Main Menu')}`, 'back_to_menu')],
       ]),
     });
 
@@ -99,7 +105,8 @@ export async function handleUpDownCrypto(ctx: Context): Promise<void> {
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     logger.error('Error showing up/down market list:', error);
-    await ctx.reply('❌ Could not load markets. Please try again.').catch(() => {});
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(t(lang, 'Could not load markets. Please try again.')).catch(() => {});
   }
 }
 
@@ -111,18 +118,19 @@ export async function handleUpDownMarketDetail(
   _edit: boolean = true,
 ): Promise<void> {
   try {
-    if (ctx.callbackQuery) await ctx.answerCbQuery('Loading…').catch(() => {});
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    if (ctx.callbackQuery) await ctx.answerCbQuery(t(lang, 'Loading...')).catch(() => {});
 
     const markets = await getUpDownMarkets();
     const m       = markets.find(x => x.marketId === marketId);
 
     if (!m) {
-      const errMsg = '❌ Market not found. Tap below for the current list.';
+      const errMsg = t(lang, 'Market not found. Tap below for the current list.');
       const errKb  = Markup.inlineKeyboard([
-        [Markup.button.callback('📈 Up/Down Markets', 'crypto_updown')],
-        [Markup.button.callback('🏠 Main Menu',       'back_to_menu')],
+        [Markup.button.callback(`📈 ${t(lang, 'Up/Down Markets')}`, 'crypto_updown')],
+        [Markup.button.callback(`🏠 ${t(lang, 'Main Menu')}`,       'back_to_menu')],
       ]);
-      await ctx.reply(errMsg, { parse_mode: 'HTML', ...errKb });
+      await ctx.reply(`❌ ${errMsg}`, { parse_mode: 'HTML', ...errKb });
       return;
     }
 
@@ -135,33 +143,33 @@ export async function handleUpDownMarketDetail(
     const endStr      = fmtEndDate(m.endDate);
     const defaultAmount = 25;
 
-    let msg = `${m.coinEmoji ?? '🪙'} <b>${esc(m.coinName)} — Up or Down?</b>\n\n`;
-    msg += `📊 Vol (24h): <b>${vol}</b> • 💧 Liq: <b>${liq}</b>`;
+    let msg = `${m.coinEmoji ?? '🪙'} <b>${esc(m.coinName)} — ${t(lang, 'Up or Down?')}</b>\n\n`;
+    msg += `📊 ${t(lang, 'Vol (24h)')}: <b>${vol}</b> • 💧 ${t(lang, 'Liq')}: <b>${liq}</b>`;
     if (endStr) msg += ` | ⏰ ${endStr}`;
     msg += '\n\n';
 
-    msg += `- <b>Will ${esc(m.coinName)} go ⬆️ UP or ⬇️ DOWN by end of ${timeEmoji} ${esc(m.timeframe)} window?</b>\n\n`;
-    msg += `Vol: <b>${vol}</b> • Liq: <b>${liq}</b>\n\n`;
-    msg += `⬆️ Up  <b>${upPct}¢</b>\n`;
-    msg += `⬇️ Down  ${downPct}¢\n\n`;
+    msg += `- <b>${t(lang, 'Will {{coin}} go UP or DOWN by end of {{timeEmoji}} {{timeframe}} window?', { coin: esc(m.coinName), timeEmoji, timeframe: esc(m.timeframe) })}</b>\n\n`;
+    msg += `${t(lang, 'Vol')}: <b>${vol}</b> • ${t(lang, 'Liq')}: <b>${liq}</b>\n\n`;
+    msg += `⬆️ ${t(lang, 'Up')}  <b>${upPct}¢</b>\n`;
+    msg += `⬇️ ${t(lang, 'Down')}  ${downPct}¢\n\n`;
 
-    msg += `⚡ <a href="https://t.me/${botUsername}?start=trade_${m.marketId}_yes_default">UP $${defaultAmount}</a>`;
-    msg += ` • <a href="https://t.me/${botUsername}?start=trade_${m.marketId}_no_default">DOWN $${defaultAmount}</a>\n\n`;
+    msg += `⚡ <a href="https://t.me/${botUsername}?start=trade_${m.marketId}_yes_default">${t(lang, 'UP')} $${defaultAmount}</a>`;
+    msg += ` • <a href="https://t.me/${botUsername}?start=trade_${m.marketId}_no_default">${t(lang, 'DOWN')} $${defaultAmount}</a>\n\n`;
 
-    if (m.slug) msg += `🤑 <a href="https://polymarket.com/event/${m.slug}">View on Polymarket</a>`;
+    if (m.slug) msg += `🤑 <a href="https://polymarket.com/event/${m.slug}">${t(lang, 'View on Polymarket')}</a>`;
 
     const keyboard = Markup.inlineKeyboard([
       [
-        Markup.button.url(`✅ Buy UP ${upPct}¢`,    `https://t.me/${botUsername}?start=trade_${m.marketId}_yes_custom`),
-        Markup.button.url(`❌ Buy DOWN ${downPct}¢`, `https://t.me/${botUsername}?start=trade_${m.marketId}_no_custom`),
+        Markup.button.url(`✅ ${t(lang, 'Buy UP')} ${upPct}¢`,    `https://t.me/${botUsername}?start=trade_${m.marketId}_yes_custom`),
+        Markup.button.url(`❌ ${t(lang, 'Buy DOWN')} ${downPct}¢`, `https://t.me/${botUsername}?start=trade_${m.marketId}_no_custom`),
       ],
       [
-        Markup.button.url(`🏦 Place Limit Order`, `https://t.me/${botUsername}?start=limit_${m.marketId}_choice`),
+        Markup.button.url(`🏦 ${t(lang, 'Place Limit Order')}`, `https://t.me/${botUsername}?start=limit_${m.marketId}_choice`),
       ],
       [
-        Markup.button.callback('🔄 Refresh',  `updown_refresh_${m.marketId}`),
-        Markup.button.callback('« Back',       'crypto_updown'),
-        Markup.button.callback('🏠 Main Menu', 'back_to_menu'),
+        Markup.button.callback(`🔄 ${t(lang, 'Refresh')}`,  `updown_refresh_${m.marketId}`),
+        Markup.button.callback(`« ${t(lang, 'Back')}`,       'crypto_updown'),
+        Markup.button.callback(`🏠 ${t(lang, 'Main Menu')}`, 'back_to_menu'),
       ],
     ]);
 
@@ -171,7 +179,8 @@ export async function handleUpDownMarketDetail(
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     logger.error(`Error showing up/down detail for ${marketId}:`, error);
-    await ctx.reply('❌ Could not load market. Please try again.').catch(() => {});
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(t(lang, 'Could not load market. Please try again.')).catch(() => {});
   }
 }
 
@@ -179,17 +188,18 @@ export async function handleUpDownMarketDetail(
 
 export async function handleCryptoCategory(ctx: Context): Promise<void> {
   try {
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
     await ctx.answerCbQuery();
     await sendPage(ctx,
-      '₿ <b>Crypto — Select Category</b>\n\n' +
-      'Which crypto markets would you like to see?',
+      `₿ <b>${t(lang, 'Crypto — Select Category')}</b>\n\n` +
+      t(lang, 'Which crypto markets would you like to see?'),
       {
         parse_mode: 'HTML',
         image_path: IMG_CRYPTO,
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('📈 Up/Down Crypto',    'crypto_updown')],
-          [Markup.button.callback('₿ All Crypto Markets', 'category_crypto')],
-          [Markup.button.callback('« Back',              'show_categories')],
+          [Markup.button.callback(`📈 ${t(lang, 'Up/Down Crypto')}`,    'crypto_updown')],
+          [Markup.button.callback(`₿ ${t(lang, 'All Crypto Markets')}`, 'category_crypto')],
+          [Markup.button.callback(`« ${t(lang, 'Back')}`,              'show_categories')],
         ]),
       }
     );
@@ -197,6 +207,7 @@ export async function handleCryptoCategory(ctx: Context): Promise<void> {
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     logger.error('Error showing crypto subcategories:', error);
-    await ctx.reply('❌ An error occurred. Please try again.');
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(t(lang, 'common.error'));
   }
 }
