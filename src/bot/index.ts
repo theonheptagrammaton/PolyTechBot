@@ -150,6 +150,11 @@ import {
 } from './handlers/cashback';
 import { handleAutoStrategies } from './handlers/autoStrategies';
 import {
+  handleNothingEverHappensCommand,
+  handleNehPickAnother,
+  handleNehCancel,
+} from './handlers/nothingEverHappens';
+import {
   handleUpDownCommand,
   handleUpDownList,
   handleStartAdd as handleUpDownStartAdd,
@@ -607,6 +612,11 @@ export class TelegramBot {
 
     // Up-Down auto trade command
     this.bot.command('afk', handleUpDownCommand);
+
+    // Nothing Ever Happens — randomly surface a non-sports "NO" bet
+    this.bot.command('nothingeverhappens', handleNothingEverHappensCommand);
+    this.bot.action('neh_another', handleNehPickAnother);
+    this.bot.action('neh_cancel',  handleNehCancel);
 
     // Group membership check callback (used during new user onboarding)
     this.bot.action('check_membership', handleCheckMembership);
