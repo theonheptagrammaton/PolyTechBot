@@ -511,4 +511,15 @@ export const zh: Record<string, string> = {
   'btn.joinCommunity': '📢 加入社区',
   'btn.checkMembership': '✅ 我已加入，验证',
   'start.groupGate.almostThere': '⏳ <b>即将完成！</b>\n\n正在完成钱包创建...',
+
+  // ─── Group Mode (bot added to a Telegram group) ─────────────
+  'group.welcome.title': '🏛️ <b>PolyTechBot 已在此群组上线</b>',
+  'group.welcome.body': '使用 <code>/markets</code>、<code>/trending</code>、<code>/price &lt;关键词&gt;</code>，或粘贴任何 Polymarket 链接来分析市场。\n\n交易、钱包、充值和设置 — 请与机器人私聊。',
+  'group.cta.tradeInDm': '🔗 私聊交易',
+  'group.cta.openDm': '💬 打开私聊',
+  'group.err.notRegistered': '👋 请先与机器人私聊并发送 /start 来激活您的 PolyTech 账户。',
+  'group.err.rateLimited': '⏳ 请稍等 — 一分钟后再试。',
+  'group.err.notYourButton': '只有发起者才能使用这些按钮。',
+  'group.help.title': '🏛️ <b>PolyTechBot — 群组命令</b>',
+  'group.help.body': '<b>市场分析（只读）：</b>\n• /markets — 浏览分类\n• /trending — 当前热门市场\n• /price &lt;关键词&gt; — 查找市场\n• /analyze &lt;链接&gt; — 深度分析 Polymarket 链接\n• 粘贴任意 Polymarket 链接 — 自动预览\n\n<b>交易 / 钱包 / 设置：</b> 请私聊机器人。',
 };

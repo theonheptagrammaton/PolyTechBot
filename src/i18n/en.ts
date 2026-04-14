@@ -511,4 +511,15 @@ export const en: Record<string, string> = {
   'btn.joinCommunity': '📢 Join Community',
   'btn.checkMembership': "✅ I've Joined, Check",
   'start.groupGate.almostThere': '⏳ <b>Almost there!</b>\n\nFinalizing your wallet...',
+
+  // ─── Group Mode (bot added to a Telegram group) ─────────────
+  'group.welcome.title': '🏛️ <b>PolyTechBot is live in this group</b>',
+  'group.welcome.body': 'Use <code>/markets</code>, <code>/trending</code>, <code>/price &lt;keyword&gt;</code>, or paste any Polymarket link to inspect a market.\n\nTrading, wallet, deposit &amp; settings — open a private chat with the bot.',
+  'group.cta.tradeInDm': '🔗 Trade in DM',
+  'group.cta.openDm': '💬 Open DM',
+  'group.err.notRegistered': '👋 Please open a DM with the bot and run /start to activate your PolyTech account first.',
+  'group.err.rateLimited': '⏳ Slow down — please try again in a minute.',
+  'group.err.notYourButton': 'Only the requester can use these buttons.',
+  'group.help.title': '🏛️ <b>PolyTechBot — Group Commands</b>',
+  'group.help.body': '<b>Market analysis (read-only):</b>\n• /markets — browse categories\n• /trending — hot markets right now\n• /price &lt;keyword&gt; — look up a market\n• /analyze &lt;link&gt; — deep-dive on a Polymarket link\n• Paste any Polymarket link — auto-preview\n\n<b>Trading / wallet / settings:</b> DM the bot.',
 };

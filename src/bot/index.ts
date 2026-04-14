@@ -314,6 +314,18 @@ import { startBondMonitor, stopBondMonitor } from '../services/bond';
 import { startUpDownMonitor, stopUpDownMonitor } from '../services/updown';
 import { prepareImageBuffer } from '../utils/telegram';
 import { enqueueNotification, startNotificationWorker, closeNotificationWorker } from '../utils/notificationQueue';
+import {
+  handleGroupText,
+  handleGroupHelp,
+  handleGroupMarkets,
+  handleGroupTrending,
+  handleGroupPrice,
+  handleGroupAnalyze,
+  handleMyChatMember,
+  isAllowedGroupCommand,
+  extractCommandName,
+} from './handlers/group';
+import { getChatKind, isGroupChat } from './utils/chatType';
 
 export class TelegramBot {
   private bot: Telegraf;
@@ -343,8 +355,67 @@ export class TelegramBot {
       }
     });
 
-    // Onboarding guard — block all interactions for unverified users
+    // Chat-type middleware — attaches ctx.chatKind ('private' | 'group') and,
+    // in groups, pre-loads the caller's DB user (if any) so downstream handlers
+    // get a cached `registeredUser` / `userLanguage` without a second round-trip.
     this.bot.use(async (ctx, next) => {
+      const kind = getChatKind(ctx);
+      (ctx as any).chatKind = kind;
+
+      if (kind === 'group') {
+        const telegramId = ctx.from?.id?.toString();
+        if (telegramId) {
+          try {
+            const { getUserByTelegramId } = await import('../services/user');
+            const user = await getUserByTelegramId(telegramId);
+            (ctx as any).registeredUser = user ?? null;
+            if (user?.language) (ctx as any).userLanguage = user.language;
+          } catch {
+            // fail-open — analysis features should still work on transient DB errors
+          }
+        }
+      }
+      return next();
+    });
+
+    // Group command allow-list — in group chats, silently drop any command
+    // that isn't on the read-only analysis allow-list so the bot doesn't spam
+    // groups with unintended private-chat flows.
+    this.bot.use(async (ctx, next) => {
+      if ((ctx as any).chatKind !== 'group') return next();
+      if (!config.telegram.enableGroupMode) return; // group mode off → drop everything in groups
+
+      // Callback queries in groups — only allow callbacks we've explicitly
+      // opted in. Handlers we wire for groups are the ones registered in
+      // `setupHandlers`; others we silently acknowledge and drop.
+      if ('callback_query' in ctx.update) {
+        await ctx.answerCbQuery().catch(() => {});
+        // We don't currently route any callbacks in groups (all group UI
+        // uses URL buttons). Let it through so the existing noop / navigation
+        // handlers can answer — they render safe messages or no-op.
+        return next();
+      }
+
+      // Text messages handled by the dedicated `on('text')` branch below.
+      // Only gate commands here.
+      const text = 'message' in ctx.update && 'text' in ((ctx.update as any).message ?? {})
+        ? (ctx.update as any).message.text as string
+        : '';
+      if (text.startsWith('/')) {
+        const cmd = extractCommandName(text);
+        if (!cmd) return; // malformed — drop
+        if (!isAllowedGroupCommand(cmd)) return; // not on allow-list — drop silently
+      }
+      return next();
+    });
+
+    // Onboarding guard — block all interactions for unverified users.
+    // Applies in PRIVATE chats only. Groups use a separate registered-user
+    // gate inside individual group handlers (see handlers/group.ts) so we
+    // never run wallet-creation flows from a shared chat.
+    this.bot.use(async (ctx, next) => {
+      if ((ctx as any).chatKind === 'group') return next();
+
       const telegramId = ctx.from?.id?.toString();
       if (!telegramId) return next();
 
@@ -397,7 +468,10 @@ export class TelegramBot {
   private setupHandlers(): void {
     // Command handlers
     this.bot.command('start', handleStart);
-    this.bot.command('help', handleHelp);
+    this.bot.command('help', async (ctx) => {
+      if (isGroupChat(ctx)) { await handleGroupHelp(ctx); return; }
+      await handleHelp(ctx);
+    });
     this.bot.command('wallet', handleWallet);
 
     // Quick-access slash commands
@@ -406,13 +480,19 @@ export class TelegramBot {
     this.bot.command('orders', (ctx) => handleOpenOrders(ctx, 1));
     this.bot.command('deposit', handleDepositMenu);
     this.bot.command('settings', handleSettingsMenu);
-    this.bot.command('markets', handleShowCategories);
+    this.bot.command('markets', async (ctx) => {
+      if (isGroupChat(ctx)) { await handleGroupMarkets(ctx); return; }
+      await handleShowCategories(ctx);
+    });
     this.bot.command('traders', (ctx) => handleSmartWallets(ctx));
 
     // Alias / shortcut commands
     this.bot.command('home',         handleBackToMenu);
     this.bot.command('trade',        handleShowCategories);
-    this.bot.command('trending',     (ctx) => handleCategorySelection(ctx, 'trending'));
+    this.bot.command('trending',     async (ctx) => {
+      if (isGroupChat(ctx)) { await handleGroupTrending(ctx); return; }
+      await handleCategorySelection(ctx, 'trending');
+    });
     this.bot.command('smartwallet',  (ctx) => handleSmartWallets(ctx));
     this.bot.command('copytrade',    async (ctx) => handleCopyCommand(ctx, undefined));
     this.bot.command('limitorders',  (ctx) => handleOpenOrders(ctx, 1));
@@ -423,8 +503,39 @@ export class TelegramBot {
     this.bot.command('price', async (ctx) => {
       const text = 'message' in ctx.update && 'text' in ctx.update.message
         ? ctx.update.message.text as string : '';
-      const keyword = text.replace(/^\/price\s*/i, '').trim();
+      const keyword = text.replace(/^\/price(?:@\w+)?\s*/i, '').trim();
+      if (isGroupChat(ctx)) { await handleGroupPrice(ctx, keyword); return; }
       await handlePriceCommand(ctx, keyword);
+    });
+
+    // /analyze <polymarket-link-or-keyword> — group-friendly deep-dive entry
+    // point. Works in DMs too (delegates to the same link/keyword handlers).
+    this.bot.command('analyze', async (ctx) => {
+      const text = 'message' in ctx.update && 'text' in ctx.update.message
+        ? ctx.update.message.text as string : '';
+      const arg = text.replace(/^\/analyze(?:@\w+)?\s*/i, '').trim();
+      if (isGroupChat(ctx)) { await handleGroupAnalyze(ctx, arg); return; }
+      if (!arg) {
+        await ctx.reply('Usage: `/analyze <polymarket-link-or-keyword>`', { parse_mode: 'Markdown' });
+        return;
+      }
+      const slug = detectPolymarketLink(arg);
+      if (slug) await handleLinkInput(ctx, slug);
+      else await handleKeywordSearch(ctx, arg);
+    });
+    // /market as alias for /analyze (group allow-listed)
+    this.bot.command('market', async (ctx) => {
+      const text = 'message' in ctx.update && 'text' in ctx.update.message
+        ? ctx.update.message.text as string : '';
+      const arg = text.replace(/^\/market(?:@\w+)?\s*/i, '').trim();
+      if (isGroupChat(ctx)) { await handleGroupAnalyze(ctx, arg); return; }
+      if (!arg) {
+        await handleShowCategories(ctx);
+        return;
+      }
+      const slug = detectPolymarketLink(arg);
+      if (slug) await handleLinkInput(ctx, slug);
+      else await handleKeywordSearch(ctx, arg);
     });
 
     // /follow <address> → alias for /copy add <address>
@@ -1326,6 +1437,14 @@ export class TelegramBot {
       const telegramId = ctx.from?.id.toString();
       if (!telegramId) return;
 
+      // Group chats get a dedicated, read-only text path: link auto-preview
+      // only, with registered-user + rate-limit gates. No state routing,
+      // no keyword search, no "unknown command" replies in groups.
+      if ((ctx as any).chatKind === 'group') {
+        await handleGroupText(ctx);
+        return;
+      }
+
       // Detect Polymarket event link in any message — handle immediately regardless of state
       const polySlug = detectPolymarketLink(text);
       if (polySlug) {
@@ -1508,6 +1627,11 @@ export class TelegramBot {
         );
       }
     });
+
+    // ── Group lifecycle ─────────────────────────────────────────────────
+    // Fires when the bot itself is added to / removed from / promoted in a
+    // chat. Posts a welcome card on add and evicts per-chat state on remove.
+    this.bot.on('my_chat_member', handleMyChatMember);
   }
 
   private setupErrorHandling(): void {

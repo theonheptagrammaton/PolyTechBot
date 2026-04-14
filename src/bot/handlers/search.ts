@@ -5,6 +5,8 @@ import { logger } from '../../utils/logger';
 import { sendPage } from '../../utils/telegram';
 import { getUserByTelegramId } from '../../services/user';
 import { t, Locale } from '../../i18n';
+import { isGroupChat, dmDeepLinkUrlSync } from '../utils/chatType';
+import { config } from '../../config';
 
 /** Get locale from user object */
 function getLang(user: any): Locale {
@@ -76,15 +78,16 @@ export async function handleLinkInput(ctx: Context, slug: string): Promise<void>
     } catch { /* non-critical */ }
 
     if (!event) {
-      await ctx.reply(
-        t(lang, 'search.eventNotFound'),
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
-          ]),
-        }
-      );
+      const inGroup = isGroupChat(ctx);
+      const botUsername = ctx.botInfo?.username || config.telegram.botUsername || 'PolyTechBot';
+      const kb = inGroup
+        ? Markup.inlineKeyboard([[
+            Markup.button.url(t(lang, 'group.cta.openDm'), dmDeepLinkUrlSync(botUsername)),
+          ]])
+        : Markup.inlineKeyboard([[
+            Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
+          ]]);
+      await ctx.reply(t(lang, 'search.eventNotFound'), { parse_mode: 'Markdown', ...kb });
       return;
     }
 
@@ -178,16 +181,20 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
 
     const botUsername = (ctx.botInfo?.username) || process.env.BOT_USERNAME || 'PolymarketBot';
 
+    const inGroup = isGroupChat(ctx);
+
     if (events.length === 0) {
-      await ctx.reply(
-        t(lang, 'search.noResults', { query: safeQuery(trimmed) }),
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
+      const emptyKb = inGroup
+        ? Markup.inlineKeyboard([[
+            Markup.button.url(t(lang, 'group.cta.openDm'), dmDeepLinkUrlSync(botUsername)),
+          ]])
+        : Markup.inlineKeyboard([
             [Markup.button.callback(t(lang, 'btn.categories'), 'show_categories')],
             [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
-          ]),
-        }
+          ]);
+      await ctx.reply(
+        t(lang, 'search.noResults', { query: safeQuery(trimmed) }),
+        { parse_mode: 'Markdown', ...emptyKb }
       );
       return;
     }
@@ -197,21 +204,26 @@ export async function handleKeywordSearch(ctx: Context, query: string): Promise<
       message += buildSearchCard(event, idx + 1, botUsername);
     });
 
-    // Numbered quick-open buttons
-    const tradeRow = events.map((e, idx) =>
-      Markup.button.callback(`${idx + 1}️⃣`, `sev_${e.id}`)
-    );
+    // In private chats we use callback buttons (open event inline).
+    // In group chats we use URL deep-links so the full event opens in DM
+    // for the user who taps — no shared-chat callback surface.
+    const tradeRow = inGroup
+      ? events.map((e, idx) =>
+          Markup.button.url(`${idx + 1}️⃣`, `https://t.me/${botUsername}?start=event_${e.id}`)
+        )
+      : events.map((e, idx) => Markup.button.callback(`${idx + 1}️⃣`, `sev_${e.id}`));
+
+    const footerRow = inGroup
+      ? [Markup.button.url(t(lang, 'group.cta.openDm'), dmDeepLinkUrlSync(botUsername))]
+      : [
+          Markup.button.callback(t(lang, '📂 Categories'), 'show_categories'),
+          Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
+        ];
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },
-      ...Markup.inlineKeyboard([
-        tradeRow,
-        [
-          Markup.button.callback(t(lang, '📂 Categories'), 'show_categories'),
-          Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
-        ],
-      ]),
+      ...Markup.inlineKeyboard([tradeRow, footerRow]),
     });
 
   } catch (error) {

@@ -511,4 +511,15 @@ export const ru: Record<string, string> = {
   'btn.joinCommunity': '📢 Вступить в сообщество',
   'btn.checkMembership': '✅ Я вступил, проверить',
   'start.groupGate.almostThere': '⏳ <b>Почти готово!</b>\n\nЗавершаем создание кошелька...',
+
+  // ─── Group Mode (bot added to a Telegram group) ─────────────
+  'group.welcome.title': '🏛️ <b>PolyTechBot работает в этой группе</b>',
+  'group.welcome.body': 'Используйте <code>/markets</code>, <code>/trending</code>, <code>/price &lt;ключевое слово&gt;</code> или вставьте любую ссылку Polymarket для анализа рынка.\n\nТорговля, кошелёк, пополнение и настройки — напишите боту в личные сообщения.',
+  'group.cta.tradeInDm': '🔗 Торговать в ЛС',
+  'group.cta.openDm': '💬 Открыть ЛС',
+  'group.err.notRegistered': '👋 Пожалуйста, откройте личный чат с ботом и введите /start, чтобы активировать аккаунт PolyTech.',
+  'group.err.rateLimited': '⏳ Слишком быстро — попробуйте снова через минуту.',
+  'group.err.notYourButton': 'Только автор запроса может пользоваться этими кнопками.',
+  'group.help.title': '🏛️ <b>PolyTechBot — Команды в группе</b>',
+  'group.help.body': '<b>Анализ рынков (только чтение):</b>\n• /markets — категории\n• /trending — популярные рынки\n• /price &lt;ключевое слово&gt; — найти рынок\n• /analyze &lt;ссылка&gt; — детальный анализ ссылки Polymarket\n• Вставьте любую ссылку Polymarket — авто-превью\n\n<b>Торговля / кошелёк / настройки:</b> напишите боту в ЛС.',
 };

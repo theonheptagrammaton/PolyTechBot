@@ -18,6 +18,7 @@ import { isBenignTelegramError, sendPage, getMenuPhotoMedia, cacheMenuPhotoFileI
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { config } from '../../config';
 import { t, Locale } from '../../i18n';
+import { isGroupChat, dmDeepLinkUrlSync } from '../utils/chatType';
 
 function getLang(user: any): Locale {
   return (user?.language as Locale) || 'en';
@@ -209,6 +210,15 @@ export async function handleShowCategories(ctx: Context): Promise<void> {
   try {
     if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
+    // In group chats, full category browsing relies on callback navigation
+    // that doesn't work well in shared conversations. Redirect to the
+    // lightweight group help card instead.
+    if (isGroupChat(ctx)) {
+      const { handleGroupHelp } = await import('./group');
+      await handleGroupHelp(ctx);
+      return;
+    }
+
     const lang = ((ctx as any).userLanguage as Locale) || 'en';
     const titleEmoji = ce(EMOJI.marketsTitle, '🤑');
 
@@ -266,17 +276,19 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
     const events = await fetchCategoryEvents(category);
 
     if (!events || events.length === 0) {
+      const emptyKb = isGroupChat(ctx)
+        ? Markup.inlineKeyboard([[
+            Markup.button.url(t(lang, 'group.cta.openDm'), dmDeepLinkUrlSync(botUsername)),
+          ]])
+        : Markup.inlineKeyboard([[
+            Markup.button.callback(t(lang, 'btn.backCategories'), 'show_categories'),
+            Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
+          ]]);
       await sendPage(
         ctx,
         `${cat.emoji} *${cat.name}*\n\n` +
         t(lang, 'markets.noEvents'),
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[
-            Markup.button.callback(t(lang, 'btn.backCategories'), 'show_categories'),
-            Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
-          ]]),
-        }
+        { parse_mode: 'Markdown', ...emptyKb }
       );
       return;
     }
@@ -302,19 +314,35 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
 
 
     // ── Nav buttons ───────────────────────────────────────────────────────────
-    const navRow: any[] = [];
-    if (currentPage > 1) navRow.push(Markup.button.callback('◀️', `page_${category}_${currentPage - 1}`));
-    navRow.push(Markup.button.callback(`· ${currentPage} / ${totalPages} ·`, 'noop'));
-    if (currentPage < totalPages) navRow.push(Markup.button.callback('▶️', `page_${category}_${currentPage + 1}`));
+    const inGroup = isGroupChat(ctx);
 
-    const buttons: any[] = [
-      navRow,
-      [
-        Markup.button.callback(t(lang, 'btn.refresh'), `refresh_category_${category}`),
-        Markup.button.callback(t(lang, 'btn.backCategories'), 'show_categories'),
-      ],
-      [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
-    ];
+    let buttons: any[];
+    if (inGroup) {
+      // Group chat: no pagination/refresh/back-to-menu callbacks — other group
+      // members clicking them would trigger private-chat navigation they don't
+      // own. Offer per-event Open-in-DM deep-links + a single group DM link.
+      const eventRow = pageEvents.map((e, idx) =>
+        Markup.button.url(`${idx + 1}️⃣`, `https://t.me/${botUsername}?start=event_${e.id}`)
+      );
+      buttons = [
+        eventRow,
+        [Markup.button.url(t(lang, 'group.cta.openDm'), dmDeepLinkUrlSync(botUsername))],
+      ];
+    } else {
+      const navRow: any[] = [];
+      if (currentPage > 1) navRow.push(Markup.button.callback('◀️', `page_${category}_${currentPage - 1}`));
+      navRow.push(Markup.button.callback(`· ${currentPage} / ${totalPages} ·`, 'noop'));
+      if (currentPage < totalPages) navRow.push(Markup.button.callback('▶️', `page_${category}_${currentPage + 1}`));
+
+      buttons = [
+        navRow,
+        [
+          Markup.button.callback(t(lang, 'btn.refresh'), `refresh_category_${category}`),
+          Markup.button.callback(t(lang, 'btn.backCategories'), 'show_categories'),
+        ],
+        [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
+      ];
+    }
 
     try {
       await sendPage(ctx, message, {
@@ -332,16 +360,21 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
     const lang = ((ctx as any).userLanguage as Locale) || 'en';
     logger.error(`Error showing category ${category}:`, error);
     try {
+      const fallbackKb = isGroupChat(ctx)
+        ? Markup.inlineKeyboard([[
+            Markup.button.url(
+              t(lang, 'group.cta.openDm'),
+              dmDeepLinkUrlSync(ctx.botInfo?.username || config.telegram.botUsername || 'PolymarketBot')
+            ),
+          ]])
+        : Markup.inlineKeyboard([[
+            Markup.button.callback(t(lang, 'btn.backCategories'), 'show_categories'),
+            Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
+          ]]);
       await sendPage(
         ctx,
         t(lang, 'markets.errorLoadingMarkets'),
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[
-            Markup.button.callback(t(lang, 'btn.backCategories'), 'show_categories'),
-            Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
-          ]]),
-        }
+        { parse_mode: 'Markdown', ...fallbackKb }
       );
     } catch { /* ignore */ }
   }
@@ -439,12 +472,17 @@ export async function handleEventDetails(
     const backSuffix = backCategory ? `_${backCategory}_${backPage}` : '';
 
     if (totalMarkets === 0) {
+      const emptyKb = isGroupChat(ctx)
+        ? Markup.inlineKeyboard([[
+            Markup.button.url(t(lang, 'group.cta.openDm'), `https://t.me/${botUsername}?start=event_${event.id}`),
+          ]])
+        : Markup.inlineKeyboard([[
+            Markup.button.callback(t(lang, 'btn.back'), backCb),
+            Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
+          ]]);
       await sendPage(ctx, `${ce(EMOJI.eventTitle, '💰')} <b>${esc(safeTitle(event.title || '', 60))}</b>\n\n<i>${t(lang, 'markets.noActiveMarkets')}</i>`, {
         parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([[
-          Markup.button.callback(t(lang, 'btn.back'), backCb),
-          Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
-        ]]),
+        ...emptyKb,
       });
       return;
     }
@@ -517,9 +555,13 @@ export async function handleEventDetails(
 
     // ── Keyboard ──────────────────────────────────────────────────────────────
     const buttons: any[] = [];
+    const inGroup = isGroupChat(ctx);
 
-    // Row 1 — Navigation (only for multi-market events, arrows only)
-    if (totalMarkets > 1) {
+    // Row 1 — Navigation between markets within a multi-market event.
+    // In groups we skip this (callback navigation would fire for anyone
+    // clicking) and instead offer a single "Open in DM" deep-link so the
+    // original caller can browse the full event in private.
+    if (totalMarkets > 1 && !inGroup) {
       const navRow: any[] = [];
       if (currentPage > 1)
         navRow.push(Markup.button.callback('⬅️', `evd_mkt_${event.id}_${currentPage - 1}${backSuffix}`));
@@ -528,21 +570,29 @@ export async function handleEventDetails(
       if (navRow.length > 0) buttons.push(navRow);
     }
 
-    // Row 2 — Buy buttons (custom amount)
+    // Row 2 — Buy buttons (custom amount) — URL buttons, safe in groups.
     buttons.push([
       Markup.button.url(t(lang, 'btn.buyYes'), `https://t.me/${botUsername}?start=trade_${marketId}_yes_custom`),
       Markup.button.url(t(lang, 'btn.buyNo'),  `https://t.me/${botUsername}?start=trade_${marketId}_no_custom`),
     ]);
 
-    // Row 4 — Single limit order button (opens YES/NO choice screen)
+    // Row 3 — Single limit order button (opens YES/NO choice screen).
     buttons.push([
       Markup.button.url(t(lang, 'btn.placeLimitOrder'), `https://t.me/${botUsername}?start=limit_${marketId}_choice`),
     ]);
 
-    buttons.push([
-      Markup.button.callback(t(lang, 'btn.back'), backCb),
-      Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
-    ]);
+    if (inGroup) {
+      // Replace the private-only back/main-menu callbacks with a single
+      // Open-in-DM URL deep-link that opens the full event in private chat.
+      buttons.push([
+        Markup.button.url(t(lang, 'group.cta.openDm'), `https://t.me/${botUsername}?start=event_${event.id}`),
+      ]);
+    } else {
+      buttons.push([
+        Markup.button.callback(t(lang, 'btn.back'), backCb),
+        Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu'),
+      ]);
+    }
 
     const ogImage = event.slug
       ? await fetchOgImage(`https://polymarket.com/event/${event.slug}`)
@@ -1228,12 +1278,20 @@ export async function handleMarketTradePage(ctx: Context, marketId: string): Pro
       [Markup.button.url(t(lang, 'btn.customTrade'), `https://t.me/${botUsername}?start=trade_${marketId}_custom`)],
     ];
 
+    const inGroup = isGroupChat(ctx);
+    const footerRow = inGroup
+      ? [Markup.button.url(t(lang, 'group.cta.openDm'),
+          eventId && /^\d+$/.test(String(eventId))
+            ? `https://t.me/${botUsername}?start=event_${eventId}`
+            : dmDeepLinkUrlSync(botUsername))]
+      : [backBtn, Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')];
+
     await sendPage(ctx, message, {
       parse_mode: 'HTML',
       image_url: eventImage,
       ...Markup.inlineKeyboard([
         ...tradeRows,
-        [backBtn, Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
+        footerRow,
       ]),
     });
 

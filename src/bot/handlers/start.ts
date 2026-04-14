@@ -10,6 +10,7 @@ import { ce, EMOJI } from '../../utils/customEmoji';
 import { getMainMenuStats, getBalance } from '../../services/portfolio';
 import { config } from '../../config';
 import { t, Locale } from '../../i18n';
+import { isGroupChat } from '../utils/chatType';
 
 const MENU_IMAGE = path.join(__dirname, '../img/opening.jpg');
 const BEAT_THE_ODDS_IMAGE = path.join(__dirname, '../img/beattheodds.JPG');
@@ -43,6 +44,14 @@ async function checkGroupMembership(userId: number): Promise<boolean> {
 
 export async function handleStart(ctx: Context): Promise<void> {
   try {
+    // /start@BotName invoked in a group: never run the private onboarding
+    // flow. Show the read-only group welcome card instead.
+    if (isGroupChat(ctx)) {
+      const { handleGroupWelcome } = await import('./group');
+      await handleGroupWelcome(ctx);
+      return;
+    }
+
     const telegramId = ctx.from?.id.toString();
     const username = ctx.from?.username;
     const firstName = ctx.from?.first_name;

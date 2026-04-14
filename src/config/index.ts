@@ -13,6 +13,8 @@ interface Config {
     requiredGroupLink?: string;
     webhookDomain?: string;
     webhookPort?: number;
+    enableGroupMode: boolean;
+    groupRateLimitPerMin: number;
   };
   predexon: {
     apiKey: string;
@@ -88,6 +90,8 @@ function validateConfig(): Config {
       requiredGroupLink: process.env.TELEGRAM_GROUP_LINK || undefined,
       webhookDomain: process.env.WEBHOOK_DOMAIN || undefined,
       webhookPort: parseInt(process.env.WEBHOOK_PORT || '8443', 10),
+      enableGroupMode: process.env.ENABLE_GROUP_MODE !== 'false',
+      groupRateLimitPerMin: parseInt(process.env.GROUP_RATE_LIMIT || '10', 10),
     },
     predexon: {
       apiKey: process.env.PREDEXON_API_KEY!,
