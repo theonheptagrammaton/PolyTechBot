@@ -296,6 +296,10 @@ export async function handleOpenPositions(ctx: Context, page: number = 1): Promi
       }
     }
 
+    // Filter out 100% loss positions: market resolved against user, nothing to claim/redeem.
+    // These are dead positions that belong in Closed Positions, not Active.
+    visiblePositions = visiblePositions.filter(p => p.redeemable || p.currentValue > 0);
+
     positionListCache.set(telegramId, visiblePositions);
 
     if (visiblePositions.length === 0) {
