@@ -167,6 +167,7 @@ import {
   handleAddTimeRangePreset as handleUpDownAddTimeRangePreset,
   handleAddUpPricePreset as handleUpDownAddUpPricePreset,
   handleAddPriceChangePreset as handleUpDownAddPriceChangePreset,
+  handleAddRoundsPreset as handleUpDownAddRoundsPreset,
   handleAddAdvanced as handleUpDownAddAdvanced,
   handleAdvOrderType as handleUpDownAdvOrderType,
   handleAdvMaxRounds as handleUpDownAdvMaxRounds,
@@ -1183,6 +1184,13 @@ export class TelegramBot {
     this.bot.action('ud_add_pc_any', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'any'));
     this.bot.action('ud_add_pc_pump', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'pump'));
     this.bot.action('ud_add_pc_dump', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'dump'));
+
+    // Up-Down: add flow — total rounds presets
+    this.bot.action('ud_add_rnd_5', async (ctx) => handleUpDownAddRoundsPreset(ctx, 5));
+    this.bot.action('ud_add_rnd_10', async (ctx) => handleUpDownAddRoundsPreset(ctx, 10));
+    this.bot.action('ud_add_rnd_25', async (ctx) => handleUpDownAddRoundsPreset(ctx, 25));
+    this.bot.action('ud_add_rnd_50', async (ctx) => handleUpDownAddRoundsPreset(ctx, 50));
+    this.bot.action('ud_add_rnd_100', async (ctx) => handleUpDownAddRoundsPreset(ctx, 100));
 
     // Up-Down: advanced — order type
     this.bot.action('ud_adv_ot_market', async (ctx) => handleUpDownAdvOrderType(ctx, 'market'));

@@ -46,6 +46,34 @@ const polygonProvider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
 // Global lock: prevents parallel redeem sessions for the same proxy
 const _redeemLocks = new Set<string>();
 
+// Rate-limit tracking: when we detect 429/quota errors, stop hitting the relayer
+let _relayerBackoffUntil = 0;
+
+/** Returns true if the error message indicates a rate limit / quota exhaustion. */
+function isRateLimitError(msg: string): boolean {
+  return /429|too many requests|quota exceeded|rate.?limit/i.test(msg);
+}
+
+/** Returns true if we should skip relayer calls due to active rate-limit backoff. */
+function isRelayerBackedOff(): boolean {
+  return Date.now() < _relayerBackoffUntil;
+}
+
+/** Mark the relayer as rate-limited. Back off for progressively longer periods. */
+function setRelayerBackoff(errorMsg: string): void {
+  // Extract reset time from "resets in N seconds" if available
+  const resetMatch = errorMsg.match(/resets in (\d+) seconds/);
+  if (resetMatch) {
+    const resetSeconds = parseInt(resetMatch[1], 10);
+    _relayerBackoffUntil = Date.now() + resetSeconds * 1000;
+    logger.warn(`[redeem] Relayer quota exhausted, backing off for ${resetSeconds}s`);
+  } else {
+    // Default: back off for 5 minutes on 429
+    _relayerBackoffUntil = Date.now() + 300_000;
+    logger.warn(`[redeem] Relayer rate limited, backing off for 300s`);
+  }
+}
+
 /**
  * Checks on-chain CTF token balance for a given proxy wallet and token (asset) ID.
  * Returns the balance as a BigNumber. If the balance is 0, the position is already redeemed.
@@ -195,22 +223,37 @@ async function redeemNegRisk(
   const ctfIface = new ethers.utils.Interface(CTF_ABI);
   const conditionId = position.conditionId;
 
-  // amounts[outcomeIndex] = balance, amounts[otherIndex] = 0
-  // Binary market: 2 outcomes (index 0 and 1)
-  const amounts = position.outcomeIndex === 0
-    ? [onChainBalance, ethers.BigNumber.from(0)]
-    : [ethers.BigNumber.from(0), onChainBalance];
-
-  // Batch: approve NegRiskAdapter on CTF (no-op if already approved) + redeem
-  const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
-  const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
-  const txPayload = [
-    { to: CTF_ADDRESS, data: approveData, value: '0' },
-    { to: NEG_RISK_ADAPTER, data: redeemData, value: '0' },
-  ];
+  // Abort early if relayer is rate-limited
+  if (isRelayerBackedOff()) {
+    const waitSec = Math.ceil((_relayerBackoffUntil - Date.now()) / 1000);
+    logger.info(`[redeem] Skipping NegRiskAdapter — relayer rate-limited for ${waitSec}s more`);
+    return { success: false, error: `Relayer rate-limited, retry in ${waitSec}s` };
+  }
 
   for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
     try {
+      // Re-check backoff before each attempt (previous attempt may have triggered it)
+      if (isRelayerBackedOff()) break;
+
+      // Re-check on-chain balance before EACH attempt to avoid "subtraction overflow"
+      // when a previous attempt already redeemed (partially or fully).
+      const currentBalance = await getOnChainTokenBalance(proxyAddress, position.asset);
+      if (currentBalance.isZero()) {
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: balance is now 0, position already redeemed`);
+        return { success: true, txHash: undefined };
+      }
+
+      // Build tx payload with fresh balance
+      const amounts = position.outcomeIndex === 0
+        ? [currentBalance, ethers.BigNumber.from(0)]
+        : [ethers.BigNumber.from(0), currentBalance];
+      const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
+      const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+      const txPayload = [
+        { to: CTF_ADDRESS, data: approveData, value: '0' },
+        { to: NEG_RISK_ADAPTER, data: redeemData, value: '0' },
+      ];
+
       logger.info(`[redeem] Trying ${txType}/NegRiskAdapter: conditionId=${conditionId.slice(0, 18)}... outcome=${position.outcome} amounts=[${amounts[0].toString()},${amounts[1].toString()}]`);
 
       const relayClient = createRelayClient(privateKey, txType);
@@ -259,20 +302,38 @@ async function redeemNegRisk(
 
       // Verify CTF tokens were actually burned
       const balanceAfter = await getOnChainTokenBalance(proxyAddress, position.asset);
-      if (balanceAfter.gte(onChainBalance)) {
+      if (balanceAfter.gte(currentBalance)) {
         logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx succeeded but CTF balance unchanged (${balanceAfter.toString()})`);
         continue;
       }
 
-      logger.info(`[redeem] Confirmed via ${txType}/NegRiskAdapter: ${txHash} (balance: ${onChainBalance.toString()} → ${balanceAfter.toString()})`);
+      logger.info(`[redeem] Confirmed via ${txType}/NegRiskAdapter: ${txHash} (balance: ${currentBalance.toString()} → ${balanceAfter.toString()})`);
       return { success: true, txHash };
     } catch (error: any) {
-      logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed: ${error?.message?.slice(0, 200)}`);
+      const errMsg = error?.message ?? '';
+      if (isRateLimitError(errMsg)) {
+        setRelayerBackoff(errMsg);
+        break; // Stop trying — relayer is exhausted
+      }
+      // Detect "subtraction overflow" — means amounts don't match on-chain state, skip to next type
+      if (/subtraction overflow/i.test(errMsg)) {
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow — balance mismatch, re-checking...`);
+        const freshBalance = await getOnChainTokenBalance(proxyAddress, position.asset);
+        if (freshBalance.isZero()) {
+          logger.info(`[redeem] Position already fully redeemed (balance now 0)`);
+          return { success: true, txHash: undefined };
+        }
+        // Balance still non-zero but amounts were wrong — next iteration will use fresh balance
+        continue;
+      }
+      logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed: ${errMsg.slice(0, 200)}`);
+      // Short delay between tx type attempts to avoid hammering
+      await new Promise(r => setTimeout(r, 2_000));
       continue;
     }
   }
 
-  return { success: false, error: 'NegRiskAdapter redemption failed with all tx types' };
+  return { success: false, error: isRelayerBackedOff() ? 'Relayer rate-limited' : 'NegRiskAdapter redemption failed with all tx types' };
 }
 
 /**
@@ -285,10 +346,20 @@ async function redeemStandard(
   position: ActivePosition,
   onChainBalance: ethers.BigNumber,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  // Abort early if relayer is rate-limited
+  if (isRelayerBackedOff()) {
+    const waitSec = Math.ceil((_relayerBackoffUntil - Date.now()) / 1000);
+    logger.info(`[redeem] Skipping standard redeem — relayer rate-limited for ${waitSec}s more`);
+    return { success: false, error: `Relayer rate-limited, retry in ${waitSec}s` };
+  }
+
   const iface       = new ethers.utils.Interface(CTF_ABI);
   const conditionId = position.conditionId;
 
   for (const collateralToken of [USDC_E_POLYGON, NATIVE_USDC_POLYGON]) {
+    // Re-check backoff before each collateral attempt
+    if (isRelayerBackedOff()) break;
+
     const callData = iface.encodeFunctionData('redeemPositions', [
       collateralToken,
       ethers.constants.HashZero,
@@ -299,6 +370,9 @@ async function redeemStandard(
     const tokenLabel = collateralToken === USDC_E_POLYGON ? 'USDC.e' : 'native USDC';
 
     for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
+      // Re-check backoff before each tx type attempt
+      if (isRelayerBackedOff()) break;
+
       try {
         logger.info(
           `[redeem] Trying ${txType}/${tokenLabel}: conditionId=${conditionId.slice(0, 18)}... outcome=${position.outcome}`
@@ -360,14 +434,22 @@ async function redeemStandard(
         logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash} (balance: ${onChainBalance.toString()} → ${balanceAfter.toString()})`);
         return { success: true, txHash };
       } catch (error: any) {
-        logger.warn(`[redeem] ${txType}/${tokenLabel} attempt failed: ${error?.message?.slice(0, 200)}`);
+        const errMsg = error?.message ?? '';
+        if (isRateLimitError(errMsg)) {
+          setRelayerBackoff(errMsg);
+          break; // Stop trying — relayer is exhausted
+        }
+        logger.warn(`[redeem] ${txType}/${tokenLabel} attempt failed: ${errMsg.slice(0, 200)}`);
+        // Short delay between tx type attempts to avoid hammering
+        await new Promise(r => setTimeout(r, 2_000));
         continue;
       }
     }
+    if (isRelayerBackedOff()) break;
     logger.info(`[redeem] ${tokenLabel} did not redeem, trying next collateral token...`);
   }
 
-  return { success: false, error: 'Redemption failed with all collateral token variants' };
+  return { success: false, error: isRelayerBackedOff() ? 'Relayer rate-limited' : 'Redemption failed with all collateral token variants' };
 }
 
 /**
@@ -526,7 +608,13 @@ async function _doRedeem(
   logger.info(`[redeem] Auto-redeeming ${pending.length} new position(s) for ${proxyAddress.slice(0, 10)}... (${redeemable.length - pending.length} already claimed)`);
 
   let claimed = 0;
-  for (const pos of pending) {
+  for (let i = 0; i < pending.length; i++) {
+    const pos = pending[i];
+    // Abort auto-redeem loop if relayer is rate-limited
+    if (isRelayerBackedOff()) {
+      logger.warn(`[redeem] Relayer rate-limited, stopping auto-redeem loop (${pending.length - i} remaining)`);
+      break;
+    }
     try {
       const key = claimedKey(proxyAddress, pos.conditionId);
 
@@ -546,9 +634,15 @@ async function _doRedeem(
         }
       } else {
         logger.warn(`[redeem] Failed to claim ${pos.outcome}: ${result.error}`);
+        // Stop loop if rate-limited
+        if (result.error && /rate.?limit/i.test(result.error)) break;
       }
     } catch (err: any) {
       logger.error(`[redeem] Unexpected error for ${pos.conditionId}:`, err?.message);
+    }
+    // Delay between positions to avoid rate limiting
+    if (i < pending.length - 1) {
+      await new Promise(r => setTimeout(r, 3_000));
     }
   }
 

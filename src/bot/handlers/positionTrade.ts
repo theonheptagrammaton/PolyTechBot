@@ -1397,10 +1397,11 @@ export async function executeCloseAllPositions(
     }
   }
 
-  // 2) Redeem resolved positions sequentially
+  // 2) Redeem resolved positions sequentially with delay between attempts
   if (redeemable.length > 0) {
     const { manualRedeem } = await import('../../services/redeem');
-    for (const pos of redeemable) {
+    for (let i = 0; i < redeemable.length; i++) {
+      const pos = redeemable[i];
       try {
         const result = await manualRedeem(
           user.encryptedPrivateKey,
@@ -1415,11 +1416,25 @@ export async function executeCloseAllPositions(
           logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
           failed++;
           errors.push(`${pos.outcome}: redeem failed — ${result.error || 'unknown error'}`);
+          // If rate-limited, stop trying more redeems
+          if (result.error && /rate.?limit/i.test(result.error)) {
+            logger.warn(`[positionTrade] closeAll: relayer rate-limited, stopping redeem loop`);
+            // Count remaining as failed
+            for (let j = i + 1; j < redeemable.length; j++) {
+              failed++;
+              errors.push(`${redeemable[j].outcome}: skipped — relayer rate-limited`);
+            }
+            break;
+          }
         }
       } catch (err: any) {
         logger.warn(`[positionTrade] closeAll: redeem threw for ${pos.outcome}: ${err?.message}`);
         failed++;
         errors.push(`${pos.outcome}: redeem error — ${err?.message || 'unknown error'}`);
+      }
+      // Delay between redeem attempts to avoid rate limiting
+      if (i < redeemable.length - 1) {
+        await new Promise(r => setTimeout(r, 3_000));
       }
     }
   }

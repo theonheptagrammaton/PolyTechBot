@@ -50,7 +50,7 @@ interface UpDownAddState {
   step:
     | 'name' | 'coin' | 'timeframe' | 'direction' | 'amount'
     | 'triggers_time' | 'triggers_up_price' | 'triggers_price_change'
-    | 'review'
+    | 'total_rounds' | 'review'
     // Advanced
     | 'adv_order_type' | 'adv_limit_price' | 'adv_limit_ttl'
     | 'adv_max_rounds' | 'adv_slippage'
@@ -192,6 +192,18 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       const wins = filledTrades.filter(t => t.tpSlStatus === 'tp_triggered').length;
       const losses = filledTrades.filter(t => t.tpSlStatus === 'sl_triggered').length;
 
+      // Estimated PnL: won trades → profit from entry, lost trades → full loss
+      const estPnl = filledTrades.reduce((sum, t) => {
+        if (t.tpSlStatus === 'tp_triggered' && t.fillPrice && t.fillPrice > 0) {
+          return sum + (t.amount / t.fillPrice - t.amount);
+        } else if (t.tpSlStatus === 'sl_triggered') {
+          return sum - t.amount;
+        }
+        return sum;
+      }, 0);
+      const pnlSign = estPnl >= 0 ? '+' : '';
+      const pnlStr = `${pnlSign}$${estPnl.toFixed(2)}`;
+
       const pcMinStr = s.priceChangeMin <= -9999 ? 'Any' : `$${s.priceChangeMin}`;
       const pcMaxStr = s.priceChangeMax >= 9999 ? 'Any' : `$${s.priceChangeMax}`;
       const trigChange = s.priceChangeMin > -9999 || s.priceChangeMax < 9999
@@ -203,7 +215,7 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
         `│  ${s.coin} · ${tf} · ${dirStr} · ${orderStr} · $${s.amount.toFixed(2)}\n` +
         `│  ${s.timeRangeStart}–${s.timeRangeEnd} · UP ${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}${trigChange}\n` +
         `│  ${wins}W/${losses}L · ${s.roundsExecuted}/${s.maxRounds} rounds\n` +
-        `└  $${totalSpent.toFixed(2)} spent`
+        `└  $${totalSpent.toFixed(2)} spent · PnL: ${pnlStr}`
       );
       lines.push(``);
     }
@@ -627,7 +639,7 @@ export async function handleStartAdd(ctx: Context): Promise<void> {
   updownAddState.set(telegramId, { step: 'name', timestamp: Date.now() });
 
   await sendHtml(ctx,
-    `✏️ <b>Step 1/5: Strategy Name</b>\n\n` +
+    `✏️ <b>Step 1/6: Strategy Name</b>\n\n` +
     `Give your strategy a name (e.g. "BTC Scalper", "ETH Breakout"):`,
     Markup.inlineKeyboard([
       [Markup.button.callback('← Cancel', 'updown_list')],
@@ -649,7 +661,7 @@ export async function handleAddCoin(ctx: Context, coin: string): Promise<void> {
   updownAddState.set(telegramId, state);
 
   await sendHtml(ctx,
-    `⏱ <b>Step 3/5: Timeframe</b>\n\n` +
+    `⏱ <b>Step 3/6: Timeframe</b>\n\n` +
     `Select market timeframe:`,
     Markup.inlineKeyboard([
       [
@@ -677,7 +689,7 @@ export async function handleAddTimeframe(ctx: Context, tf: string): Promise<void
   updownAddState.set(telegramId, state);
 
   await sendHtml(ctx,
-    `🎯 <b>Step 4/5: Direction & Amount</b>\n\n` +
+    `🎯 <b>Step 4/6: Direction & Amount</b>\n\n` +
     `Which direction do you want to bet?`,
     Markup.inlineKeyboard([
       [
@@ -702,8 +714,10 @@ export async function handleAddDirection(ctx: Context, dir: string): Promise<voi
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
 
+  const dirLabel = dir === 'up' ? '🟢 UP' : '🔴 DOWN';
   await sendHtml(ctx,
     `💰 <b>Amount Per Trade</b>\n\n` +
+    `Direction: <b>${dirLabel}</b>\n\n` +
     `Enter USD amount per trade (e.g. 25, 50, 100):`,
     Markup.inlineKeyboard([
       [
@@ -736,7 +750,7 @@ async function showTriggersTimeStep(ctx: Context, state: UpDownAddState, telegra
   updownAddState.set(telegramId, state);
 
   await sendHtml(ctx,
-    `⏱ <b>Step 5/5: Triggers</b>\n\n` +
+    `⏱ <b>Step 5/6: Triggers</b>\n\n` +
     `<b>Time Range</b> — When during the round should the bot look for entries?\n` +
     `Enter as <code>mm:ss, mm:ss</code> (start, end)\n\n` +
     `Examples:\n` +
@@ -864,12 +878,47 @@ export async function handleAddPriceChangePreset(ctx: Context, preset: string): 
   state.priceChangeMin = min;
   state.priceChangeMax = max;
   state.timestamp = Date.now();
+  await showTotalRoundsStep(ctx, state, telegramId);
+}
+
+// Step 6: Total Rounds
+async function showTotalRoundsStep(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
+  state.step = 'total_rounds';
+  updownAddState.set(telegramId, state);
+
+  await sendHtml(ctx,
+    `🔁 <b>Step 6/6: Total Rounds</b>\n\n` +
+    `How many rounds should this strategy run?\n\n` +
+    `Enter a number (1–100) or pick a preset:`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('5', 'ud_add_rnd_5'),
+        Markup.button.callback('10', 'ud_add_rnd_10'),
+        Markup.button.callback('25', 'ud_add_rnd_25'),
+        Markup.button.callback('50', 'ud_add_rnd_50'),
+        Markup.button.callback('100', 'ud_add_rnd_100'),
+      ],
+      [Markup.button.callback('← Cancel', 'updown_list')],
+    ]),
+  );
+}
+
+// Rounds presets (main flow)
+export async function handleAddRoundsPreset(ctx: Context, n: number): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.maxRounds = n;
   state.step = 'review';
+  state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
   await showReviewStep(ctx, state);
 }
 
-// Step 5: Review
+// Step 7: Review
 async function showReviewStep(ctx: Context, state: UpDownAddState): Promise<void> {
   const ce = coinEmoji(state.coin || 'BTC');
   const dirStr = state.direction === 'up' ? '🟢 Buy UP' : '🔴 Buy DOWN';
@@ -1308,7 +1357,7 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
       await sendHtml(ctx,
-        `₿ <b>Step 2/5: Select Coin</b>\n\n` +
+        `₿ <b>Step 2/6: Select Coin</b>\n\n` +
         `Which cryptocurrency do you want to trade?`,
         Markup.inlineKeyboard([
           [
@@ -1394,6 +1443,18 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
       }
       state.priceChangeMin = min;
       state.priceChangeMax = max;
+      state.timestamp = Date.now();
+      await showTotalRoundsStep(ctx, state, telegramId);
+      return true;
+    }
+
+    case 'total_rounds': {
+      const n = parseNumber(text);
+      if (n == null || n < 1 || n > 100) {
+        await ctx.reply('❌ Enter a number between 1 and 100.');
+        return true;
+      }
+      state.maxRounds = Math.round(n);
       state.step = 'review';
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);

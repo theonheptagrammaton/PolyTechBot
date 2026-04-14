@@ -3,10 +3,42 @@ import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { transferCommission, COMMISSION_RATE } from './commission';
-import { placeOrder as predexonPlaceOrder, cancelOrder, getOrder } from './predexon';
+import { placeOrder as predexonPlaceOrder, cancelOrder, getOrder, getPositions } from './predexon';
 import { ensurePredexonUser } from './user';
 import { getUpDownMarkets, UpDownMarket, UPDOWN_COIN_MAP } from './market';
 import { fetchSpotPrice, getRoundOpenPrice } from './cryptoPrice';
+
+// ─── Fill-price polling ────────────────────────────────────────────────────
+// After placing a market order, poll getOrder() to retrieve the actual fill price
+// instead of recording the mid-market price as fillPrice.
+
+const FILL_POLL_INTERVAL_MS = 2_000;
+const FILL_POLL_MAX_ATTEMPTS = 10; // 20 seconds max
+
+async function pollActualFillPrice(
+  predexonUserId: string,
+  orderId: string,
+): Promise<{ price: number | null; sizeMatched: string | null }> {
+  for (let i = 0; i < FILL_POLL_MAX_ATTEMPTS; i++) {
+    try {
+      const order = await getOrder(predexonUserId, orderId);
+      if (order.status === 'filled') {
+        const price = parseFloat(order.price ?? '0');
+        return {
+          price: isNaN(price) || price <= 0 ? null : price,
+          sizeMatched: order.sizeMatched ?? order.size ?? null,
+        };
+      }
+      if (order.status === 'cancelled' || order.status === 'expired') {
+        return { price: null, sizeMatched: null };
+      }
+    } catch {
+      // ignore transient errors during polling
+    }
+    await new Promise(r => setTimeout(r, FILL_POLL_INTERVAL_MS));
+  }
+  return { price: null, sizeMatched: null };
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -153,8 +185,24 @@ export async function executeUpDownOrder(
     // Get round open price for context
     let roundStartPrice: number | null = null;
     try {
-      roundStartPrice = await getRoundOpenPrice(strategy.coin, market.conditionId);
+      roundStartPrice = await getRoundOpenPrice(strategy.coin, market.conditionId, market.startDate);
     } catch { /* non-critical */ }
+
+    // For market orders, poll the actual fill price from the API instead of using mid-market price
+    let actualFillPrice: number | null = null;
+    let actualSizeMatched: string | null = null;
+    if (strategy.orderType === 'market') {
+      const fillResult = await pollActualFillPrice(predexonUserId, orderResp.orderId);
+      actualFillPrice = fillResult.price;
+      actualSizeMatched = fillResult.sizeMatched;
+      if (actualFillPrice) {
+        logger.info(`[updown] Market order ${orderResp.orderId} actual fill: price=${actualFillPrice} size=${actualSizeMatched} (mid was ${triggerPrice})`);
+      } else {
+        // Fallback to triggerPrice if polling fails, but log the issue
+        logger.warn(`[updown] Could not get actual fill price for ${orderResp.orderId}, falling back to mid-market ${triggerPrice}`);
+        actualFillPrice = triggerPrice;
+      }
+    }
 
     // Record trade in DB
     await prisma.upDownTrade.create({
@@ -169,7 +217,7 @@ export async function executeUpDownOrder(
         roundStartPrice,
         triggerPrice,
         amount: tradeAmount,
-        fillPrice: strategy.orderType === 'market' ? triggerPrice : null,
+        fillPrice: strategy.orderType === 'market' ? actualFillPrice : null,
         orderId: orderResp.orderId,
         status: strategy.orderType === 'market' ? 'filled' : 'open',
       },
@@ -197,7 +245,7 @@ export async function executeUpDownOrder(
     return {
       success: true,
       orderId: orderResp.orderId,
-      fillPrice: triggerPrice,
+      fillPrice: actualFillPrice ?? triggerPrice,
       actualAmount: tradeAmount,
     };
   } catch (err: any) {
@@ -383,13 +431,28 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
       }
 
       try {
-        // fillPrice for market orders is the mid-market price at order time (approximation).
-        // Actual fill may be worse due to slippage, so we apply a 2% haircut to avoid
-        // trying to sell more shares than we actually hold.
-        const slippageBuffer = 0.98;
-        const sellSize = trade.fillPrice > 0
-          ? String(Math.floor((trade.amount / trade.fillPrice) * slippageBuffer * 100) / 100)
-          : '0';
+        // Query actual position size from Predexon API instead of computing from fillPrice.
+        // This avoids selling more shares than actually held (which caused SafeMath overflow).
+        let sellSize = '0';
+        try {
+          const positions = await getPositions(trade.user.predexonUserId, 'polymarket');
+          const pos = positions.find(p => p.tokenId === trade.tokenId && p.status === 'active');
+          if (pos && parseFloat(pos.size) > 0) {
+            // Floor to 2 decimals to avoid exceeding actual holdings
+            sellSize = String(Math.floor(parseFloat(pos.size) * 100) / 100);
+            logger.info(`[updown] TP/SL: actual position size=${pos.size}, selling ${sellSize} for trade ${trade.id}`);
+          }
+        } catch (posErr: any) {
+          logger.warn(`[updown] TP/SL: failed to fetch positions for trade ${trade.id}: ${posErr?.message}`);
+        }
+
+        // Fallback: if positions API fails, compute from fillPrice with 5% safety buffer
+        if (sellSize === '0' && trade.fillPrice > 0) {
+          const safetyBuffer = 0.95;
+          sellSize = String(Math.floor((trade.amount / trade.fillPrice) * safetyBuffer * 100) / 100);
+          logger.warn(`[updown] TP/SL: using fallback sell size=${sellSize} for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
+        }
+
         if (sellSize === '0') {
           logger.warn(`[updown] TP/SL: invalid sell size for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
           continue;
@@ -657,7 +720,7 @@ async function processStrategy(
   // 6. Spot price change check
   try {
     const currentSpot = await fetchSpotPrice(strat.coin);
-    const openSpot = await getRoundOpenPrice(strat.coin, market.conditionId);
+    const openSpot = await getRoundOpenPrice(strat.coin, market.conditionId, market.startDate);
     const delta = currentSpot - openSpot;
     if (delta < strat.priceChangeMin || delta > strat.priceChangeMax) return;
   } catch {

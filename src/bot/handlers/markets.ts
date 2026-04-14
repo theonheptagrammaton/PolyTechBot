@@ -615,7 +615,7 @@ export function mainMenuKeyboard() {
     ],
     [
       Markup.button.callback('🧠 Smart Traders', 'show_wallet'),
-      Markup.button.callback('🤖 Auto Trading', 'auto_strategies'),
+      // Markup.button.callback('🤖 Auto Trading', 'auto_strategies'),
     ],
     [
       Markup.button.callback('📊 Limit Orders', 'portfolio_orders_1'),
