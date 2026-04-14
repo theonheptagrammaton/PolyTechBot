@@ -133,7 +133,7 @@ function renderCandidate(c: NoCandidate, botUsername: string): { text: string; k
     `📊  <a href="${polymarketUrl}">${esc(c.question)}</a>\n\n` +
     `💰 NO price: <b>${noCents}¢</b>\n` +
     `📅 Expires: ${fmtExpires(c.endDate)}\n` +
-    `📈 Volume: <b>$${formatVolume(c.volume)}</b>\n\n` +
+    `📈 Volume: <b>${formatVolume(c.volume)}</b>\n\n` +
     `🎯 Your bet: $${bet.toFixed(2)} → ~${shares.toFixed(1)} shares\n` +
     `💵 Potential payout: $${payout.toFixed(2)}`;
 
