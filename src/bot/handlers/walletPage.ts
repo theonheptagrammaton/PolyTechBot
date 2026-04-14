@@ -1153,39 +1153,51 @@ export async function handleCloseAllExecute(ctx: Context): Promise<void> {
     const user = await getUserByTelegramId(telegramId);
     if (!user) { await ctx.reply('❌ User not found.'); return; }
 
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
     await sendPage(ctx,
-      `${ce(EMOJI.loading, '⏳')} <b>Closing all positions...</b>\n\n<i>This may take a moment.</i>`,
+      `${ce(EMOJI.loading, '⏳')} <b>Closing all positions...</b>\n\n<i>This may take a moment. You can continue using the bot.</i>`,
       { parse_mode: 'HTML' }
     );
 
-    const { executeCloseAllPositions } = await import('./positionTrade');
-    const result = await executeCloseAllPositions(user, user.slippageTolerance ?? 1.0);
+    // Run in background so the bot stays responsive
+    const bot = ctx.telegram;
+    (async () => {
+      try {
+        const { executeCloseAllPositions } = await import('./positionTrade');
+        const result = await executeCloseAllPositions(user, user.slippageTolerance ?? 1.0);
 
-    await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
+        await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
 
-    const lines: string[] = [];
-    if (result.closed > 0)   lines.push(`✅ <b>${result.closed} position${result.closed > 1 ? 's' : ''} sold</b> at market price.`);
-    if (result.redeemed > 0) lines.push(`💵 <b>${result.redeemed} resolved position${result.redeemed > 1 ? 's' : ''} redeemed</b> — USDC.e returned to your wallet.`);
-    if (lines.length === 0)  lines.push(`ℹ️ No positions were closed.`);
-    const summary = lines.join('\n');
-    const failLine = result.failed > 0
-      ? `\n\n⚠️ ${result.failed} could not be closed (illiquid, too small, or redeem failed):\n` +
-        result.errors.slice(0, 3).map(e => `• ${esc(e)}`).join('\n')
-      : '';
+        const lines: string[] = [];
+        if (result.closed > 0)   lines.push(`✅ <b>${result.closed} position${result.closed > 1 ? 's' : ''} sold</b> at market price.`);
+        if (result.redeemed > 0) lines.push(`💵 <b>${result.redeemed} resolved position${result.redeemed > 1 ? 's' : ''} redeemed</b> — USDC.e returned to your wallet.`);
+        if (lines.length === 0)  lines.push(`ℹ️ No positions were closed.`);
+        const summary = lines.join('\n');
+        const failLine = result.failed > 0
+          ? `\n\n⚠️ ${result.failed} could not be closed (illiquid, too small, or redeem failed):\n` +
+            result.errors.slice(0, 3).map(e => `• ${esc(e)}`).join('\n')
+          : '';
 
-    await sendPage(ctx,
-      `${summary}${failLine}\n\n<i>Check your positions for the updated state.</i>`,
-      {
-        parse_mode: 'HTML',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
-          [Markup.button.callback('« Portfolio', 'portfolio')],
-          [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
-        ]),
+        await bot.sendMessage(chatId,
+          `${summary}${failLine}\n\n<i>Check your positions for the updated state.</i>`,
+          {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('📊 My Positions', 'portfolio_open_1')],
+              [Markup.button.callback('« Portfolio', 'portfolio')],
+              [Markup.button.callback('🏠 Main Menu', 'back_to_menu')],
+            ]),
+          }
+        );
+
+        logger.info(`[walletPage] closeAll user=${telegramId}: closed=${result.closed} redeemed=${result.redeemed} failed=${result.failed}`);
+      } catch (error: any) {
+        logger.error('Error closing all positions (background):', error);
+        await bot.sendMessage(chatId, '❌ Error closing positions. Please try again.').catch(() => {});
       }
-    );
-
-    logger.info(`[walletPage] closeAll user=${telegramId}: closed=${result.closed} redeemed=${result.redeemed} failed=${result.failed}`);
+    })();
   } catch (error: any) {
     if (isBenignTelegramError(error)) return;
     logger.error('Error closing all positions:', error);
