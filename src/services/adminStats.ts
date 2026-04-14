@@ -272,7 +272,8 @@ export function formatStatsMessage(s: AdminStats): string {
     m += `└ Top Referrers:\n`;
     s.topReferrers.forEach((r, i) => {
       const prefix = i === s.topReferrers.length - 1 ? '     └' : '     ├';
-      m += `${prefix} ${r.name} — *${r.count}* refs · *${formatVolume(r.earned)}* earned\n`;
+      const safeName = r.name.replace(/[_*`[\]]/g, '\\$&');
+      m += `${prefix} ${safeName} — *${r.count}* refs · *${formatVolume(r.earned)}* earned\n`;
     });
   } else {
     m += `└ No referrals yet\n`;
