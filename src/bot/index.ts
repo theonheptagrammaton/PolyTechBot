@@ -1064,9 +1064,13 @@ export class TelegramBot {
       await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_amount',
         `💵 <b>Edit Amount Per Trade</b>\n\nEnter new amount in USD:`);
     });
-    this.bot.action(/^bpm_prob_(.+)$/, async (ctx) => {
+    this.bot.action(/^bpm_pmin_(.+)$/, async (ctx) => {
       await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_min_prob',
         `🎯 <b>Edit Min Probability</b>\n\nEnter new min probability (50–99):`);
+    });
+    this.bot.action(/^bpm_pmax_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_max_prob',
+        `🎯 <b>Edit Max Probability</b>\n\nEnter new max probability (50–99):`);
     });
     this.bot.action(/^bpm_window_(.+)$/, async (ctx) => {
       await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_window',
@@ -1106,9 +1110,10 @@ export class TelegramBot {
     });
 
     // Bond manage: rename / delete
+    // IMPORTANT: Register deldo BEFORE del — /^bpm_del_(.+)$/ would greedily match "bpm_deldo_..."
     this.bot.action(/^bpm_rename_(.+)$/, async (ctx) => handleBondManageRename(ctx, ctx.match[1]));
-    this.bot.action(/^bpm_del_(.+)$/, async (ctx) => handleBondManageDelete(ctx, ctx.match[1]));
     this.bot.action(/^bpm_deldo_(.+)$/, async (ctx) => handleBondManageDeleteExec(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_del_(.+)$/, async (ctx) => handleBondManageDelete(ctx, ctx.match[1]));
 
     // ── Up-Down Auto Trade ──────────────────────────────────────────────────
     this.bot.action('updown_list', handleUpDownList);
@@ -1237,11 +1242,16 @@ export class TelegramBot {
       await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_rounds',
         `🔁 <b>Edit Max Rounds</b>\n\nEnter number (1–100):`);
     });
+    this.bot.action(/^udm_ttl_(.+)$/, async (ctx) => {
+      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_limit_ttl',
+        `⏳ <b>Edit Limit TTL</b>\n\nEnter seconds before auto-cancel (10–300):`);
+    });
 
     // Up-Down: manage page — rename / delete
+    // IMPORTANT: Register deldo BEFORE del — /^udm_del_(.+)$/ would greedily match "udm_deldo_..."
     this.bot.action(/^udm_rename_(.+)$/, async (ctx) => handleUpDownManageRename(ctx, ctx.match[1]));
-    this.bot.action(/^udm_del_(.+)$/, async (ctx) => handleUpDownManageDelete(ctx, ctx.match[1]));
     this.bot.action(/^udm_deldo_(.+)$/, async (ctx) => handleUpDownManageDeleteExec(ctx, ctx.match[1]));
+    this.bot.action(/^udm_del_(.+)$/, async (ctx) => handleUpDownManageDelete(ctx, ctx.match[1]));
 
     // Up-Down: manage page — TP/SL
     this.bot.action(/^udm_tp_(.+)$/, async (ctx) => {
@@ -1454,10 +1464,10 @@ export class TelegramBot {
         withdrawState.has(telegramId) ||
         copyAddState.has(telegramId) ||
         copyEditState.has(telegramId) ||
-        bondAddState.has(telegramId) ||
-        bondEditState.has(telegramId) ||
-        updownAddState.has(telegramId) ||
-        updownEditState.has(telegramId) ||
+        await bondAddState.hasAsync(telegramId) ||
+        await bondEditState.hasAsync(telegramId) ||
+        await updownAddState.hasAsync(telegramId) ||
+        await updownEditState.hasAsync(telegramId) ||
         await settingsAmountState.hasAsync(telegramId) ||
         await settingsSlippageState.hasAsync(telegramId) ||
         await userState.hasAsync(telegramId) ||

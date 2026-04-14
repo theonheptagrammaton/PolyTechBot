@@ -119,6 +119,7 @@ export async function fetchBondMarkets(): Promise<BondMarket[]> {
 interface StrategyForFilter {
   id: string;
   userId: string;
+  fixedAmount: number;
   minProbability: number;
   maxProbability: number;
   maxHoursOut: number;
@@ -140,6 +141,10 @@ interface FilterResult {
   price: number;
   tokenId: string;
   reason?: string;
+  /** Actual amount to trade (may be less than fixedAmount if daily budget is nearly exhausted) */
+  tradeAmount?: number;
+  /** Keys to roll back (via incrByFloat with negative amount) if execution fails */
+  claimedKeys?: Array<{ key: string; amount: number }>;
 }
 
 export async function applyStrategyFilters(
@@ -189,13 +194,12 @@ export async function applyStrategyFilters(
   }
 
   // 2. maxHoursOut
-  if (market.endDate) {
-    const endTime = new Date(market.endDate).getTime();
-    if (isNaN(endTime)) return fail('invalid market endDate');
-    const hoursLeft = (endTime - Date.now()) / (1000 * 60 * 60);
-    if (hoursLeft <= 0) return fail('market already expired');
-    if (hoursLeft > strategy.maxHoursOut) return fail(`expires in ${hoursLeft.toFixed(0)}h > ${strategy.maxHoursOut}h`);
-  }
+  if (!market.endDate) return fail('market has no end date');
+  const endTime = new Date(market.endDate).getTime();
+  if (isNaN(endTime)) return fail('invalid market endDate');
+  const hoursLeft = (endTime - Date.now()) / (1000 * 60 * 60);
+  if (hoursLeft <= 0) return fail('market already expired');
+  if (hoursLeft > strategy.maxHoursOut) return fail(`expires in ${hoursLeft.toFixed(0)}h > ${strategy.maxHoursOut}h`);
 
   // 3. maxConcurrent — count active bond positions for this user+strategy
   const openPositions = await prisma.bondTrade.count({
@@ -241,14 +245,14 @@ export async function applyStrategyFilters(
   const alreadyBought = await redisCache.get<number>(dedupKey);
   if (alreadyBought) return fail('already bought (dedup)');
 
-  // 9. Max spend per market
+  // 9. Max spend per market (pre-check only — atomic claim below)
+  const perMarketKey = `bond:spent_per_market:${strategy.id}:${market.conditionId}`;
   if (strategy.maxSpendPerMarket != null) {
-    const spentKey = `bond:spent_per_market:${strategy.id}:${market.conditionId}`;
-    const spent = (await redisCache.get<number>(spentKey)) ?? 0;
+    const spent = (await redisCache.get<number>(perMarketKey)) ?? 0;
     if (spent >= strategy.maxSpendPerMarket) return fail('max spend per market reached');
   }
 
-  // 10. Daily budget
+  // 10. Daily budget (pre-check only)
   const today = new Date().toISOString().slice(0, 10);
   const dailyKey = `bond:daily:${strategy.id}:${today}`;
   const dailySpent = (await redisCache.get<number>(dailyKey)) ?? 0;
@@ -259,9 +263,9 @@ export async function applyStrategyFilters(
   const paused = await redisCache.get<number>(pausedKey);
   if (paused) return fail('paused due to daily loss');
 
-  // 12. Max spend total (lifetime)
+  // 12. Max spend total (pre-check only)
+  const totalKey = `bond:total:${strategy.id}`;
   if (strategy.maxSpendTotal != null) {
-    const totalKey = `bond:total:${strategy.id}`;
     const totalSpent = (await redisCache.get<number>(totalKey)) ?? 0;
     if (totalSpent >= strategy.maxSpendTotal) return fail('lifetime max spend reached');
   }
@@ -270,11 +274,58 @@ export async function applyStrategyFilters(
   const token = market.tokens[chosenTokenIdx];
   if (!token?.token_id) return fail('no token ID');
 
+  // Atomically claim budget using INCRBYFLOAT (prevents race conditions between concurrent ticks)
+  const tradeAmount = strategy.dailyBudget > 0
+    ? Math.min(strategy.fixedAmount, strategy.dailyBudget - dailySpent)
+    : strategy.fixedAmount;
+
+  if (tradeAmount <= 0) return fail('insufficient remaining budget');
+
+  const claimedKeys: Array<{ key: string; amount: number }> = [];
+  try {
+    // Claim daily budget atomically
+    const newDaily = await redisCache.incrByFloat(dailyKey, tradeAmount, 90_000); // 25h TTL
+    claimedKeys.push({ key: dailyKey, amount: tradeAmount });
+    if (newDaily > strategy.dailyBudget) {
+      await redisCache.incrByFloat(dailyKey, -tradeAmount);
+      claimedKeys.pop();
+      return fail('daily budget exhausted (concurrent)');
+    }
+
+    // Claim total spend atomically (90-day TTL to prevent Redis memory leak)
+    if (strategy.maxSpendTotal != null) {
+      const newTotal = await redisCache.incrByFloat(totalKey, tradeAmount, 7_776_000); // 90 days
+      claimedKeys.push({ key: totalKey, amount: tradeAmount });
+      if (newTotal > strategy.maxSpendTotal) {
+        for (const c of claimedKeys) await redisCache.incrByFloat(c.key, -c.amount);
+        return fail('lifetime max spend reached (concurrent)');
+      }
+    }
+
+    // Claim per-market spend atomically
+    if (strategy.maxSpendPerMarket != null) {
+      const newPerMarket = await redisCache.incrByFloat(perMarketKey, tradeAmount, 604_800); // 7d TTL
+      claimedKeys.push({ key: perMarketKey, amount: tradeAmount });
+      if (newPerMarket > strategy.maxSpendPerMarket) {
+        for (const c of claimedKeys) await redisCache.incrByFloat(c.key, -c.amount);
+        return fail('max spend per market reached (concurrent)');
+      }
+    }
+  } catch (err: any) {
+    // Roll back on error
+    for (const c of claimedKeys) {
+      await redisCache.incrByFloat(c.key, -c.amount).catch(() => {});
+    }
+    return fail(`budget claim error: ${err?.message}`);
+  }
+
   return {
     pass: true,
     outcome: chosenOutcome,
     price: chosenPrice,
     tokenId: token.token_id,
+    tradeAmount,
+    claimedKeys,
   };
 }
 
@@ -305,6 +356,8 @@ export async function executeBondOrder(
   tokenId: string,
   outcome: string,
   price: number,
+  /** Override amount (from budget claim). Falls back to strategy.fixedAmount. */
+  overrideAmount?: number,
 ): Promise<ExecuteResult> {
   if (!user.polymarketProxyAddress) {
     return { success: false, errorMsg: 'no proxy address' };
@@ -312,7 +365,7 @@ export async function executeBondOrder(
 
   try {
     const predexonUserId = await ensurePredexonUser(user as any);
-    const amount = strategy.fixedAmount;
+    const amount = overrideAmount ?? strategy.fixedAmount;
     const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(6));
     const tradeAmount = parseFloat((amount - commissionAmt).toFixed(6));
 
@@ -320,14 +373,35 @@ export async function executeBondOrder(
       return { success: false, errorMsg: 'trade amount too small after commission' };
     }
 
-    // Place market BUY order
-    const orderResp = await predexonPlaceOrder(predexonUserId, {
-      venue: 'polymarket',
-      tokenId,
-      side: 'buy',
-      type: 'market',
-      amount: String(tradeAmount),
-    });
+    // Place BUY order — use limit order with slippage-derived price if slippage is set,
+    // otherwise fall back to market order.
+    // Slippage is stored as a percentage (e.g. 5 = 5%), convert to decimal for Polymarket prices (0–1).
+    const slippagePct = strategy.slippage;
+    const slippageDecimal = slippagePct / 100; // e.g. 5% → 0.05
+    const useLimit = slippagePct > 0 && price > 0;
+
+    let orderResp: any;
+    if (useLimit) {
+      // Convert to limit order: buy at current price + slippage tolerance
+      const limitPrice = Math.min(price + slippageDecimal, 0.99);
+      const size = String(Math.floor((tradeAmount / limitPrice) * 100) / 100);
+      orderResp = await predexonPlaceOrder(predexonUserId, {
+        venue: 'polymarket',
+        tokenId,
+        side: 'buy',
+        type: 'limit',
+        price: String(limitPrice),
+        size,
+      });
+    } else {
+      orderResp = await predexonPlaceOrder(predexonUserId, {
+        venue: 'polymarket',
+        tokenId,
+        side: 'buy',
+        type: 'market',
+        amount: String(tradeAmount),
+      });
+    }
 
     if (!orderResp.orderId) {
       const errMsg = (orderResp as any).error || (orderResp as any).message || 'order rejected';
@@ -351,25 +425,9 @@ export async function executeBondOrder(
       },
     });
 
-    // Update Redis spend trackers
-    const today = new Date().toISOString().slice(0, 10);
-    const dailyKey = `bond:daily:${strategy.id}:${today}`;
-    const totalKey = `bond:total:${strategy.id}`;
+    // Set dedup key (spend trackers are now atomically claimed in applyStrategyFilters)
     const dedupKey = `bond:dedup:${strategy.id}:${market.conditionId}`;
-    const perMarketKey = `bond:spent_per_market:${strategy.id}:${market.conditionId}`;
-
-    const [dailySpent, totalSpent, perMarketSpent] = await Promise.all([
-      redisCache.get<number>(dailyKey).then(v => v ?? 0),
-      redisCache.get<number>(totalKey).then(v => v ?? 0),
-      redisCache.get<number>(perMarketKey).then(v => v ?? 0),
-    ]);
-
-    await Promise.all([
-      redisCache.set(dailyKey, dailySpent + tradeAmount, 90_000), // 25h
-      redisCache.set(totalKey, totalSpent + tradeAmount),
-      redisCache.set(dedupKey, 1, 86_400), // 24h
-      redisCache.set(perMarketKey, perMarketSpent + tradeAmount, 604_800), // 7d
-    ]);
+    await redisCache.set(dedupKey, 1, 86_400); // 24h
 
     // Commission (fire-and-forget)
     if (config.commission?.adminWalletAddress) {
@@ -467,8 +525,8 @@ export async function checkDailyLoss(
         chatId,
         text:
           `⚠️ <b>Bond Strategy Paused</b>\n\n` +
-          `Daily loss limit of $${maxDailyLoss.toFixed(2)} reached.\n` +
-          `Estimated exposure: $${estimatedLoss.toFixed(2)}\n` +
+          `Daily spending limit of $${maxDailyLoss.toFixed(2)} reached.\n` +
+          `Total spent today: $${estimatedLoss.toFixed(2)}\n` +
           `Strategy will resume tomorrow (UTC).`,
       });
     }
@@ -482,7 +540,9 @@ export async function checkDailyLoss(
 // ─── Monitor ────────────────────────────────────────────────────────────────
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+let _initialTimeout: ReturnType<typeof setTimeout> | null = null;
 let _sendNotification: SendNotificationFn | null = null;
+let _tickRunning = false;
 
 export function startBondMonitor(sendNotification: SendNotificationFn): void {
   if (monitorInterval) return;
@@ -490,16 +550,22 @@ export function startBondMonitor(sendNotification: SendNotificationFn): void {
 
   logger.info('[bond] Starting bond monitor (60s tick)');
   monitorInterval = setInterval(() => {
+    if (_tickRunning) { logger.warn('[bond] Tick still running, skipping'); return; }
     bondTick().catch(err => logger.error(`[bond] Tick error: ${err?.message}`));
   }, 60_000);
 
   // First tick after 10s
-  setTimeout(() => {
+  _initialTimeout = setTimeout(() => {
+    _initialTimeout = null;
     bondTick().catch(err => logger.error(`[bond] Initial tick error: ${err?.message}`));
   }, 10_000);
 }
 
 export function stopBondMonitor(): void {
+  if (_initialTimeout) {
+    clearTimeout(_initialTimeout);
+    _initialTimeout = null;
+  }
   if (monitorInterval) {
     clearInterval(monitorInterval);
     monitorInterval = null;
@@ -508,6 +574,16 @@ export function stopBondMonitor(): void {
 }
 
 async function bondTick(): Promise<void> {
+  if (_tickRunning) return;
+  _tickRunning = true;
+  try {
+    await bondTickInner();
+  } finally {
+    _tickRunning = false;
+  }
+}
+
+async function bondTickInner(): Promise<void> {
   // Fetch all active, unpaused strategies
   const strategies = await prisma.bondStrategy.findMany({
     where: { isActive: true, isPaused: false },
@@ -558,15 +634,35 @@ async function bondTick(): Promise<void> {
         const result = await applyStrategyFilters(market, strat);
         if (!result.pass) continue;
 
-        // Execute order
-        const execResult = await executeBondOrder(
-          strat.user,
-          market,
-          strat,
-          result.tokenId,
-          result.outcome,
-          result.price,
-        );
+        let execResult: ExecuteResult;
+        try {
+          // Execute order
+          execResult = await executeBondOrder(
+            strat.user,
+            market,
+            strat,
+            result.tokenId,
+            result.outcome,
+            result.price,
+            result.tradeAmount,
+          );
+        } catch (execErr: any) {
+          // If executeBondOrder somehow throws, roll back claimed budget
+          if (result.claimedKeys?.length) {
+            for (const c of result.claimedKeys) {
+              await redisCache.incrByFloat(c.key, -c.amount).catch(() => {});
+            }
+          }
+          logger.error(`[bond] executeBondOrder threw for strategy ${strat.id}: ${execErr?.message}`);
+          continue;
+        }
+
+        // Roll back atomically claimed budget on failure
+        if (!execResult.success && result.claimedKeys?.length) {
+          for (const c of result.claimedKeys) {
+            await redisCache.incrByFloat(c.key, -c.amount).catch(() => {});
+          }
+        }
 
         if (execResult.success && _sendNotification && strat.notificationsEnabled) {
           const pct = (result.price * 100).toFixed(1);

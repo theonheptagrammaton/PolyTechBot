@@ -105,6 +105,23 @@ export class RedisCache {
     }
   }
 
+  async incrByFloat(key: string, by: number, ttl?: number): Promise<number> {
+    try {
+      const result = await this.client.incrbyfloat(key, by);
+      // Set TTL on newly created keys (TTL = -1 means no expiry, i.e. key was just created by INCRBYFLOAT)
+      if (ttl) {
+        const currentTtl = await this.client.ttl(key);
+        if (currentTtl === -1) {
+          await this.client.expire(key, ttl);
+        }
+      }
+      return parseFloat(result);
+    } catch (error) {
+      logger.error(`Redis INCRBYFLOAT error for key ${key}:`, error);
+      throw error;
+    }
+  }
+
   async setWithExpiry(key: string, value: string, seconds: number): Promise<boolean> {
     try {
       await this.client.setex(key, seconds, value);

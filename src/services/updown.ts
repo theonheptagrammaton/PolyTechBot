@@ -174,10 +174,6 @@ export async function executeUpDownOrder(
       },
     });
 
-    // Dedup key
-    const dedupKey = `updown:dedup:${strategy.id}:${market.conditionId}`;
-    await redisCache.set(dedupKey, 1, 1200); // 20min
-
     // Increment roundsExecuted
     await prisma.upDownStrategy.update({
       where: { id: strategy.id },
@@ -204,9 +200,10 @@ export async function executeUpDownOrder(
       actualAmount: tradeAmount,
     };
   } catch (err: any) {
-    // Record failed trade
+    // Record failed trade (use post-commission amount for consistency with successful trades)
     const tokenId = strategy.direction === 'up' ? market.upTokenId : market.downTokenId;
     const triggerPrice = strategy.direction === 'up' ? market.upPrice : market.downPrice;
+    const failedTradeAmt = parseFloat((strategy.amount - strategy.amount * COMMISSION_RATE).toFixed(6));
     await prisma.upDownTrade.create({
       data: {
         userId: user.id,
@@ -217,7 +214,7 @@ export async function executeUpDownOrder(
         coin: strategy.coin,
         direction: strategy.direction,
         triggerPrice,
-        amount: strategy.amount,
+        amount: failedTradeAmt,
         status: 'failed',
         errorMsg: (err?.message ?? 'unknown error').slice(0, 255),
       },
@@ -229,7 +226,7 @@ export async function executeUpDownOrder(
 
 // ─── Limit Order TTL Management ─────────────────────────────────────────────
 
-const _limitTimers = new Map<string, { cancel: ReturnType<typeof setTimeout>; check: ReturnType<typeof setInterval> }>();
+const _limitTimers = new Map<string, { cancel: ReturnType<typeof setTimeout>; check: ReturnType<typeof setInterval>; createdAt: number }>();
 
 function scheduleLimitTtl(
   predexonUserId: string,
@@ -275,6 +272,15 @@ function scheduleLimitTtl(
   const cancelTimer = setTimeout(async () => {
     cleanup();
     try {
+      // Check if already filled before cancelling (prevents race with check interval)
+      const trade = await prisma.upDownTrade.findFirst({
+        where: { orderId },
+        select: { status: true },
+      });
+      if (trade && trade.status === 'filled') {
+        return; // Already filled by check interval, don't cancel
+      }
+
       await cancelOrder(predexonUserId, orderId);
       await prisma.upDownTrade.updateMany({
         where: { orderId, status: 'open' },
@@ -285,7 +291,7 @@ function scheduleLimitTtl(
     }
   }, ttlSeconds * 1000);
 
-  _limitTimers.set(orderId, { cancel: cancelTimer, check: checkInterval });
+  _limitTimers.set(orderId, { cancel: cancelTimer, check: checkInterval, createdAt: Date.now() });
 }
 
 // ─── TP/SL Check ────────────────────────────────────────────────────────────
@@ -318,6 +324,11 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
   for (const trade of trades) {
     if (!trade.strategy || trade.fillPrice == null) continue;
     const strat = trade.strategy;
+
+    // Prevent race condition: if another tick is already processing this trade's TP/SL, skip it
+    const tpSlLockKey = `updown:tpsl_lock:${trade.id}`;
+    const alreadyProcessing = await redisCache.get<number>(tpSlLockKey);
+    if (alreadyProcessing) continue;
 
     // Check if any TP/SL is configured
     const hasTp = strat.takeProfitPct != null || strat.takeProfitPrice != null;
@@ -357,6 +368,9 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
 
       const tpSlStatus = tpTriggered ? 'tp_triggered' : 'sl_triggered';
 
+      // Claim lock to prevent double-processing (60s TTL as safety net)
+      await redisCache.set(tpSlLockKey, 1, 60);
+
       // Place SELL order
       if (!trade.user.predexonUserId) {
         logger.warn(`[updown] TP/SL: no predexonUserId for trade ${trade.id}, marking status only`);
@@ -368,8 +382,12 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
       }
 
       try {
+        // fillPrice for market orders is the mid-market price at order time (approximation).
+        // Actual fill may be worse due to slippage, so we apply a 2% haircut to avoid
+        // trying to sell more shares than we actually hold.
+        const slippageBuffer = 0.98;
         const sellSize = trade.fillPrice > 0
-          ? String(Math.floor((trade.amount / trade.fillPrice) * 100) / 100)
+          ? String(Math.floor((trade.amount / trade.fillPrice) * slippageBuffer * 100) / 100)
           : '0';
         if (sellSize === '0') {
           logger.warn(`[updown] TP/SL: invalid sell size for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
@@ -419,7 +437,9 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let tpSlInterval: ReturnType<typeof setInterval> | null = null;
+let limitSweepInterval: ReturnType<typeof setInterval> | null = null;
 let _sendNotification: SendNotificationFn | null = null;
+let _tickRunning = false;
 
 export function startUpDownMonitor(sendNotification: SendNotificationFn): void {
   if (monitorInterval) return;
@@ -427,6 +447,7 @@ export function startUpDownMonitor(sendNotification: SendNotificationFn): void {
 
   logger.info('[updown] Starting up-down monitor (5s tick)');
   monitorInterval = setInterval(() => {
+    if (_tickRunning) return;
     updownTick().catch(err => logger.error(`[updown] Tick error: ${err?.message}`));
   }, 5_000);
 
@@ -437,10 +458,83 @@ export function startUpDownMonitor(sendNotification: SendNotificationFn): void {
     );
   }, 15_000);
 
+  // Periodic sweep of _limitTimers to clean up leaked entries (every 5 min)
+  limitSweepInterval = setInterval(() => {
+    const maxAge = 3600_000; // 1 hour — no limit order TTL should exceed this
+    const now = Date.now();
+    for (const [orderId, timers] of _limitTimers.entries()) {
+      if (now - timers.createdAt > maxAge) {
+        clearInterval(timers.check);
+        clearTimeout(timers.cancel);
+        _limitTimers.delete(orderId);
+        logger.warn(`[updown] Swept stale limit timer for order ${orderId} (age: ${Math.round((now - timers.createdAt) / 1000)}s)`);
+      }
+    }
+  }, 300_000); // 5 min
+
+  // Recover orphaned limit orders from DB (handles restart scenario)
+  recoverOrphanedLimitOrders().catch(err =>
+    logger.warn(`[updown] Orphaned limit order recovery failed: ${err?.message}`)
+  );
+
   // First tick after 5s
   setTimeout(() => {
     updownTick().catch(err => logger.error(`[updown] Initial tick error: ${err?.message}`));
   }, 5_000);
+}
+
+/** Cancel orphaned 'open' limit orders that have no in-memory timer (e.g. after restart) */
+async function recoverOrphanedLimitOrders(): Promise<void> {
+  const orphans = await prisma.upDownTrade.findMany({
+    where: { status: 'open' },
+    include: { user: { select: { predexonUserId: true } } },
+  });
+
+  if (orphans.length === 0) return;
+  logger.info(`[updown] Found ${orphans.length} orphaned open limit orders, cancelling...`);
+
+  for (const trade of orphans) {
+    if (!trade.orderId || !trade.user.predexonUserId) {
+      await prisma.upDownTrade.update({
+        where: { id: trade.id },
+        data: { status: 'cancelled' },
+      });
+      continue;
+    }
+
+    try {
+      // Check if the order actually filled while we were down
+      const order = await getOrder(trade.user.predexonUserId, trade.orderId);
+      if (order.status === 'filled') {
+        const price = parseFloat(order.price ?? '0');
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { status: 'filled', fillPrice: isNaN(price) ? null : price },
+        });
+        logger.info(`[updown] Orphaned order ${trade.orderId} was actually filled at ${price}`);
+      } else if (order.status === 'cancelled' || order.status === 'expired') {
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { status: 'cancelled' },
+        });
+      } else {
+        // Still open — cancel it
+        await cancelOrder(trade.user.predexonUserId, trade.orderId);
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { status: 'cancelled' },
+        });
+        logger.info(`[updown] Cancelled orphaned order ${trade.orderId}`);
+      }
+    } catch (err: any) {
+      logger.warn(`[updown] Failed to recover orphaned order ${trade.orderId}: ${err?.message}`);
+      // Mark as cancelled to prevent infinite retry
+      await prisma.upDownTrade.update({
+        where: { id: trade.id },
+        data: { status: 'cancelled' },
+      }).catch(() => {});
+    }
+  }
 }
 
 export function stopUpDownMonitor(): void {
@@ -452,6 +546,10 @@ export function stopUpDownMonitor(): void {
     clearInterval(tpSlInterval);
     tpSlInterval = null;
   }
+  if (limitSweepInterval) {
+    clearInterval(limitSweepInterval);
+    limitSweepInterval = null;
+  }
   // Clear limit timers (both check intervals and cancel timeouts)
   for (const timers of _limitTimers.values()) {
     clearInterval(timers.check);
@@ -462,6 +560,16 @@ export function stopUpDownMonitor(): void {
 }
 
 async function updownTick(): Promise<void> {
+  if (_tickRunning) return;
+  _tickRunning = true;
+  try {
+    await updownTickInner();
+  } finally {
+    _tickRunning = false;
+  }
+}
+
+async function updownTickInner(): Promise<void> {
   const sendNotification = _sendNotification;
   if (!sendNotification) return;
 
@@ -559,12 +667,20 @@ async function processStrategy(
   // All triggers passed — execute!
   logger.info(`[updown] Strategy ${strat.id} triggered on ${market.conditionId}`);
 
+  // Set dedup key BEFORE execution to prevent race condition with concurrent ticks
+  await redisCache.set(dedupKey, 1, 1200); // 20min
+
   const result = await executeUpDownOrder(
     strat.user,
     market,
     strat,
     sendNotification,
   );
+
+  // On failure, remove the optimistic dedup key so the strategy can retry
+  if (!result.success) {
+    await redisCache.del(dedupKey);
+  }
 
   // Send notification
   if (strat.notificationsEnabled) {

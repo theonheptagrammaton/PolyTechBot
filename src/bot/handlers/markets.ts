@@ -629,6 +629,9 @@ export function mainMenuKeyboard() {
       Markup.button.callback('💰 Deposit', 'wallet_page'),
     ],
     [
+      Markup.button.callback('🤖 Auto Trading', 'auto_strategies'),
+    ],
+    [
       Markup.button.callback('🔄 Refresh', 'back_to_menu'),
     ],
   ]);

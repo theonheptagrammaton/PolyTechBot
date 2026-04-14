@@ -16,10 +16,6 @@ function sendHtml(ctx: Context, text: string, markup?: any) {
 const MAX_STRATEGIES = 20;
 const STATE_TTL_MS = 10 * 60 * 1000;
 
-function isExpired(ts: number): boolean {
-  return Date.now() - ts > STATE_TTL_MS;
-}
-
 // ─── Add Flow State ─────────────────────────────────────────────────────────
 
 interface BondAddState {
@@ -55,7 +51,7 @@ interface BondAddState {
 
 export const bondAddState = new RedisBackedState<BondAddState>('bondAdd', 600);
 
-setInterval(() => {
+const _bondAddCleanup = setInterval(() => {
   const cutoff = Date.now() - STATE_TTL_MS;
   for (const [key, state] of bondAddState.entries()) {
     if (state.timestamp < cutoff) bondAddState.delete(key);
@@ -78,12 +74,18 @@ interface BondEditState {
 
 export const bondEditState = new RedisBackedState<BondEditState>('bondEdit', 600);
 
-setInterval(() => {
+const _bondEditCleanup = setInterval(() => {
   const cutoff = Date.now() - STATE_TTL_MS;
   for (const [key, state] of bondEditState.entries()) {
     if (state.timestamp < cutoff) bondEditState.delete(key);
   }
 }, 30 * 60 * 1000);
+
+/** Stop state cleanup intervals (call on bot shutdown) */
+export function stopBondCleanup(): void {
+  clearInterval(_bondAddCleanup);
+  clearInterval(_bondEditCleanup);
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -154,8 +156,9 @@ export async function handleBondList(ctx: Context): Promise<void> {
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
       const tradeCount = filledTrades.length;
       // Estimated PnL assumes all high-prob bonds resolve correctly (not guaranteed)
+      // Profit per trade = amount * (1/price - 1) = shares payout minus cost
       const pnlEstimate = filledTrades.reduce((sum, t) => {
-        return sum + t.amount * (1 - t.price);
+        return sum + (t.price > 0 ? t.amount * (1 / t.price - 1) : 0);
       }, 0);
       const pnlStr = pnlEstimate >= 0 ? `+$${pnlEstimate.toFixed(2)}` : `-$${Math.abs(pnlEstimate).toFixed(2)}`;
 
@@ -166,7 +169,7 @@ export async function handleBondList(ctx: Context): Promise<void> {
 
       lines.push(
         `${i + 1}. ${statusDot} 🎯 <b>${esc(name)}</b>\n` +
-        `├ Mode: 📊 ${s.minProbability}%–${s.maxProbability}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
+        `├ Mode: 📊 ${s.minProbability.toFixed(1)}%–${s.maxProbability.toFixed(1)}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
         `├ Est. PnL: <b>${pnlStr}</b> · Trades Filled: ${tradeCount}\n` +
         `├ Today's Trades: <b>${todayTrades}</b>\n` +
         `└ Spent: <b>$${totalSpent.toFixed(2)}</b>`
@@ -271,18 +274,33 @@ export async function handleBondDeleteAllExecute(ctx: Context): Promise<void> {
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
-  await prisma.bondStrategy.deleteMany({ where: { userId: user.id } });
+  try {
+    // Delete trades first, then strategies (FK constraint)
+    const stratIds = await prisma.bondStrategy.findMany({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+    if (stratIds.length > 0) {
+      await prisma.bondTrade.deleteMany({
+        where: { strategyId: { in: stratIds.map(s => s.id) } },
+      });
+    }
+    await prisma.bondStrategy.deleteMany({ where: { userId: user.id } });
+  } catch (err: any) {
+    logger.error(`[bond] Failed to delete all strategies: ${err?.message}`);
+    await sendHtml(ctx, `❌ Failed to delete strategies. Please try again.`);
+    return;
+  }
   await handleBondList(ctx);
 }
 
 // ─── Remove Single ──────────────────────────────────────────────────────────
 
 export async function handleBondRemovePrompt(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
   const user = await getUserByTelegramId(telegramId);
-  if (!user) return;
+  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
   const strategies = await prisma.bondStrategy.findMany({
     where: { userId: user.id },
@@ -293,6 +311,7 @@ export async function handleBondRemovePrompt(ctx: Context): Promise<void> {
     await ctx.answerCbQuery('No strategies to remove').catch(() => {});
     return;
   }
+  await ctx.answerCbQuery().catch(() => {});
 
   const buttons = strategies.map((s, i) => [
     Markup.button.callback(
@@ -331,6 +350,7 @@ export async function handleBondHistory(ctx: Context, limit: number): Promise<vo
     where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
     take: limit,
+    include: { strategy: { select: { label: true } } },
   });
 
   if (trades.length === 0) {
@@ -346,7 +366,8 @@ export async function handleBondHistory(ctx: Context, limit: number): Promise<vo
     const icon = t.status === 'filled' ? '✅' : t.status === 'failed' ? '❌' : '⏳';
     const pct = (t.probability * 100).toFixed(1);
     const q = t.question.length > 50 ? t.question.slice(0, 47) + '...' : t.question;
-    lines.push(`${icon} ${esc(q)}\n   ${t.outcome} @ ${pct}% · $${t.amount.toFixed(2)}`);
+    const stratLabel = (t as any).strategy?.label ? ` [${esc((t as any).strategy.label)}]` : '';
+    lines.push(`${icon} ${esc(q)}\n   ${t.outcome} @ ${pct}% · $${t.amount.toFixed(2)}${stratLabel}`);
   }
 
   await sendHtml(ctx,
@@ -365,17 +386,18 @@ export async function handleBondClose(ctx: Context): Promise<void> {
 // ─── Add Flow ───────────────────────────────────────────────────────────────
 
 export async function handleBondStartAdd(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
   const user = await getUserByTelegramId(telegramId);
-  if (!user) return;
+  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
   const count = await prisma.bondStrategy.count({ where: { userId: user.id } });
   if (count >= MAX_STRATEGIES) {
     await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
+    await sendHtml(ctx, `❌ Maximum ${MAX_STRATEGIES} strategies reached. Delete one first.`);
     return;
   }
+  await ctx.answerCbQuery().catch(() => {});
 
   bondAddState.set(telegramId, {
     step: 'name',
@@ -480,8 +502,8 @@ async function showReviewStep(ctx: Context, state: BondAddState): Promise<void> 
     `✏️ Name: <b>${esc(state.name || 'Strategy')}</b>`,
     `💰 Daily Budget: $${state.dailyBudget ?? 100}`,
     `💵 Amount/Trade: $${state.fixedAmount ?? 25}`,
-    `🎯 Min Probability: ${state.minProbability ?? 95}%`,
-    `🎯 Max Probability: ${state.maxProbability ?? 99}%`,
+    `🎯 Min Probability: ${(state.minProbability ?? 95).toFixed(1)}%`,
+    `🎯 Max Probability: ${(state.maxProbability ?? 99).toFixed(1)}%`,
     `⏰ Time Window: ${state.maxHoursOut ?? 48}h`,
     `📊 Max Positions: ${state.maxConcurrent ?? 5}`,
     `🏈 Sports: ${state.includeSports ? '✅' : '❌'}  |  ₿ Crypto: ${state.includeCryptoUpDown ? '✅' : '❌'}`,
@@ -669,7 +691,7 @@ async function showAdvMenu(ctx: Context, state: BondAddState): Promise<void> {
     `💸 Per Market Max: ${state.maxSpendPerMarket != null ? '$' + state.maxSpendPerMarket : '–'}`,
     `💸 Total Max: ${state.maxSpendTotal != null ? '$' + state.maxSpendTotal : '–'}`,
     `📅 Max Daily Loss: ${state.maxDailyLoss != null ? '$' + state.maxDailyLoss : '–'}`,
-    `🎯 Max Probability: ${state.maxProbability ?? 99}%`,
+    `🎯 Max Probability: ${(state.maxProbability ?? 99).toFixed(1)}%`,
     `📡 Scan Interval: ${state.scanInterval ?? 5}min`,
     `🎲 Outcome Side: ${state.outcomeSide ?? 'auto'}`,
     `\nTap a setting to change it:`,
@@ -782,47 +804,74 @@ export async function handleAdvEdit(ctx: Context, field: string): Promise<void> 
 // ─── Confirm Add ────────────────────────────────────────────────────────────
 
 export async function handleBondConfirmAdd(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
 
   const state = await bondAddState.get(telegramId);
-  if (!state) { await ctx.reply('Session expired. Try again.'); return; }
+  if (!state) {
+    await ctx.answerCbQuery().catch(() => {});
+    await ctx.reply('Session expired. Try again.');
+    return;
+  }
+
+  // Cross-validate probability range
+  const minProb = state.minProbability ?? 95;
+  const maxProb = state.maxProbability ?? 99;
+  if (maxProb < minProb) {
+    await ctx.answerCbQuery('Invalid probability range').catch(() => {});
+    await sendHtml(ctx,
+      `⚠️ <b>Invalid Settings</b>\n\n` +
+      `Max Probability (${maxProb}%) cannot be less than Min Probability (${minProb}%).\n` +
+      `Please adjust in Advanced Settings.`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('⚙️ Advanced', 'bond_add_advanced')],
+        [Markup.button.callback('← Cancel', 'bond_list')],
+      ]),
+    );
+    return;
+  }
 
   const user = await getUserByTelegramId(telegramId);
-  if (!user) return;
+  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
   // Use transaction to prevent race condition on MAX_STRATEGIES
-  const created = await prisma.$transaction(async (tx) => {
-    const count = await tx.bondStrategy.count({ where: { userId: user.id } });
-    if (count >= MAX_STRATEGIES) return null;
-    return tx.bondStrategy.create({
-      data: {
-        userId: user.id,
-        label: state.name || 'Strategy',
-        fixedAmount: state.fixedAmount ?? 25,
-        dailyBudget: state.dailyBudget ?? 100,
-        maxDailyLoss: state.maxDailyLoss ?? null,
-        minProbability: state.minProbability ?? 95,
-        maxProbability: state.maxProbability ?? 99,
-        maxHoursOut: state.maxHoursOut ?? 48,
-        maxConcurrent: state.maxConcurrent ?? 5,
-        includeSports: state.includeSports ?? false,
-        includeCryptoUpDown: state.includeCryptoUpDown ?? false,
-        slippage: state.slippage ?? 5,
-        minLiquidity: state.minLiquidity ?? null,
-        minVolume: state.minVolume ?? null,
-        maxSpendPerMarket: state.maxSpendPerMarket ?? null,
-        maxSpendTotal: state.maxSpendTotal ?? null,
-        scanInterval: state.scanInterval ?? 5,
-        outcomeSide: state.outcomeSide ?? 'auto',
-        isPaused: true,
-      },
+  let created: any;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      const count = await tx.bondStrategy.count({ where: { userId: user.id } });
+      if (count >= MAX_STRATEGIES) return null;
+      return tx.bondStrategy.create({
+        data: {
+          userId: user.id,
+          label: state.name || 'Strategy',
+          fixedAmount: state.fixedAmount ?? 25,
+          dailyBudget: state.dailyBudget ?? 100,
+          maxDailyLoss: state.maxDailyLoss ?? null,
+          minProbability: state.minProbability ?? 95,
+          maxProbability: state.maxProbability ?? 99,
+          maxHoursOut: state.maxHoursOut ?? 48,
+          maxConcurrent: state.maxConcurrent ?? 5,
+          includeSports: state.includeSports ?? false,
+          includeCryptoUpDown: state.includeCryptoUpDown ?? false,
+          slippage: state.slippage ?? 5,
+          minLiquidity: state.minLiquidity ?? null,
+          minVolume: state.minVolume ?? null,
+          maxSpendPerMarket: state.maxSpendPerMarket ?? null,
+          maxSpendTotal: state.maxSpendTotal ?? null,
+          scanInterval: state.scanInterval ?? 5,
+          outcomeSide: state.outcomeSide ?? 'auto',
+          isPaused: true,
+        },
+      });
     });
-  });
+  } catch (err: any) {
+    logger.error(`[bond] Failed to create strategy: ${err?.message}`);
+    await sendHtml(ctx, `❌ Failed to create strategy. Please try again.`);
+    return;
+  }
 
   if (!created) {
-    await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
+    await sendHtml(ctx, `❌ Maximum ${MAX_STRATEGIES} strategies reached. Delete one first.`);
     return;
   }
 
@@ -973,8 +1022,13 @@ export async function handleBondAddInput(ctx: Context, text: string): Promise<bo
     }
 
     case 'adv_max_prob': {
-      if (num == null || num < 90 || num > 100) {
-        await ctx.reply('❌ Enter a value between 90 and 100.');
+      if (num == null || num < 50 || num > 100) {
+        await ctx.reply('❌ Enter a value between 50 and 100.');
+        return true;
+      }
+      const minP = state.minProbability ?? 95;
+      if (num < minP) {
+        await ctx.reply(`❌ Max probability must be >= min probability (${minP}%).`);
         return true;
       }
       state.maxProbability = num;
@@ -1032,8 +1086,8 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
     `📊 Status: ${statusStr}`,
     `💰 Daily Budget: $${strat.dailyBudget}`,
     `💵 Amount/Trade: $${strat.fixedAmount}`,
-    `🎯 Min Probability: ${strat.minProbability}%`,
-    `🎯 Max Probability: ${strat.maxProbability}%`,
+    `🎯 Min Probability: ${strat.minProbability.toFixed(1)}%`,
+    `🎯 Max Probability: ${strat.maxProbability.toFixed(1)}%`,
     `⏰ Time Window: ${strat.maxHoursOut}h`,
     `📊 Max Positions: ${strat.maxConcurrent}`,
     `🏈 Sports: ${strat.includeSports ? '✅' : '❌'}  |  ₿ Crypto: ${strat.includeCryptoUpDown ? '✅' : '❌'}`,
@@ -1058,7 +1112,10 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
     [
       Markup.button.callback('💰 Budget', `bpm_budget_${id}`),
       Markup.button.callback('💵 Amount', `bpm_amount_${id}`),
-      Markup.button.callback('🎯 Probability', `bpm_prob_${id}`),
+    ],
+    [
+      Markup.button.callback('🎯 Min Prob', `bpm_pmin_${id}`),
+      Markup.button.callback('🎯 Max Prob', `bpm_pmax_${id}`),
     ],
     [
       Markup.button.callback('⏰ Window', `bpm_window_${id}`),
@@ -1184,7 +1241,14 @@ export async function handleManageDeleteExecute(ctx: Context, id: string): Promi
   await ctx.answerCbQuery().catch(() => {});
   const strat = await verifyBondOwnership(ctx, id);
   if (!strat) return;
-  await prisma.bondStrategy.delete({ where: { id } }).catch(() => {});
+  try {
+    await prisma.bondTrade.deleteMany({ where: { strategyId: id } });
+    await prisma.bondStrategy.delete({ where: { id } });
+  } catch (err: any) {
+    logger.error(`[bond] Failed to delete strategy ${id}: ${err?.message}`);
+    await sendHtml(ctx, `❌ Failed to delete strategy. Please try again.`);
+    return;
+  }
   await handleBondList(ctx);
 }
 
@@ -1295,7 +1359,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
           await ctx.reply('❌ Enter a valid amount.');
           return true;
         }
-        await prisma.bondStrategy.update({ where: { id }, data: { minLiquidity: num || null } });
+        await prisma.bondStrategy.update({ where: { id }, data: { minLiquidity: num ?? null } });
         break;
       }
       case 'awaiting_min_vol': {
@@ -1303,7 +1367,7 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
           await ctx.reply('❌ Enter a valid amount.');
           return true;
         }
-        await prisma.bondStrategy.update({ where: { id }, data: { minVolume: num || null } });
+        await prisma.bondStrategy.update({ where: { id }, data: { minVolume: num ?? null } });
         break;
       }
       case 'awaiting_mkt_max': {

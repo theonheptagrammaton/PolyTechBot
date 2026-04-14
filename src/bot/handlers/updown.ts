@@ -5,6 +5,7 @@ import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
 import { UPDOWN_COIN_MAP } from '../../services/market';
+import { logger } from '../../utils/logger';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ interface UpDownAddState {
 
 export const updownAddState = new RedisBackedState<UpDownAddState>('updownAdd', 600);
 
-setInterval(() => {
+const _updownAddCleanup = setInterval(() => {
   const cutoff = Date.now() - STATE_TTL_MS;
   for (const [key, state] of updownAddState.entries()) {
     if (state.timestamp < cutoff) updownAddState.delete(key);
@@ -109,12 +110,18 @@ interface UpDownEditState {
 
 export const updownEditState = new RedisBackedState<UpDownEditState>('updownEdit', 600);
 
-setInterval(() => {
+const _updownEditCleanup = setInterval(() => {
   const cutoff = Date.now() - STATE_TTL_MS;
   for (const [key, state] of updownEditState.entries()) {
     if (state.timestamp < cutoff) updownEditState.delete(key);
   }
 }, 30 * 60 * 1000);
+
+/** Stop state cleanup intervals (call on bot shutdown) */
+export function stopUpdownCleanup(): void {
+  clearInterval(_updownAddCleanup);
+  clearInterval(_updownEditCleanup);
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -185,8 +192,10 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       const wins = filledTrades.filter(t => t.tpSlStatus === 'tp_triggered').length;
       const losses = filledTrades.filter(t => t.tpSlStatus === 'sl_triggered').length;
 
+      const pcMinStr = s.priceChangeMin <= -9999 ? 'Any' : `$${s.priceChangeMin}`;
+      const pcMaxStr = s.priceChangeMax >= 9999 ? 'Any' : `$${s.priceChangeMax}`;
       const trigChange = s.priceChangeMin > -9999 || s.priceChangeMax < 9999
-        ? `\n│  ${s.coin} change: $${s.priceChangeMin}–$${s.priceChangeMax}`
+        ? `\n│  ${s.coin} change: ${pcMinStr}–${pcMaxStr}`
         : '';
 
       lines.push(
@@ -290,25 +299,43 @@ export async function handleDeleteAllExecute(ctx: Context): Promise<void> {
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
-  await prisma.upDownStrategy.deleteMany({ where: { userId: user.id } });
+  try {
+    const stratIds = await prisma.upDownStrategy.findMany({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+    if (stratIds.length > 0) {
+      await prisma.upDownTrade.deleteMany({
+        where: { strategyId: { in: stratIds.map(s => s.id) } },
+      });
+    }
+    await prisma.upDownStrategy.deleteMany({ where: { userId: user.id } });
+  } catch (err: any) {
+    logger.error(`[updown] Failed to delete all strategies: ${err?.message}`);
+    await sendHtml(ctx, `❌ Failed to delete strategies. Please try again.`);
+    return;
+  }
   await handleUpDownList(ctx);
 }
 
 // ─── Remove Single ──────────────────────────────────────────────────────────
 
 export async function handleRemovePrompt(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
   const user = await getUserByTelegramId(telegramId);
-  if (!user) return;
+  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
   const strategies = await prisma.upDownStrategy.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'asc' },
   });
 
-  if (strategies.length === 0) return;
+  if (strategies.length === 0) {
+    await ctx.answerCbQuery('No strategies to remove').catch(() => {});
+    return;
+  }
+  await ctx.answerCbQuery().catch(() => {});
 
   const buttons = strategies.map((s, i) => [
     Markup.button.callback(
@@ -330,7 +357,14 @@ export async function handleRemoveExecute(ctx: Context, stratId: string): Promis
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
-  await prisma.upDownStrategy.deleteMany({ where: { id: stratId, userId: user.id } });
+  try {
+    await prisma.upDownTrade.deleteMany({ where: { strategyId: stratId } });
+    await prisma.upDownStrategy.deleteMany({ where: { id: stratId, userId: user.id } });
+  } catch (err: any) {
+    logger.error(`[updown] Failed to delete strategy ${stratId}: ${err?.message}`);
+    await sendHtml(ctx, `❌ Failed to delete strategy. Please try again.`);
+    return;
+  }
   await handleUpDownList(ctx);
 }
 
@@ -466,6 +500,40 @@ const TEMPLATES: Template[] = [
     amount: 25,
     maxRounds: 10,
   },
+  {
+    id: 'sol_momentum',
+    name: 'SOL Momentum',
+    emoji: '◎',
+    description: 'Buy SOL UP late in the round when momentum is strong',
+    coin: 'SOL',
+    timeframe: '15-Minute',
+    direction: 'up',
+    timeRangeStart: '12:00',
+    timeRangeEnd: '14:55',
+    upPriceMin: 0.60,
+    upPriceMax: 0.90,
+    priceChangeMin: -9999,
+    priceChangeMax: 9999,
+    amount: 25,
+    maxRounds: 10,
+  },
+  {
+    id: 'sol_dip_buyer',
+    name: 'SOL Dip Buyer',
+    emoji: '◎',
+    description: 'Buy SOL UP when spot drops and odds are cheap',
+    coin: 'SOL',
+    timeframe: '15-Minute',
+    direction: 'up',
+    timeRangeStart: '02:00',
+    timeRangeEnd: '12:00',
+    upPriceMin: 0.10,
+    upPriceMax: 0.40,
+    priceChangeMin: -9999,
+    priceChangeMax: -2,
+    amount: 25,
+    maxRounds: 5,
+  },
 ];
 
 export async function handleTemplateList(ctx: Context): Promise<void> {
@@ -501,37 +569,41 @@ export async function handleTemplateList(ctx: Context): Promise<void> {
 
 export async function handleTemplateUse(ctx: Context, templateId: string): Promise<void> {
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
   const user = await getUserByTelegramId(telegramId);
-  if (!user) return;
+  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
-  const count = await prisma.upDownStrategy.count({ where: { userId: user.id } });
-  if (count >= MAX_STRATEGIES) {
+  const tmpl = TEMPLATES.find(t => t.id === templateId);
+  if (!tmpl) { await ctx.answerCbQuery('Template not found').catch(() => {}); return; }
+
+  // Use transaction to prevent race condition on MAX_STRATEGIES
+  const created = await prisma.$transaction(async (tx) => {
+    const count = await tx.upDownStrategy.count({ where: { userId: user.id } });
+    if (count >= MAX_STRATEGIES) return null;
+    return tx.upDownStrategy.create({
+      data: {
+        userId: user.id,
+        label: tmpl.name,
+        coin: tmpl.coin,
+        timeframe: tmpl.timeframe,
+        direction: tmpl.direction,
+        timeRangeStart: tmpl.timeRangeStart,
+        timeRangeEnd: tmpl.timeRangeEnd,
+        upPriceMin: tmpl.upPriceMin,
+        upPriceMax: tmpl.upPriceMax,
+        priceChangeMin: tmpl.priceChangeMin,
+        priceChangeMax: tmpl.priceChangeMax,
+        amount: tmpl.amount,
+        maxRounds: tmpl.maxRounds,
+        isPaused: true,
+      },
+    });
+  });
+
+  if (!created) {
     await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
     return;
   }
-
-  const tmpl = TEMPLATES.find(t => t.id === templateId);
-  if (!tmpl) return;
-
-  await prisma.upDownStrategy.create({
-    data: {
-      userId: user.id,
-      label: tmpl.name,
-      coin: tmpl.coin,
-      timeframe: tmpl.timeframe,
-      direction: tmpl.direction,
-      timeRangeStart: tmpl.timeRangeStart,
-      timeRangeEnd: tmpl.timeRangeEnd,
-      upPriceMin: tmpl.upPriceMin,
-      upPriceMax: tmpl.upPriceMax,
-      priceChangeMin: tmpl.priceChangeMin,
-      priceChangeMax: tmpl.priceChangeMax,
-      amount: tmpl.amount,
-      maxRounds: tmpl.maxRounds,
-      isPaused: true,
-    },
-  });
 
   await ctx.answerCbQuery(`"${tmpl.name}" created (paused)`).catch(() => {});
   await handleUpDownList(ctx);
@@ -540,17 +612,17 @@ export async function handleTemplateUse(ctx: Context, templateId: string): Promi
 // ─── Add Flow ───────────────────────────────────────────────────────────────
 
 export async function handleStartAdd(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
   const user = await getUserByTelegramId(telegramId);
-  if (!user) return;
+  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
   const count = await prisma.upDownStrategy.count({ where: { userId: user.id } });
   if (count >= MAX_STRATEGIES) {
     await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
     return;
   }
+  await ctx.answerCbQuery().catch(() => {});
 
   updownAddState.set(telegramId, { step: 'name', timestamp: Date.now() });
 
@@ -851,7 +923,7 @@ export async function handleConfirmAdd(ctx: Context): Promise<void> {
 
   const state = await updownAddState.get(telegramId);
   if (!state) {
-    await ctx.answerCbQuery('Session expired. Please start again.').catch(() => {});
+    await sendHtml(ctx, `❌ Session expired. Please start again.`);
     return;
   }
 
@@ -888,7 +960,7 @@ export async function handleConfirmAdd(ctx: Context): Promise<void> {
   });
 
   if (!created) {
-    await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
+    await sendHtml(ctx, `❌ Maximum ${MAX_STRATEGIES} strategies reached. Delete one first.`);
     return;
   }
 
@@ -1394,18 +1466,20 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
 
     case 'adv_tp_value': {
       const n = parseNumber(text);
-      if (n == null || n <= 0) {
-        await ctx.reply('❌ Enter a positive number.');
-        return true;
-      }
       if (state.tpType === 'pct') {
+        if (n == null || n <= 0 || n > 1000) {
+          await ctx.reply('❌ Enter a percentage between 1 and 1000.');
+          return true;
+        }
         state.takeProfitPct = n;
+        state.takeProfitPrice = undefined;
       } else {
-        if (n < 0.01 || n > 0.99) {
+        if (n == null || n < 0.01 || n > 0.99) {
           await ctx.reply('❌ Price must be 0.01–0.99.');
           return true;
         }
         state.takeProfitPrice = n;
+        state.takeProfitPct = undefined;
       }
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
@@ -1415,18 +1489,20 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
 
     case 'adv_sl_value': {
       const n = parseNumber(text);
-      if (n == null || n <= 0) {
-        await ctx.reply('❌ Enter a positive number.');
-        return true;
-      }
       if (state.slType === 'pct') {
+        if (n == null || n <= 0 || n > 100) {
+          await ctx.reply('❌ Enter a percentage between 1 and 100.');
+          return true;
+        }
         state.stopLossPct = n;
+        state.stopLossPrice = undefined;
       } else {
-        if (n < 0.01 || n > 0.99) {
+        if (n == null || n < 0.01 || n > 0.99) {
           await ctx.reply('❌ Price must be 0.01–0.99.');
           return true;
         }
         state.stopLossPrice = n;
+        state.stopLossPct = undefined;
       }
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
@@ -1467,25 +1543,26 @@ async function verifyUdOwnership(ctx: Context, stratId: string) {
 // ─── Manage Page ────────────────────────────────────────────────────────────
 
 export async function handleManage(ctx: Context, stratId: string): Promise<void> {
-  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
-
   const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
+  if (!telegramId) { if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {}); return; }
   updownEditState.delete(telegramId);
 
   const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) {
-    await ctx.answerCbQuery('Strategy not found').catch(() => {});
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Strategy not found').catch(() => {});
     return;
   }
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
   const statusStr = strat.isActive && !strat.isPaused ? '🟢 Running' : '🔴 Paused';
   const dirStr = strat.direction === 'up' ? 'UP' : 'DOWN';
   const orderStr = strat.orderType === 'limit' && strat.limitPrice
     ? `Limit @ ${strat.limitPrice} (TTL: ${strat.limitTtlSeconds}s)` : 'Market';
   const tf = tfShort(strat.timeframe);
+  const pcMinLabel = strat.priceChangeMin <= -9999 ? 'Any' : `$${strat.priceChangeMin}`;
+  const pcMaxLabel = strat.priceChangeMax >= 9999 ? 'Any' : `$${strat.priceChangeMax}`;
   const pcStr = strat.priceChangeMin > -9999 || strat.priceChangeMax < 9999
-    ? `$${strat.priceChangeMin} – $${strat.priceChangeMax}` : 'Any';
+    ? `${pcMinLabel} – ${pcMaxLabel}` : 'Any';
   const tpStr = strat.takeProfitPct != null ? `${strat.takeProfitPct}%`
     : strat.takeProfitPrice != null ? `@${strat.takeProfitPrice}` : '–';
   const slStr = strat.stopLossPct != null ? `${strat.stopLossPct}%`
@@ -1525,6 +1602,7 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
     [
       Markup.button.callback('Rounds', `udm_rnd_${id}`),
       Markup.button.callback('Slippage', `udm_slip_${id}`),
+      ...(strat.orderType === 'limit' ? [Markup.button.callback('Limit TTL', `udm_ttl_${id}`)] : []),
     ],
     [
       Markup.button.callback('TP', `udm_tp_${id}`),
@@ -1642,7 +1720,14 @@ export async function handleManageDeleteExecute(ctx: Context, stratId: string): 
   await ctx.answerCbQuery().catch(() => {});
   const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
-  await prisma.upDownStrategy.delete({ where: { id: stratId } }).catch(() => {});
+  try {
+    await prisma.upDownTrade.deleteMany({ where: { strategyId: stratId } });
+    await prisma.upDownStrategy.delete({ where: { id: stratId } });
+  } catch (err: any) {
+    logger.error(`[updown] Failed to delete strategy ${stratId}: ${err?.message}`);
+    await sendHtml(ctx, `❌ Failed to delete strategy. Please try again.`);
+    return;
+  }
   await handleUpDownList(ctx);
 }
 

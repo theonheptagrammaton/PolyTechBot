@@ -21,10 +21,12 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
     ? `${walletAddr.slice(0, 6)}...${walletAddr.slice(-4)}`
     : 'Not set';
 
-  // Bond strategy status
-  const bondStrategies = await prisma.bondStrategy.findMany({
-    where: { userId: user.id },
-  });
+  // Fetch bond + updown strategies in parallel
+  const [bondStrategies, updownStrategies] = await Promise.all([
+    prisma.bondStrategy.findMany({ where: { userId: user.id } }),
+    prisma.upDownStrategy.findMany({ where: { userId: user.id } }),
+  ]);
+
   const bondRunning = bondStrategies.filter(s => s.isActive && !s.isPaused).length;
   const bondTotal = bondStrategies.length;
   let bondStatus: string;
@@ -36,10 +38,6 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
     bondStatus = `🔴 ${bondTotal} paused`;
   }
 
-  // Up-Down status
-  const updownStrategies = await prisma.upDownStrategy.findMany({
-    where: { userId: user.id },
-  });
   const updownRunning = updownStrategies.filter(s => s.isActive && !s.isPaused).length;
   const updownTotal = updownStrategies.length;
   let updownStatus: string;
