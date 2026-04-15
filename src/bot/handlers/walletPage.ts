@@ -516,14 +516,15 @@ export async function handleOpenOrders(ctx: Context, page: number = 1): Promise<
       const totalValue  = (sizeTotal * parseFloat(order.price || '0')).toFixed(2);
       const remainValue = (remaining * parseFloat(order.price || '0')).toFixed(2);
       const created     = formatTimestamp(order.created_at);
-      const outcome     = esc(order.outcome || '—');
+      const outcome     = esc(order.outcome || order.order_type?.toUpperCase() || '—');
       const orderId     = order.id ? order.id.substring(0, 8) + '…' : '—';
 
       message += `*${num}.* ${side} @ ${price} · \`${orderId}\`\n`;
-      message += `   ├ ${outcome}\n`;
+      if (outcome && outcome !== '—') message += `   ├ ${outcome}\n`;
       message += `   ├ 📦 ${sizeTotal.toFixed(2)} ${t(lang, 'sh')} ${t(lang, 'total')} · ${remaining.toFixed(2)} ${t(lang, 'remaining')} (${pctFilled}% ${t(lang, 'filled')})\n`;
       message += `   ├ 💰 ${t(lang, 'Total')}: $${totalValue} · ${t(lang, 'Remaining')}: ~$${remainValue}\n`;
-      message += `   └ 📅 ${created}\n\n`;
+      if (created && created !== '—') message += `   └ 📅 ${created}\n\n`;
+      else message += '\n';
     });
 
     // Per-order cancel buttons

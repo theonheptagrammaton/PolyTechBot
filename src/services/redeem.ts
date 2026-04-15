@@ -10,6 +10,15 @@ import { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, http } from 'viem';
 import { polygon } from 'viem/chains';
+import {
+  isRelayerBackedOff,
+  setRelayerBackoff,
+  isRateLimitError,
+  incrementRelayerCount,
+  getThrottleDelay,
+  canCallRelayer,
+  getRelayerBackoffRemaining,
+} from '../utils/relayerRateLimit';
 
 // TTL for the "already claimed" dedup key — 30 days so the Data API lag never re-triggers
 const CLAIMED_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
@@ -45,34 +54,6 @@ const polygonProvider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
 
 // Global lock: prevents parallel redeem sessions for the same proxy
 const _redeemLocks = new Set<string>();
-
-// Rate-limit tracking: when we detect 429/quota errors, stop hitting the relayer
-let _relayerBackoffUntil = 0;
-
-/** Returns true if the error message indicates a rate limit / quota exhaustion. */
-function isRateLimitError(msg: string): boolean {
-  return /429|too many requests|quota exceeded|rate.?limit/i.test(msg);
-}
-
-/** Returns true if we should skip relayer calls due to active rate-limit backoff. */
-function isRelayerBackedOff(): boolean {
-  return Date.now() < _relayerBackoffUntil;
-}
-
-/** Mark the relayer as rate-limited. Back off for progressively longer periods. */
-function setRelayerBackoff(errorMsg: string): void {
-  // Extract reset time from "resets in N seconds" if available
-  const resetMatch = errorMsg.match(/resets in (\d+) seconds/);
-  if (resetMatch) {
-    const resetSeconds = parseInt(resetMatch[1], 10);
-    _relayerBackoffUntil = Date.now() + resetSeconds * 1000;
-    logger.warn(`[redeem] Relayer quota exhausted, backing off for ${resetSeconds}s`);
-  } else {
-    // Default: back off for 5 minutes on 429
-    _relayerBackoffUntil = Date.now() + 300_000;
-    logger.warn(`[redeem] Relayer rate limited, backing off for 300s`);
-  }
-}
 
 /**
  * Checks on-chain CTF token balance for a given proxy wallet and token (asset) ID.
@@ -163,6 +144,13 @@ async function redeemPosition(params: {
   proxyAddress: string;
   position: ActivePosition;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  // Pre-flight: check if relayer is available
+  const preflight = await canCallRelayer();
+  if (!preflight.ok) {
+    logger.info(`[redeem] Relayer unavailable (${preflight.reason}), skipping — retry in ${preflight.waitSec}s`);
+    return { success: false, error: `Relayer unavailable (${preflight.reason}), retry in ${preflight.waitSec}s` };
+  }
+
   // Check on-chain balance before wasting a relayer tx
   const onChainBalance = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
   if (onChainBalance.isZero()) {
@@ -224,16 +212,22 @@ async function redeemNegRisk(
   const conditionId = position.conditionId;
 
   // Abort early if relayer is rate-limited
-  if (isRelayerBackedOff()) {
-    const waitSec = Math.ceil((_relayerBackoffUntil - Date.now()) / 1000);
+  if (await isRelayerBackedOff()) {
+    const waitSec = await getRelayerBackoffRemaining();
     logger.info(`[redeem] Skipping NegRiskAdapter — relayer rate-limited for ${waitSec}s more`);
     return { success: false, error: `Relayer rate-limited, retry in ${waitSec}s` };
   }
 
-  for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
+  // effectiveOutcomeIndex may flip on subtraction overflow (Data API mismatch)
+  let effectiveOutcomeIndex = position.outcomeIndex;
+  let outcomeFlipped = false;
+  const txTypes = [RelayerTxType.SAFE, RelayerTxType.PROXY];
+
+  for (let ti = 0; ti < txTypes.length; ti++) {
+    const txType = txTypes[ti];
     try {
       // Re-check backoff before each attempt (previous attempt may have triggered it)
-      if (isRelayerBackedOff()) break;
+      if (await isRelayerBackedOff()) break;
 
       // Re-check on-chain balance before EACH attempt to avoid "subtraction overflow"
       // when a previous attempt already redeemed (partially or fully).
@@ -243,10 +237,19 @@ async function redeemNegRisk(
         return { success: true, txHash: undefined };
       }
 
-      // Build tx payload with fresh balance
-      const amounts = position.outcomeIndex === 0
-        ? [currentBalance, ethers.BigNumber.from(0)]
-        : [ethers.BigNumber.from(0), currentBalance];
+      // Also fetch opposite side balance from on-chain (don't assume 0)
+      let currentOpposite = ethers.BigNumber.from(0);
+      if (position.oppositeAsset) {
+        currentOpposite = await getOnChainTokenBalance(proxyAddress, position.oppositeAsset);
+      }
+
+      // Build amounts using actual on-chain balances.
+      // effectiveOutcomeIndex determines which slot gets which balance.
+      // If Data API outcomeIndex is wrong, the flip-on-overflow logic below corrects it.
+      const amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
+      amounts[effectiveOutcomeIndex] = currentBalance;
+      amounts[1 - effectiveOutcomeIndex] = currentOpposite;
+
       const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
       const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
       const txPayload = [
@@ -254,7 +257,7 @@ async function redeemNegRisk(
         { to: NEG_RISK_ADAPTER, data: redeemData, value: '0' },
       ];
 
-      logger.info(`[redeem] Trying ${txType}/NegRiskAdapter: conditionId=${conditionId.slice(0, 18)}... outcome=${position.outcome} amounts=[${amounts[0].toString()},${amounts[1].toString()}]`);
+      logger.info(`[redeem] Trying ${txType}/NegRiskAdapter: conditionId=${conditionId.slice(0, 18)}... outcome=${position.outcome} outcomeIdx=${effectiveOutcomeIndex}${outcomeFlipped ? '(flipped)' : ''} amounts=[${amounts[0].toString()},${amounts[1].toString()}]`);
 
       const relayClient = createRelayClient(privateKey, txType);
 
@@ -307,23 +310,32 @@ async function redeemNegRisk(
         continue;
       }
 
+      await incrementRelayerCount();
       logger.info(`[redeem] Confirmed via ${txType}/NegRiskAdapter: ${txHash} (balance: ${currentBalance.toString()} → ${balanceAfter.toString()})`);
       return { success: true, txHash };
     } catch (error: any) {
       const errMsg = error?.message ?? '';
       if (isRateLimitError(errMsg)) {
-        setRelayerBackoff(errMsg);
+        await setRelayerBackoff(errMsg);
         break; // Stop trying — relayer is exhausted
       }
-      // Detect "subtraction overflow" — means amounts don't match on-chain state, skip to next type
+      // Detect "subtraction overflow" — amounts don't match on-chain token→slot mapping.
+      // Most likely cause: Data API outcomeIndex doesn't match NegRiskAdapter's internal slot order.
+      // Fix: flip the outcomeIndex and restart the tx type loop from SAFE.
       if (/subtraction overflow/i.test(errMsg)) {
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow — balance mismatch, re-checking...`);
         const freshBalance = await getOnChainTokenBalance(proxyAddress, position.asset);
         if (freshBalance.isZero()) {
           logger.info(`[redeem] Position already fully redeemed (balance now 0)`);
           return { success: true, txHash: undefined };
         }
-        // Balance still non-zero but amounts were wrong — next iteration will use fresh balance
+        if (!outcomeFlipped) {
+          effectiveOutcomeIndex = 1 - effectiveOutcomeIndex;
+          outcomeFlipped = true;
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow — flipping outcomeIndex to ${effectiveOutcomeIndex} and restarting`);
+          ti = -1; // will become 0 after loop increment → restart from SAFE
+          continue;
+        }
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow persists after flip — skipping`);
         continue;
       }
       logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed: ${errMsg.slice(0, 200)}`);
@@ -333,7 +345,7 @@ async function redeemNegRisk(
     }
   }
 
-  return { success: false, error: isRelayerBackedOff() ? 'Relayer rate-limited' : 'NegRiskAdapter redemption failed with all tx types' };
+  return { success: false, error: (await isRelayerBackedOff()) ? 'Relayer rate-limited' : 'NegRiskAdapter redemption failed with all tx types' };
 }
 
 /**
@@ -347,8 +359,8 @@ async function redeemStandard(
   onChainBalance: ethers.BigNumber,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
   // Abort early if relayer is rate-limited
-  if (isRelayerBackedOff()) {
-    const waitSec = Math.ceil((_relayerBackoffUntil - Date.now()) / 1000);
+  if (await isRelayerBackedOff()) {
+    const waitSec = await getRelayerBackoffRemaining();
     logger.info(`[redeem] Skipping standard redeem — relayer rate-limited for ${waitSec}s more`);
     return { success: false, error: `Relayer rate-limited, retry in ${waitSec}s` };
   }
@@ -358,7 +370,7 @@ async function redeemStandard(
 
   for (const collateralToken of [USDC_E_POLYGON, NATIVE_USDC_POLYGON]) {
     // Re-check backoff before each collateral attempt
-    if (isRelayerBackedOff()) break;
+    if (await isRelayerBackedOff()) break;
 
     const callData = iface.encodeFunctionData('redeemPositions', [
       collateralToken,
@@ -371,7 +383,7 @@ async function redeemStandard(
 
     for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
       // Re-check backoff before each tx type attempt
-      if (isRelayerBackedOff()) break;
+      if (await isRelayerBackedOff()) break;
 
       try {
         logger.info(
@@ -431,12 +443,13 @@ async function redeemStandard(
           break; // break inner loop (txType), continue outer loop (collateralToken)
         }
 
+        await incrementRelayerCount();
         logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash} (balance: ${onChainBalance.toString()} → ${balanceAfter.toString()})`);
         return { success: true, txHash };
       } catch (error: any) {
         const errMsg = error?.message ?? '';
         if (isRateLimitError(errMsg)) {
-          setRelayerBackoff(errMsg);
+          await setRelayerBackoff(errMsg);
           break; // Stop trying — relayer is exhausted
         }
         logger.warn(`[redeem] ${txType}/${tokenLabel} attempt failed: ${errMsg.slice(0, 200)}`);
@@ -445,11 +458,11 @@ async function redeemStandard(
         continue;
       }
     }
-    if (isRelayerBackedOff()) break;
+    if (await isRelayerBackedOff()) break;
     logger.info(`[redeem] ${tokenLabel} did not redeem, trying next collateral token...`);
   }
 
-  return { success: false, error: isRelayerBackedOff() ? 'Relayer rate-limited' : 'Redemption failed with all collateral token variants' };
+  return { success: false, error: (await isRelayerBackedOff()) ? 'Relayer rate-limited' : 'Redemption failed with all collateral token variants' };
 }
 
 function normId(s: string | undefined | null): string {
@@ -637,9 +650,19 @@ async function _doRedeem(
   for (let i = 0; i < pending.length; i++) {
     const pos = pending[i];
     // Abort auto-redeem loop if relayer is rate-limited
-    if (isRelayerBackedOff()) {
+    if (await isRelayerBackedOff()) {
       logger.warn(`[redeem] Relayer rate-limited, stopping auto-redeem loop (${pending.length - i} remaining)`);
       break;
+    }
+    // Proactive throttle: add delay when approaching hourly quota
+    const throttleMs = await getThrottleDelay();
+    if (throttleMs < 0) {
+      logger.warn(`[redeem] Hourly relayer limit reached, stopping auto-redeem loop (${pending.length - i} remaining)`);
+      break;
+    }
+    if (throttleMs > 0) {
+      logger.info(`[redeem] Throttling ${throttleMs}ms before next relayer call (approaching quota)`);
+      await new Promise(r => setTimeout(r, throttleMs));
     }
     try {
       const key = claimedKey(proxyAddress, pos.conditionId);

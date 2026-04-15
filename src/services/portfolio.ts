@@ -180,29 +180,60 @@ export async function getClosedPositions(proxyAddress: string, forceRefresh = fa
 
   try {
     logger.info(`Fetching closed positions from Data API for ${proxyAddress}`);
-    const response = await fetch(`${DATA_API}/closed-positions?user=${proxyAddress}`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
 
-    if (!response.ok) {
-      logger.warn(`Data API /closed-positions returned ${response.status}`);
-      if (cached) return cached;
-      return [];
+    const PAGE_LIMIT = 50; // API max per request
+    const allPositions: ClosedPosition[] = [];
+    let offset = 0;
+
+    // Paginate until we get fewer results than the limit
+    while (true) {
+      const url = `${DATA_API}/closed-positions?user=${proxyAddress}&limit=${PAGE_LIMIT}&offset=${offset}`;
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        logger.warn(`Data API /closed-positions returned ${response.status} at offset=${offset}`);
+        // If first page fails, fall back to cache
+        if (allPositions.length === 0) {
+          if (cached) return cached;
+          return [];
+        }
+        break; // Return whatever we collected so far
+      }
+
+      const data = await response.json();
+      const page: ClosedPosition[] = Array.isArray(data) ? data : [];
+      allPositions.push(...page);
+
+      // If we got fewer than the limit, we've reached the end
+      if (page.length < PAGE_LIMIT) break;
+
+      offset += PAGE_LIMIT;
+
+      // Safety cap to prevent infinite loops (5000 positions max)
+      if (offset > 5000) {
+        logger.warn(`Closed positions pagination capped at offset ${offset}`);
+        break;
+      }
     }
 
-    const data = await response.json();
-    const positions: ClosedPosition[] = Array.isArray(data) ? data : [];
-    positions.sort((a, b) => b.timestamp - a.timestamp);
+    allPositions.sort((a, b) => b.timestamp - a.timestamp);
 
-    await redisCache.set(cacheKey, positions, CLOSED_POSITIONS_TTL).catch(() => {});
-    logger.info(`Fetched ${positions.length} closed positions`);
-    return positions;
+    await redisCache.set(cacheKey, allPositions, CLOSED_POSITIONS_TTL).catch(() => {});
+    logger.info(`Fetched ${allPositions.length} closed positions (paginated)`);
+    return allPositions;
   } catch (error) {
     logger.warn('Error fetching closed positions:', error);
     if (cached) return cached;
     return [];
   }
 }
+
+/**
+ * Statuses that indicate a live/resting order on the book.
+ */
+const LIVE_ORDER_STATUSES = new Set(['open', 'pending', 'live', 'active', 'resting', 'new', 'partially_filled']);
 
 /**
  * Gets user's open orders from Predexon API
@@ -221,30 +252,36 @@ export async function getOpenOrders(
   try {
     logger.info('Fetching open orders from Predexon API');
     const orders = await predexonGetOrders(predexonUserId, 'polymarket');
+
+    logger.info(`[portfolio] getOrders returned ${orders.length} total orders, statuses: ${[...new Set(orders.map(o => o.status))].join(', ') || 'none'}`);
+
     const liveOrders = orders
-      .filter((o) => o.status === 'open')
-      .map((o) => ({
-        id: o.orderId,
+      .filter((o) => {
+        const status = (o.status ?? '').toLowerCase();
+        return LIVE_ORDER_STATUSES.has(status);
+      })
+      .map((o: any) => ({
+        id: o.orderId || o.order_id || o.id || '',
         status: 'LIVE',
-        owner: '',
-        maker_address: '',
-        market: '',
-        asset_id: o.tokenId,
-        side: o.side?.toUpperCase() ?? '',
-        original_size: o.size ?? '0',
-        size_matched: o.sizeMatched ?? '0',
+        owner: o.owner || '',
+        maker_address: o.makerAddress || o.maker_address || '',
+        market: o.marketIdentifier || o.market_identifier || o.conditionId || o.condition_id || o.market || '',
+        asset_id: o.tokenId || o.token_id || '',
+        side: (o.side ?? '').toUpperCase(),
+        original_size: o.size || o.originalSize || o.original_size || '0',
+        size_matched: o.sizeMatched || o.size_matched || o.filledSize || '0',
         price: o.price ?? '0',
-        associate_trades: [],
-        outcome: '',
-        created_at: 0,
-        expiration: '',
-        order_type: o.type ?? '',
+        associate_trades: o.associateTrades || o.associate_trades || [],
+        outcome: o.outcome || o.title || '',
+        created_at: o.createdAt || o.created_at || o.timestamp || 0,
+        expiration: o.expiration || o.expiresAt || o.expires_at || '',
+        order_type: o.type || o.orderType || o.order_type || '',
       })) as OpenOrder[];
 
-    logger.info(`Fetched ${liveOrders.length} open orders`);
+    logger.info(`Fetched ${liveOrders.length} open orders (from ${orders.length} total)`);
     return liveOrders;
   } catch (error) {
-    logger.warn('Error fetching open orders:', error);
+    logger.error('Error fetching open orders:', error);
     return [];
   }
 }
@@ -522,8 +559,18 @@ export function calculateTradeValue(size: string, price: string): string {
 }
 
 export function formatTimestamp(timestamp: string | number): string {
-  const date =
-    typeof timestamp === 'string' ? new Date(timestamp) : new Date(timestamp * 1000);
+  if (!timestamp || timestamp === 0) return '—';
+
+  let date: Date;
+  if (typeof timestamp === 'string') {
+    date = new Date(timestamp);
+  } else {
+    // Heuristic: timestamps < 1e12 are seconds, >= 1e12 are milliseconds
+    date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
+  }
+
+  if (isNaN(date.getTime())) return '—';
+
   return date.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',

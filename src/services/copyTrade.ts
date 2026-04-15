@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import { config } from '../config';
 import { getActivePositions, ActivePosition, fetchTxHashForOrder } from './portfolio';
 import { transferCommission, COMMISSION_RATE } from './commission';
-import { placeOrder as predexonPlaceOrder } from './predexon';
+import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder } from './predexon';
 import { ensurePredexonUser } from './user';
 import { createManagedWsProvider, ManagedWsProvider } from '../utils/wsProvider';
 import { manualRedeem } from './redeem';
@@ -62,12 +62,31 @@ function friendlyCopyError(raw: string): string {
     return 'Copy amount is below the minimum threshold';
   if (lc.includes('category not in'))
     return 'Market category not in your filter list';
-  if (lc.includes('price') && lc.includes('below') || lc.includes('above'))
+  if (lc.includes('price') && (lc.includes('below') || lc.includes('above')))
     return 'Price outside of your filter range';
   // Fallback: if it's already short and clean, return as-is; otherwise generic
   if (raw.length <= 60 && !raw.includes('Error') && !raw.includes('error'))
     return raw;
   return 'Trade could not be completed';
+}
+
+/** Poll Predexon order status to retrieve actual fill price (best-effort, 3 attempts). */
+async function pollFillPrice(
+  predexonUserId: string,
+  orderId: string,
+): Promise<number | null> {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const order = await predexonGetOrder(predexonUserId, orderId);
+      if (order.status === 'filled') {
+        const p = parseFloat(order.price ?? '0');
+        if (!isNaN(p) && p > 0) return p;
+      }
+      if (order.status === 'cancelled' || order.status === 'expired') return null;
+    } catch { /* ignore transient errors */ }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return null;
 }
 
 /**
@@ -222,6 +241,7 @@ async function fetchNewTradesForTrader(traderAddress: string): Promise<DetectedT
       const alreadyProcessed = await redisCache.get<number>(dedupeKey);
       if (alreadyProcessed) {
         logger.debug(`[copy] Skipping duplicate trade (dedup key exists): ${dedupeKey}`);
+        if (ts > maxTimestamp) maxTimestamp = ts; // still advance cursor past deduped trades
         continue;
       }
       await redisCache.set(dedupeKey, 1, 300); // 5-minute dedup window
@@ -432,7 +452,11 @@ async function executeCopyOrder(
       );
     }
 
-    return { status: 'filled', orderID: orderResp.orderId, filledPrice: price, actualAmount: tradeAmount };
+    // Try to get actual fill price (best-effort, don't block on failure)
+    const actualFillPrice = await pollFillPrice(predexonUserId, orderResp.orderId).catch(() => null);
+    const finalPrice = actualFillPrice ?? price;
+
+    return { status: 'filled', orderID: orderResp.orderId, filledPrice: finalPrice, actualAmount: tradeAmount };
   } catch (err: any) {
     if (isNoOrderbook(err)) {
       return { status: 'skipped', errorMsg: 'market closed/no orderbook' };
@@ -644,7 +668,7 @@ async function tickForTrader(
         // the ratio established at first entry (stored in Redis), or the explicit
         // multiplier if one is configured.
         let copySize: number;
-        if (trade.side === 'BUY' && sub.fixedAmount !== null && sub.fixedAmount > 0) {
+        if (effectiveSide === 'BUY' && sub.fixedAmount !== null && sub.fixedAmount > 0) {
           const proxy = user.polymarketProxyAddress ?? '';
           const userPositions = positionCache.get(proxy) ?? [];
           const hasPosition   = userPositions.some((p) => p.asset === trade.assetId);
@@ -866,26 +890,23 @@ async function tickForTrader(
           },
         });
 
-        // Track spend for successful BUY fills
+        // Track spend for successful BUY fills (atomic increments to prevent race conditions)
         if (result.status === 'filled' && effectiveSide === 'BUY') {
           // Daily spend
           if (sub.dailySpendMax != null) {
             const today = new Date().toISOString().slice(0, 10);
             const spendKey = `copy:daily:${sub.id}:${today}`;
-            const spentToday = (await redisCache.get<number>(spendKey)) ?? 0;
-            await redisCache.set(spendKey, spentToday + copySize, 25 * 3600);
+            await redisCache.incrByFloat(spendKey, copySize, 25 * 3600).catch(() => {});
           }
           // Per-market spend
           if (sub.maxSpendPerMarket != null) {
             const mktKey = `copy:mktspend:${sub.id}:${trade.marketId}`;
-            const spent = (await redisCache.get<number>(mktKey)) ?? 0;
-            await redisCache.set(mktKey, spent + copySize, 90 * 24 * 3600);
+            await redisCache.incrByFloat(mktKey, copySize, 90 * 24 * 3600).catch(() => {});
           }
           // Total spend
           if (sub.maxSpendTotal != null) {
             const totalKey = `copy:totalspend:${sub.id}`;
-            const spent = (await redisCache.get<number>(totalKey)) ?? 0;
-            await redisCache.set(totalKey, spent + copySize, 365 * 24 * 3600);
+            await redisCache.incrByFloat(totalKey, copySize, 365 * 24 * 3600).catch(() => {});
           }
         }
 
@@ -1210,7 +1231,8 @@ async function checkTpSlPositions(
     const resp = await fetch(url, { signal: AbortSignal.timeout(8_000) });
     if (resp.ok) {
       const data: any = await resp.json();
-      midpoints = data?.midpoints ?? {};
+      // CLOB /midpoints returns a flat Record<tokenId, priceStr>, not { midpoints: {...} }
+      midpoints = (data && typeof data === 'object' && !data.error) ? data : {};
     } else {
       logger.warn(`[copy] Midpoints API returned ${resp.status}`);
       return;
@@ -1358,10 +1380,10 @@ export function startCopyTradeMonitor(
       await Promise.allSettled(
         rows.map((r) => {
           if (monitorStopped) return Promise.resolve();
-          // When on-chain listener is active, polling only handles TP/SL checks.
-          // Pass [] as preloadedTrades to skip fetching new trades from the API.
-          const trades = onChainListenerActive ? [] : undefined;
-          return tickForTrader(r.traderAddress, sendNotification, trades);
+          // Always poll Data API for new trades (on-chain listener provides faster
+          // detection but many WSS RPCs silently drop event subscriptions, so
+          // polling must remain the safety net). Dedup keys prevent double-execution.
+          return tickForTrader(r.traderAddress, sendNotification);
         })
       );
     } catch (err: any) {
@@ -1572,6 +1594,21 @@ export async function startOnChainListener(
             if (!trade) continue;
 
             logger.info(`[copy:onchain] ${label} trade detected: ${trade.side} ${trade.outcome} $${trade.sizeUsd.toFixed(2)} for ${leaderAddress.slice(0, 8)}...`);
+
+            // Set dedup keys so the next polling tick skips this trade.
+            // The polling path builds the key from Data API fields which may use
+            // the token ID (t.asset) OR the conditionId as the asset component,
+            // and the API timestamp may land in a different 60-second bucket than
+            // Date.now(). Write keys for BOTH asset identifiers and for the
+            // current + adjacent minute buckets to guarantee overlap.
+            const minuteBucket = Math.floor(trade.timestamp / 60000);
+            for (const assetKey of [trade.assetId, trade.marketId]) {
+              if (!assetKey) continue;
+              for (const bucket of [minuteBucket - 1, minuteBucket, minuteBucket + 1]) {
+                const dedupeKey = `copy:dedup:${leaderAddress}:${assetKey}:${trade.side}:${bucket}`;
+                await redisCache.set(dedupeKey, 1, 300);
+              }
+            }
 
             if (_sendNotification) {
               tickForTrader(leaderAddress, _sendNotification, [trade]).catch((err) =>

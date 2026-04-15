@@ -24,7 +24,7 @@ export interface PredexonOrder {
 
 export interface PredexonOrderResponse {
   orderId: string;
-  status: 'open' | 'filled' | 'cancelled' | 'expired' | 'pending';
+  status: 'open' | 'filled' | 'cancelled' | 'expired' | 'pending' | 'unknown' | string;
   venue: string;
   side: string;
   type: string;
@@ -215,10 +215,28 @@ export async function placeOrder(
   userId: string,
   order: PredexonOrder,
 ): Promise<PredexonOrderResponse> {
-  return predexonFetch<PredexonOrderResponse>(
+  const raw: any = await predexonFetch<any>(
     `${TRADE_URL()}/api/users/${userId}/orders`,
     { method: 'POST', body: JSON.stringify(order) },
   );
+
+  logger.debug(`[predexon] placeOrder raw response keys: ${Object.keys(raw ?? {}).join(', ')}`);
+
+  // Normalize — API may use orderId, order_id, or id
+  return {
+    ...raw,
+    orderId: raw.orderId || raw.order_id || raw.id || '',
+    status: raw.status || 'unknown',
+    venue: raw.venue || order.venue,
+    side: raw.side || order.side,
+    type: raw.type || order.type,
+    tokenId: raw.tokenId || raw.token_id || order.tokenId,
+    marketIdentifier: raw.marketIdentifier || raw.market_identifier || raw.conditionId || raw.condition_id || raw.market || '',
+    sizeMatched: raw.sizeMatched || raw.size_matched || raw.filledSize || '0',
+    price: raw.price ?? order.price ?? '0',
+    amount: raw.amount ?? order.amount,
+    size: raw.size ?? order.size,
+  };
 }
 
 export async function getOrders(
@@ -226,19 +244,66 @@ export async function getOrders(
   venue?: string,
 ): Promise<PredexonOrderResponse[]> {
   const params = venue ? `?venue=${venue}` : '';
-  const data = await predexonFetch<{ orders: PredexonOrderResponse[] }>(
+  const data: any = await predexonFetch<any>(
     `${TRADE_URL()}/api/users/${userId}/orders${params}`,
   );
-  return data.orders ?? [];
+
+  // Handle various response shapes: array, { orders }, { data }, single object
+  let raw: any[];
+  if (Array.isArray(data)) {
+    raw = data;
+  } else if (Array.isArray(data?.orders)) {
+    raw = data.orders;
+  } else if (Array.isArray(data?.data)) {
+    raw = data.data;
+  } else if (data && typeof data === 'object' && (data.orderId || data.order_id || data.id)) {
+    // Single order returned as object
+    raw = [data];
+  } else {
+    logger.warn(`[predexon] getOrders: unexpected response shape: ${JSON.stringify(data).slice(0, 300)}`);
+    raw = [];
+  }
+
+  logger.debug(`[predexon] getOrders: ${raw.length} orders received`);
+
+  // Normalize field names across API variants
+  return raw.map((o: any) => ({
+    ...o,
+    orderId: o.orderId || o.order_id || o.id || '',
+    status: o.status || 'unknown',
+    venue: o.venue || venue || '',
+    side: o.side || '',
+    type: o.type || o.orderType || o.order_type || '',
+    tokenId: o.tokenId || o.token_id || '',
+    marketIdentifier: o.marketIdentifier || o.market_identifier || o.conditionId || o.condition_id || o.market || '',
+    sizeMatched: o.sizeMatched || o.size_matched || o.filledSize || '0',
+    price: o.price ?? '0',
+    amount: o.amount,
+    size: o.size || o.originalSize || o.original_size || '0',
+  }));
 }
 
 export async function getOrder(
   userId: string,
   orderId: string,
 ): Promise<PredexonOrderResponse> {
-  return predexonFetch<PredexonOrderResponse>(
+  const raw: any = await predexonFetch<any>(
     `${TRADE_URL()}/api/users/${userId}/orders/${orderId}`,
   );
+  return {
+    ...raw,
+    orderId: raw.orderId || raw.order_id || raw.id || orderId,
+    status: raw.status || 'unknown',
+    venue: raw.venue || '',
+    side: raw.side || '',
+    type: raw.type || raw.orderType || raw.order_type || '',
+    tokenId: raw.tokenId || raw.token_id || '',
+    marketIdentifier: raw.marketIdentifier || raw.market_identifier || raw.conditionId || raw.condition_id || raw.market || '',
+    sizeMatched: raw.sizeMatched || raw.size_matched || raw.filledSize || '0',
+    price: raw.price ?? '0',
+    amount: raw.amount,
+    size: raw.size || raw.originalSize || raw.original_size || '0',
+  };
 }
 
 export async function cancelOrder(

@@ -149,7 +149,11 @@ export async function executeUpDownOrder(
         return { success: false, errorMsg: 'invalid limit price' };
       }
       // Limit order
-      const size = String(Math.floor((tradeAmount / strategy.limitPrice) * 100) / 100);
+      const rawSize = Math.floor((tradeAmount / strategy.limitPrice) * 100) / 100;
+      if (rawSize <= 0) {
+        return { success: false, errorMsg: 'Trade amount too small for this limit price' };
+      }
+      const size = String(rawSize);
       orderResp = await predexonPlaceOrder(predexonUserId, {
         venue: 'polymarket',
         tokenId,
@@ -387,9 +391,39 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
     // Get current midpoint price from the market
     try {
       const market = markets.find(m => m.conditionId === trade.conditionId);
-      if (!market) continue; // Market expired or not found
+      let currentPrice: number;
 
-      const currentPrice = trade.direction === 'up' ? market.upPrice : market.downPrice;
+      if (market) {
+        currentPrice = trade.direction === 'up' ? market.upPrice : market.downPrice;
+      } else {
+        // Market expired or not found in Gamma API — fall back to CLOB midpoint
+        // This is critical for short-timeframe rounds (5m/15m/1h) where the market
+        // disappears from Gamma after the round ends but positions still need TP/SL.
+        if (!trade.tokenId) {
+          logger.warn(`[updown] TP/SL: no tokenId for trade ${trade.id}, cannot fetch midpoint`);
+          continue;
+        }
+        try {
+          const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${trade.tokenId}`, {
+            signal: AbortSignal.timeout(5_000),
+          });
+          if (!midResp.ok) {
+            logger.warn(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id}`);
+            continue;
+          }
+          const midData: any = await midResp.json();
+          const mid = parseFloat(midData?.mid ?? '0');
+          if (isNaN(mid) || mid <= 0) {
+            logger.warn(`[updown] TP/SL: invalid midpoint for trade ${trade.id}: ${midData?.mid}`);
+            continue;
+          }
+          currentPrice = mid;
+          logger.debug(`[updown] TP/SL: using CLOB midpoint fallback for trade ${trade.id}: ${mid}`);
+        } catch (midErr: any) {
+          logger.warn(`[updown] TP/SL: failed to fetch midpoint for trade ${trade.id}: ${midErr?.message}`);
+          continue;
+        }
+      }
 
       // TP check
       let tpTriggered = false;
@@ -455,6 +489,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
 
         if (sellSize === '0') {
           logger.warn(`[updown] TP/SL: invalid sell size for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
+          await redisCache.del(tpSlLockKey); // Release lock so next tick can retry
           continue;
         }
 
@@ -475,6 +510,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
         });
       } catch (err: any) {
         logger.warn(`[updown] TP/SL sell failed for trade ${trade.id}: ${err?.message}`);
+        await redisCache.del(tpSlLockKey); // Release lock so next tick can retry
         continue;
       }
 
@@ -493,6 +529,8 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
       }
     } catch (err: any) {
       logger.warn(`[updown] TP/SL check error for trade ${trade.id}: ${err?.message}`);
+      // Release the lock if it was acquired so the next tick can retry
+      if (tpSlLockKey) await redisCache.del(tpSlLockKey).catch(() => {});
     }
   }
 }
@@ -741,9 +779,55 @@ async function processStrategy(
     sendNotification,
   );
 
-  // On failure, remove the optimistic dedup key so the strategy can retry
+  // On failure: distinguish retryable vs. fatal errors
   if (!result.success) {
-    await redisCache.del(dedupKey);
+    const msg = (result.errorMsg ?? '').toLowerCase();
+    const isFatalForRound =
+      msg.includes('not enough balance') ||
+      msg.includes('insufficient') ||
+      msg.includes('balance too low') ||
+      msg.includes('no proxy address') ||
+      msg.includes('trade amount too small');
+
+    if (isFatalForRound) {
+      // Track consecutive balance failures for this strategy
+      const failCountKey = `updown:balance_fail:${strat.id}`;
+      const prevFails = (await redisCache.get<number>(failCountKey)) ?? 0;
+      const failCount = prevFails + 1;
+      await redisCache.set(failCountKey, failCount, 3600); // 1h TTL
+
+      if (failCount >= 3) {
+        // Auto-pause after 3 consecutive balance failures
+        await prisma.upDownStrategy.update({
+          where: { id: strat.id },
+          data: { isPaused: true },
+        });
+        await redisCache.del(failCountKey);
+        logger.warn(`[updown] Strategy ${strat.id} auto-paused after ${failCount} consecutive balance failures`);
+        if (strat.notificationsEnabled) {
+          sendNotification({
+            chatId: strat.user.telegramId,
+            text:
+              `⏸ <b>Up-Down Strategy Auto-Paused</b>\n\n` +
+              `${coinEmoji(strat.coin)} ${strat.label || strat.coin}\n` +
+              `Reason: Insufficient balance (${failCount} consecutive failures)\n\n` +
+              `Deposit funds and resume the strategy manually.`,
+          });
+        }
+        // Keep dedup key so it doesn't fire again this round
+        return;
+      }
+
+      // Keep dedup key — don't retry this round (prevents 5s spam)
+      logger.warn(`[updown] Strategy ${strat.id} balance failure ${failCount}/3, skipping rest of round`);
+    } else {
+      // Transient error (network, API timeout, etc.) — allow retry
+      await redisCache.del(dedupKey);
+    }
+  } else {
+    // Success — reset failure counter
+    const failCountKey = `updown:balance_fail:${strat.id}`;
+    await redisCache.del(failCountKey);
   }
 
   // Send notification

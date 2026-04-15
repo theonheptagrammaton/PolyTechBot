@@ -6,6 +6,12 @@ import { logger } from '../utils/logger';
 import { decrypt } from '../utils/encryption';
 import { redisCache } from '../database/redis';
 import { config } from '../config';
+import {
+  canCallRelayer,
+  isRateLimitError,
+  setRelayerBackoff,
+  incrementRelayerCount,
+} from '../utils/relayerRateLimit';
 
 // USDC Contract Addresses
 const USDC_ADDRESSES = {
@@ -529,6 +535,12 @@ export async function approveAndDepositWithRelayer(
   encryptedPrivateKey: string,
   amount: string
 ): Promise<string> {
+  // Pre-flight: check if relayer is available before attempting
+  const preflight = await canCallRelayer();
+  if (!preflight.ok) {
+    throw new Error(`Relayer unavailable (${preflight.reason}), retry in ${preflight.waitSec}s`);
+  }
+
   try {
     logger.info(`[Relayer] Approving and depositing ${amount} USDC to Polymarket (gasless)`);
 
@@ -600,9 +612,17 @@ export async function approveAndDepositWithRelayer(
 
     logger.info(`[Relayer] Transactions confirmed!`, result);
 
+    await incrementRelayerCount();
+
     // Return transaction info
     return result?.transactionHash || 'relayer_submitted';
-  } catch (error) {
+  } catch (error: any) {
+    const errMsg = error?.message ?? '';
+    if (isRateLimitError(errMsg)) {
+      await setRelayerBackoff(errMsg);
+      logger.warn(`[Relayer] Rate-limited during deposit: ${errMsg.slice(0, 200)}`);
+      throw new Error('Relayer quota exhausted. Please try again later.');
+    }
     logger.error('[Relayer] Error with gasless deposit:', error);
     throw new Error('Failed to execute gasless deposit');
   }
