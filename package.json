@@ -11,7 +11,8 @@
     "start:worker": "node dist/worker.js",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "setup:builder": "tsx scripts/setup-predexon-builder.ts"
   },
   "keywords": [
     "telegram",

@@ -24,6 +24,8 @@ import {
   handleSearchUser,
   handleSearchUserInput,
   adminSearchUserState,
+  handleBuilderStatus,
+  handleBuilderSetup,
 } from './handlers/admin';
 import {
   handleShowCategories,
@@ -597,6 +599,8 @@ export class TelegramBot {
     this.bot.command('stats', handleStats);
     this.bot.command('users', (ctx) => handleUsers(ctx, 1));
     this.bot.command('reset_me', handleResetMe);
+    this.bot.command('admin_builder_status', handleBuilderStatus);
+    this.bot.command('admin_builder_setup', handleBuilderSetup);
     this.bot.command('referral', handleReferralHub);
     this.bot.command('copy', async (ctx) => {
       // Extract argument after /copy
@@ -840,6 +844,7 @@ export class TelegramBot {
     this.bot.action('admin_reset_me_confirmed', handleResetMeConfirmed);
     this.bot.action('admin_reset_me_cancel', handleResetMeCancel);
     this.bot.action('admin_search_user', handleSearchUser);
+    this.bot.action('admin_builder_setup', handleBuilderSetup);
 
     // Admin user management
     this.bot.action(/^admin_users_page_(\d+)$/, async (ctx) => {

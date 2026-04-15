@@ -4,7 +4,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { ActivePosition } from './portfolio';
 import { redisCache } from '../database/redis';
-import { getPositions, redeemPosition as redeemPositionPredexon } from './predexon';
+import { getPositions, redeemPosition as redeemPositionPredexon, PredexonPosition } from './predexon';
 import { RelayClient, RelayerTxType } from '@polymarket/builder-relayer-client';
 import { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -452,6 +452,31 @@ async function redeemStandard(
   return { success: false, error: isRelayerBackedOff() ? 'Relayer rate-limited' : 'Redemption failed with all collateral token variants' };
 }
 
+function normId(s: string | undefined | null): string {
+  if (!s) return '';
+  const t = s.trim().toLowerCase();
+  return t.startsWith('0x') ? t.slice(2) : t;
+}
+
+function isPredexonClaimable(p: PredexonPosition): boolean {
+  if (p.status === 'redeemable') return true;
+  if (p.status === 'resolved' && p.result === 'won') return true;
+  return false;
+}
+
+function findPredexonRedeemable(
+  position: ActivePosition,
+  candidates: PredexonPosition[],
+): { match?: PredexonPosition; idMatches: PredexonPosition[] } {
+  const assetN = normId(position.asset);
+  const condN = normId(position.conditionId);
+  const idMatches = candidates.filter(
+    p => (p.tokenId && normId(p.tokenId) === assetN) ||
+         (p.marketIdentifier && normId(p.marketIdentifier) === condN),
+  );
+  return { match: idMatches.find(isPredexonClaimable), idMatches };
+}
+
 /**
  * Attempts redemption via Predexon API first (no relayer quota), falls back to Builder Relayer.
  */
@@ -478,12 +503,10 @@ async function redeemSingle(params: {
       logger.info(
         `[redeem] Looking for asset=${params.position.asset} or conditionId=${params.position.conditionId}`
       );
-      const match = predexonPositions.find(
-        p => p.status === 'redeemable' &&
-             (p.tokenId === params.position.asset || p.marketIdentifier === params.position.conditionId)
-      );
+      const { match, idMatches } = findPredexonRedeemable(params.position, predexonPositions);
       if (match?.tokenId) {
-        logger.info(`[redeem] Using Predexon API for tokenId=${match.tokenId} venue=${match.venue} (matched by ${match.tokenId === params.position.asset ? 'tokenId' : 'marketIdentifier'})`);
+        const matchedBy = normId(match.tokenId) === normId(params.position.asset) ? 'tokenId' : 'marketIdentifier';
+        logger.info(`[redeem] Using Predexon API for tokenId=${match.tokenId} venue=${match.venue} status=${match.status} result=${match.result ?? '-'} (matched by ${matchedBy})`);
         const result = await redeemPositionPredexon(params.predexonUserId, match.tokenId, match.venue || 'polymarket');
         logger.info(`[redeem] Predexon redeem response: ${JSON.stringify(result).slice(0, 400)}`);
 
@@ -506,8 +529,11 @@ async function redeemSingle(params: {
         } else {
           logger.warn(`[redeem] Predexon redeem returned status=${result.status} with no transactionHash`);
         }
+      } else if (idMatches.length > 0) {
+        const statuses = idMatches.map(p => `${p.status}${p.result ? '/' + p.result : ''}`).join(',');
+        logger.info(`[redeem] Predexon has position by id but not claimable (statuses=${statuses}), falling back to relayer`);
       } else {
-        logger.info(`[redeem] No matching redeemable position found in Predexon (checked ${predexonPositions.length} positions), falling back to relayer`);
+        logger.info(`[redeem] No Predexon position matches asset=${params.position.asset.slice(0,20)}... or conditionId=${params.position.conditionId.slice(0,18)}... (scanned ${predexonPositions.length}), falling back to relayer`);
       }
     } catch (err: any) {
       logger.warn(`[redeem] Predexon redeem failed, falling back to relayer: ${err?.message}`);

@@ -319,6 +319,46 @@ export async function redeemPosition(
   );
 }
 
+// ── Builder Configuration ──────────────────────────────────────────────────
+
+export interface PredexonBuilderCreds {
+  key: string;
+  secret: string;
+  passphrase: string;
+}
+
+export interface PredexonBuilderStatus {
+  venue: string;
+  configured: boolean;
+}
+
+export async function configurePredexonBuilder(
+  venue: 'polymarket' | 'predict',
+  creds: PredexonBuilderCreds,
+): Promise<PredexonBuilderStatus> {
+  return predexonFetch<PredexonBuilderStatus>(`${TRADE_URL()}/api/builder`, {
+    method: 'POST',
+    body: JSON.stringify({ venue, ...creds }),
+  });
+}
+
+export async function getPredexonBuilderStatus(
+  venue: 'polymarket' | 'predict',
+): Promise<PredexonBuilderStatus> {
+  return predexonFetch<PredexonBuilderStatus>(
+    `${TRADE_URL()}/api/builder?venue=${encodeURIComponent(venue)}`,
+  );
+}
+
+export async function removePredexonBuilder(
+  venue: 'polymarket' | 'predict',
+): Promise<PredexonBuilderStatus> {
+  return predexonFetch<PredexonBuilderStatus>(
+    `${TRADE_URL()}/api/builder?venue=${encodeURIComponent(venue)}`,
+    { method: 'DELETE' },
+  );
+}
+
 // ── Data API (Market Discovery) ────────────────────────────────────────────
 
 export async function listMarkets(params?: {

@@ -8,6 +8,11 @@ import { ce, EMOJI } from '../../utils/customEmoji';
 import { prisma } from '../../database/prisma';
 import { RedisBackedState } from '../../utils/redisState';
 import { REFERRAL_TIER1_PCT } from '../../services/referral';
+import { config } from '../../config';
+import {
+  configurePredexonBuilder,
+  getPredexonBuilderStatus,
+} from '../../services/predexon';
 
 // State for admin editing a user's referral rate — stores target userId, TTL 5 min
 export const adminRefRateState = new RedisBackedState<{ targetUserId: string; timestamp: number }>('adminRefRate', 300);
@@ -808,5 +813,87 @@ export async function handleResetRefRate(ctx: Context, userId: string): Promise<
   } catch (error) {
     logger.error('Error in handleResetRefRate:', error);
     await ctx.reply('❌ An error occurred.');
+  }
+}
+
+async function ensureAdminContext(ctx: Context): Promise<boolean> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) {
+    await ctx.reply('❌ Could not identify your Telegram account.');
+    return false;
+  }
+  const user = await getUserByTelegramId(telegramId);
+  if (!user || !isUserAdmin(user)) {
+    await ctx.reply('❌ This command is only available to administrators.');
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Shows whether the bot's Polymarket builder credentials are registered with Predexon.
+ */
+export async function handleBuilderStatus(ctx: Context): Promise<void> {
+  try {
+    if (!(await ensureAdminContext(ctx))) return;
+
+    const status = await getPredexonBuilderStatus('polymarket');
+    const stateLine = status.configured
+      ? '✅ <b>Configured</b> — Predexon signs orders with our builder identity.'
+      : '⚠️ <b>Not configured</b> — Predexon is using its default builder. Run /admin_builder_setup to register.';
+
+    await sendPage(ctx,
+      `🔧 <b>Predexon Builder Status</b>\n\n` +
+      `Venue: <code>${status.venue}</code>\n` +
+      `${stateLine}`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔁 Re-configure', 'admin_builder_setup')],
+        ]),
+      }
+    );
+  } catch (error: any) {
+    logger.error('Error in handleBuilderStatus:', error);
+    await ctx.reply(`❌ Failed to fetch builder status: ${error.message ?? error}`);
+  }
+}
+
+/**
+ * POSTs the bot's Polymarket builder credentials to Predexon.
+ * Reads from POLY_BUILDER_* env vars; reports the GET-verified result.
+ */
+export async function handleBuilderSetup(ctx: Context): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+    if (!(await ensureAdminContext(ctx))) return;
+
+    const { apiKey, secret, passphrase } = config.polymarket.builder;
+    if (!apiKey || !secret || !passphrase) {
+      await sendPage(ctx,
+        '❌ <b>Missing builder credentials</b>\n\n' +
+        'POLY_BUILDER_API_KEY, POLY_BUILDER_SECRET, and POLY_BUILDER_PASSPHRASE must be set in .env.',
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    await configurePredexonBuilder('polymarket', { key: apiKey, secret, passphrase });
+    const verified = await getPredexonBuilderStatus('polymarket');
+
+    const adminTid = ctx.from?.id.toString();
+    logger.info(`[admin] ${adminTid} configured Predexon builder for polymarket. Configured=${verified.configured}`);
+
+    await sendPage(ctx,
+      `🔧 <b>Predexon Builder Setup</b>\n\n` +
+      `Venue: <code>${verified.venue}</code>\n` +
+      (verified.configured
+        ? '✅ Successfully registered. Future user orders carry our builder identity.'
+        : '⚠️ POST succeeded but verify returned configured=false. Check Predexon side.'),
+      { parse_mode: 'HTML' }
+    );
+  } catch (error: any) {
+    logger.error('Error in handleBuilderSetup:', error);
+    await ctx.reply(`❌ Failed to configure builder: ${error.message ?? error}`);
   }
 }
