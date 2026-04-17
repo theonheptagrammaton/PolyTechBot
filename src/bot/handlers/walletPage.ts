@@ -597,6 +597,12 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
 
     const closedPositions = await getClosedPositions(user.polymarketProxyAddress || '');
 
+    // Sync closedPositionListCache so PNL actions can look up by index
+    {
+      const { closedPositionListCache } = await import('./positionTrade');
+      closedPositionListCache.set(telegramId, closedPositions);
+    }
+
     if (closedPositions.length === 0) {
       await sendPage(ctx,
         `📜 *${t(lang, 'Closed Positions')}*\n\n` +
@@ -661,6 +667,13 @@ export async function handleClosedPositions(ctx: Context, page: number = 1): Pro
 
     // Build buttons
     const buttons: any[] = [];
+
+    // Per-position PNL buttons
+    pagePositions.forEach((_pos: ClosedPosition, index) => {
+      const globalIdx = startIndex + index;
+      const number = globalIdx + 1;
+      buttons.push([Markup.button.callback(`📊 #${number} P&L`, `cp_pnl_${globalIdx}`)]);
+    });
 
     const navRow: any[] = [];
     if (currentPage > 1) {

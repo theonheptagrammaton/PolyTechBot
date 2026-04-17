@@ -78,6 +78,9 @@ model User {
   updownStrategies UpDownStrategy[]
   updownTrades     UpDownTrade[]
 
+  // Backtest results
+  backtestResults  BacktestResult[]
+
   isAdmin          Boolean  @default(false)
   isActive         Boolean  @default(true)
 
@@ -340,4 +343,35 @@ model UpDownTrade {
   @@index([userId, createdAt])
   @@index([strategyId])
   @@map("updown_trades")
+}
+
+model BacktestResult {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  strategyType   String   // 'bond' | 'copy' | 'updown'
+  strategyId     String   // ID of the strategy that was tested
+  strategyLabel  String   // snapshot of strategy name at test time
+
+  lookbackDays   Int
+  periodStart    DateTime
+  periodEnd      DateTime
+
+  totalTrades    Int
+  wins           Int
+  losses         Int
+  winRate        Float    // 0–100
+  totalPnl       Float    // USD
+  roi            Float    // percentage
+  avgProfit      Float    // USD per trade
+  maxDrawdown    Float    // USD
+
+  tradesJson     String?  // JSON array of individual simulated trades
+
+  createdAt      DateTime @default(now())
+
+  @@index([userId])
+  @@index([strategyId])
+  @@map("backtest_results")
 }

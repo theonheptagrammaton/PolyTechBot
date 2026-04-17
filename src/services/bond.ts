@@ -4,7 +4,7 @@ import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { transferCommission, COMMISSION_RATE } from './commission';
-import { placeOrder as predexonPlaceOrder } from './predexon';
+import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder } from './predexon';
 import { ensurePredexonUser } from './user';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
@@ -408,6 +408,37 @@ export async function executeBondOrder(
       return { success: false, errorMsg: errMsg };
     }
 
+    // For limit orders, poll for fill status (up to 5 attempts, 2s apart) since
+    // they may not fill immediately even though we set price above market.
+    let actualFillPrice = price;
+    let tradeStatus: 'filled' | 'open' = 'filled';
+
+    if (useLimit) {
+      let filled = false;
+      for (let i = 0; i < 5; i++) {
+        try {
+          const orderStatus = await predexonGetOrder(predexonUserId, orderResp.orderId);
+          if (orderStatus.status === 'filled') {
+            const rawP = parseFloat(orderStatus.price ?? '0');
+            if (!isNaN(rawP) && rawP > 0) actualFillPrice = rawP;
+            filled = true;
+            break;
+          }
+          if (orderStatus.status === 'cancelled' || orderStatus.status === 'expired') {
+            return { success: false, errorMsg: `limit order ${orderStatus.status}` };
+          }
+        } catch (err: any) {
+          logger.debug(`[bond] Fill poll attempt ${i + 1}/5 for ${orderResp.orderId}: ${err?.message}`);
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+      if (!filled) {
+        // Order is still open — record as open, it may fill later
+        tradeStatus = 'open';
+        logger.info(`[bond] Limit order ${orderResp.orderId} not yet filled after 10s, recording as open`);
+      }
+    }
+
     // Record trade in DB
     await prisma.bondTrade.create({
       data: {
@@ -419,9 +450,9 @@ export async function executeBondOrder(
         outcome,
         probability: price,
         amount: tradeAmount,
-        price,
+        price: actualFillPrice,
         orderId: orderResp.orderId,
-        status: 'filled',
+        status: tradeStatus,
       },
     });
 
@@ -429,8 +460,8 @@ export async function executeBondOrder(
     const dedupKey = `bond:dedup:${strategy.id}:${market.conditionId}`;
     await redisCache.set(dedupKey, 1, 86_400); // 24h
 
-    // Commission (fire-and-forget)
-    if (config.commission?.adminWalletAddress) {
+    // Commission (fire-and-forget) — only charge on filled orders
+    if (tradeStatus === 'filled' && config.commission?.adminWalletAddress) {
       transferCommission(
         user.encryptedPrivateKey,
         user.polymarketProxyAddress,
@@ -445,7 +476,7 @@ export async function executeBondOrder(
     return {
       success: true,
       orderId: orderResp.orderId,
-      filledPrice: price,
+      filledPrice: actualFillPrice,
       actualAmount: tradeAmount,
     };
   } catch (err: any) {

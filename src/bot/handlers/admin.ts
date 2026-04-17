@@ -20,6 +20,9 @@ export const adminRefRateState = new RedisBackedState<{ targetUserId: string; ti
 // State for admin searching users — TTL 5 min
 export const adminSearchUserState = new RedisBackedState<{ timestamp: number }>('adminSearchUser', 300);
 
+// State for admin broadcast — waiting for message (text or photo with caption), TTL 10 min
+export const adminBroadcastState = new RedisBackedState<{ timestamp: number }>('adminBroadcast', 600);
+
 export async function handleStats(ctx: Context): Promise<void> {
   try {
     const telegramId = ctx.from?.id.toString();
@@ -815,6 +818,174 @@ export async function handleResetRefRate(ctx: Context, userId: string): Promise<
     await ctx.reply('❌ An error occurred.');
   }
 }
+
+// ─── Broadcast ──────────────────────────────────────────────────────────────
+
+/**
+ * /broadcast — Starts the broadcast flow. Admin sends text or photo+caption next.
+ */
+export async function handleBroadcast(ctx: Context): Promise<void> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) {
+      await ctx.reply('❌ Could not identify your Telegram account.');
+      return;
+    }
+
+    const user = await getUserByTelegramId(telegramId);
+    if (!user || !isUserAdmin(user)) {
+      await ctx.reply('❌ This command is only available to administrators.');
+      return;
+    }
+
+    await adminBroadcastState.set(telegramId, { timestamp: Date.now() });
+
+    await sendPage(ctx,
+      `📢 <b>Broadcast Message</b>\n\n` +
+      `Send the message you want to broadcast to all users.\n\n` +
+      `<b>Options:</b>\n` +
+      `• Send a <b>text message</b> — will be delivered as text\n` +
+      `• Send a <b>photo with caption</b> — will be delivered as photo\n\n` +
+      `<i>HTML formatting is supported (bold, italic, links, etc.)</i>`,
+      {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Cancel', 'admin_broadcast_cancel')],
+        ]),
+      }
+    );
+  } catch (error) {
+    logger.error('Error in handleBroadcast:', error);
+    await ctx.reply('❌ An error occurred.');
+  }
+}
+
+/**
+ * Handles the cancel broadcast button
+ */
+export async function handleBroadcastCancel(ctx: Context): Promise<void> {
+  try {
+    await ctx.answerCbQuery('Broadcast cancelled');
+    const telegramId = ctx.from?.id.toString();
+    if (telegramId) await adminBroadcastState.delete(telegramId);
+    await sendPage(ctx, '❌ Broadcast cancelled.', { parse_mode: 'HTML' });
+  } catch (error) {
+    logger.error('Error in handleBroadcastCancel:', error);
+  }
+}
+
+/**
+ * Handles text input during broadcast flow
+ */
+export async function handleBroadcastTextInput(ctx: Context, text: string): Promise<void> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    await adminBroadcastState.delete(telegramId);
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    const users = await getAllUsers();
+    const total = users.length;
+
+    const statusMsg = await ctx.reply(`📢 Broadcasting text message to ${total} users...`);
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const u of users) {
+      try {
+        await ctx.telegram.sendMessage(u.telegramId, text, { parse_mode: 'HTML' });
+        sent++;
+      } catch {
+        failed++;
+      }
+      // Telegram rate limit: ~30 msg/sec, stay safe
+      if ((sent + failed) % 25 === 0) await new Promise(r => setTimeout(r, 1000));
+    }
+
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat!.id, statusMsg.message_id);
+    } catch { /* ignore */ }
+
+    await sendPage(ctx,
+      `✅ <b>Broadcast Complete</b>\n\n` +
+      `📨 Sent: <b>${sent}</b>\n` +
+      `❌ Failed: <b>${failed}</b>\n` +
+      `👥 Total: <b>${total}</b>`,
+      { parse_mode: 'HTML' }
+    );
+
+    logger.info(`[broadcast] Admin ${telegramId} sent text broadcast: ${sent}/${total} delivered`);
+  } catch (error) {
+    logger.error('Error in handleBroadcastTextInput:', error);
+    await ctx.reply('❌ An error occurred during broadcast.');
+  }
+}
+
+/**
+ * Handles photo input during broadcast flow (photo + optional caption)
+ */
+export async function handleBroadcastPhotoInput(ctx: Context): Promise<void> {
+  try {
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    await adminBroadcastState.delete(telegramId);
+
+    const admin = await getUserByTelegramId(telegramId);
+    if (!admin || !isUserAdmin(admin)) return;
+
+    const msg = ctx.message;
+    if (!msg || !('photo' in msg) || !msg.photo?.length) return;
+
+    // Get highest resolution photo
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    const caption = ('caption' in msg && msg.caption) ? msg.caption : undefined;
+
+    const users = await getAllUsers();
+    const total = users.length;
+
+    const statusMsg = await ctx.reply(`📢 Broadcasting photo to ${total} users...`);
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const u of users) {
+      try {
+        await ctx.telegram.sendPhoto(u.telegramId, fileId, {
+          caption: caption || undefined,
+          parse_mode: 'HTML',
+        });
+        sent++;
+      } catch {
+        failed++;
+      }
+      if ((sent + failed) % 25 === 0) await new Promise(r => setTimeout(r, 1000));
+    }
+
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat!.id, statusMsg.message_id);
+    } catch { /* ignore */ }
+
+    await sendPage(ctx,
+      `✅ <b>Broadcast Complete</b>\n\n` +
+      `📨 Sent: <b>${sent}</b>\n` +
+      `❌ Failed: <b>${failed}</b>\n` +
+      `👥 Total: <b>${total}</b>`,
+      { parse_mode: 'HTML' }
+    );
+
+    logger.info(`[broadcast] Admin ${telegramId} sent photo broadcast: ${sent}/${total} delivered`);
+  } catch (error) {
+    logger.error('Error in handleBroadcastPhotoInput:', error);
+    await ctx.reply('❌ An error occurred during broadcast.');
+  }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 async function ensureAdminContext(ctx: Context): Promise<boolean> {
   const telegramId = ctx.from?.id.toString();

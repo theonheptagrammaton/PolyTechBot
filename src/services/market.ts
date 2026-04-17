@@ -448,6 +448,95 @@ export async function getTopEvents(limit: number = 50): Promise<Event[]> {
 }
 
 /**
+ * Gets breaking/hot events — recently created events with high volume surge.
+ * These are new events that are rapidly gaining traction.
+ */
+export async function getBreakingEvents(limit: number = 30): Promise<Event[]> {
+  try {
+    const cacheKey = `markets:breaking:${limit}`;
+    const cached = await redisCache.get<Event[]>(cacheKey);
+    if (cached) {
+      logger.debug(`Returning ${cached.length} cached breaking events`);
+      return cached;
+    }
+
+    logger.info(`Fetching ${limit} breaking events from Gamma API...`);
+
+    // Fetch recent events sorted by 24h volume — "breaking" = new + high activity
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const response = await axios.get(`${GAMMA_API_BASE}/events`, {
+      params: {
+        active: true,
+        closed: false,
+        end_date_min: new Date().toISOString(),
+        start_date_min: sevenDaysAgo,
+        order: 'volume24hr',
+        ascending: false,
+        limit: Math.min(limit + 15, 80),
+      },
+      timeout: 15000,
+    });
+
+    const events: Event[] = Array.isArray(response.data) ? response.data : [];
+    const result = filterAndSortEvents(events).slice(0, limit);
+    await redisCache.set(cacheKey, result, CACHE_TTL);
+
+    logger.info(`Fetched ${result.length} breaking events`);
+    return result;
+  } catch (error) {
+    logger.error('Error fetching breaking events:', error);
+    return getTopEvents(limit);
+  }
+}
+
+/**
+ * Gets newest events — most recently created events.
+ */
+export async function getNewestEvents(limit: number = 30): Promise<Event[]> {
+  try {
+    const cacheKey = `markets:newest:${limit}`;
+    const cached = await redisCache.get<Event[]>(cacheKey);
+    if (cached) {
+      logger.debug(`Returning ${cached.length} cached newest events`);
+      return cached;
+    }
+
+    logger.info(`Fetching ${limit} newest events from Gamma API...`);
+
+    const response = await axios.get(`${GAMMA_API_BASE}/events`, {
+      params: {
+        active: true,
+        closed: false,
+        end_date_min: new Date().toISOString(),
+        order: 'startDate',
+        ascending: false,
+        limit: Math.min(limit + 15, 80),
+      },
+      timeout: 15000,
+    });
+
+    const events: Event[] = Array.isArray(response.data) ? response.data : [];
+    // For newest: keep the date sort instead of re-sorting by volume
+    const now = Date.now();
+    const filtered = events
+      .filter(e => {
+        if (!Array.isArray(e.markets) || e.markets.length === 0) return false;
+        const endMs = (e as any).endDate ? new Date((e as any).endDate).getTime() : 0;
+        if (endMs > 0 && endMs < now) return false;
+        return true;
+      })
+      .slice(0, limit);
+
+    await redisCache.set(cacheKey, filtered, CACHE_TTL);
+    logger.info(`Fetched ${filtered.length} newest events`);
+    return filtered;
+  } catch (error) {
+    logger.error('Error fetching newest events:', error);
+    return getTopEvents(limit);
+  }
+}
+
+/**
  * Shared helper: filters out non-tradeable markets and sorts events by 24h volume.
  */
 function filterAndSortEvents(events: Event[]): Event[] {

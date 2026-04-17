@@ -1247,7 +1247,12 @@ async function checkTpSlPositions(
     if (currentPriceStr == null) continue;
 
     const currentPrice = parseFloat(currentPriceStr);
-    if (isNaN(currentPrice) || pos.price <= 0) continue;
+    if (isNaN(currentPrice) || currentPrice <= 0) continue;
+
+    // Prevent race condition: if another tick is already processing this position's TP/SL, skip it
+    const tpSlLockKey = `copy:tpsl_lock:${pos.id}`;
+    const alreadyProcessing = await redisCache.get<number>(tpSlLockKey);
+    if (alreadyProcessing) continue;
 
     // TP price: percentage-based (relative to entry) or fixed (absolute in 0–1 decimal)
     const tpPrice = sub.takeProfitPct != null
@@ -1273,6 +1278,9 @@ async function checkTpSlPositions(
 
     if (!triggerType) continue;
 
+    // Claim lock to prevent double-processing (60s TTL as safety net)
+    await redisCache.set(tpSlLockKey, 1, 60);
+
     logger.info(
       `[copy] ${triggerType} for user ${user.id} on asset ${pos.assetId} ` +
       `entry=${pos.price.toFixed(4)} current=${currentPrice.toFixed(4)}`
@@ -1291,7 +1299,14 @@ async function checkTpSlPositions(
       timestamp: Date.now(),
     };
 
-    const result = await executeCopyOrder(user, syntheticTrade, pos.copiedSize, sub.slippage);
+    let result;
+    try {
+      result = await executeCopyOrder(user, syntheticTrade, pos.copiedSize, sub.slippage);
+    } catch (err: any) {
+      logger.warn(`[copy] TP/SL sell failed for position ${pos.id}: ${err?.message}`);
+      await redisCache.del(tpSlLockKey); // Release lock so next tick can retry
+      continue;
+    }
 
     // Mark as TP/SL exited only when order was placed or skipped (not on hard failure,
     // so the next tick can retry). 'skipped' means user has no position to sell —
@@ -1301,6 +1316,9 @@ async function checkTpSlPositions(
         where: { id: pos.id },
         data: { tpSlStatus: triggerType },
       });
+    } else {
+      // Release lock on failure so next tick can retry
+      await redisCache.del(tpSlLockKey);
     }
 
     // Send notification

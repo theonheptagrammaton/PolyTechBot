@@ -26,6 +26,11 @@ import {
   adminSearchUserState,
   handleBuilderStatus,
   handleBuilderSetup,
+  handleBroadcast,
+  handleBroadcastCancel,
+  handleBroadcastTextInput,
+  handleBroadcastPhotoInput,
+  adminBroadcastState,
 } from './handlers/admin';
 import {
   handleShowCategories,
@@ -128,6 +133,8 @@ import {
   handlePositionExecuteStopLoss,
   handlePositionPnl,
   handlePositionPnlShare,
+  handleClosedPositionPnl,
+  handleClosedPositionPnlShare,
   handlePositionRedeem,
   positionTradeState,
 } from './handlers/positionTrade';
@@ -151,6 +158,35 @@ import {
   handleCashbackClaim,
 } from './handlers/cashback';
 import { handleAutoStrategies } from './handlers/autoStrategies';
+import {
+  handleBacktestCommand,
+  handleBacktestMenu,
+  handleBacktestBond,
+  handleBacktestCopy,
+  handleBacktestUpDown,
+  handleBacktestSelectStrategy,
+  handleBacktestPeriod,
+  handleBacktestHistory,
+  handleBacktestViewByShortId,
+  backtestState,
+} from './handlers/backtest';
+import {
+  handleAnalyzeMenu,
+  handleAnalyzeMarketPrompt,
+  handleAnalyzeMarketDetail,
+  handleAnalyzeMarketVolume,
+  handleAnalyzeMarketSmart,
+  handleAnalyzeMarketHolders,
+  handleAnalyzeWalletPrompt,
+  handleAnalyzeWalletDetail,
+  handleAnalyzeWalletPnl,
+  handleAnalyzeWalletMarkets,
+  handleAnalyzeWalletSimilar,
+  handleAnalyzeWalletCopy,
+  handleAnalyzeSmartScan,
+  handleAnalyzeInput,
+  analyzeState,
+} from './handlers/analyze';
 import {
   handleNothingEverHappensCommand,
   handleNehPickAnother,
@@ -516,14 +552,14 @@ export class TelegramBot {
     });
 
     // /analyze <polymarket-link-or-keyword> — group-friendly deep-dive entry
-    // point. Works in DMs too (delegates to the same link/keyword handlers).
+    // point. Works in DMs too. No arg → show analyze menu.
     this.bot.command('analyze', async (ctx) => {
       const text = 'message' in ctx.update && 'text' in ctx.update.message
         ? ctx.update.message.text as string : '';
       const arg = text.replace(/^\/analyze(?:@\w+)?\s*/i, '').trim();
       if (isGroupChat(ctx)) { await handleGroupAnalyze(ctx, arg); return; }
       if (!arg) {
-        await ctx.reply('Usage: `/analyze <polymarket-link-or-keyword>`', { parse_mode: 'Markdown' });
+        await handleAnalyzeMenu(ctx);
         return;
       }
       const slug = detectPolymarketLink(arg);
@@ -601,6 +637,7 @@ export class TelegramBot {
     this.bot.command('reset_me', handleResetMe);
     this.bot.command('admin_builder_status', handleBuilderStatus);
     this.bot.command('admin_builder_setup', handleBuilderSetup);
+    this.bot.command('broadcast', handleBroadcast);
     this.bot.command('referral', handleReferralHub);
     this.bot.command('copy', async (ctx) => {
       // Extract argument after /copy
@@ -616,6 +653,9 @@ export class TelegramBot {
 
     // Up-Down auto trade command
     this.bot.command('afk', handleUpDownCommand);
+
+    // Backtest command
+    this.bot.command('backtest', handleBacktestCommand);
 
     // Nothing Ever Happens — randomly surface a non-sports "NO" bet
     this.bot.command('nothingeverhappens', handleNothingEverHappensCommand);
@@ -782,6 +822,14 @@ export class TelegramBot {
       await handlePositionPnlShare(ctx, parseInt(ctx.match[1], 10));
     });
 
+    // Closed position PNL
+    this.bot.action(/^cp_pnl_(\d+)$/, async (ctx) => {
+      await handleClosedPositionPnl(ctx, parseInt(ctx.match[1], 10));
+    });
+    this.bot.action(/^cp_pnl_share_(\d+)$/, async (ctx) => {
+      await handleClosedPositionPnlShare(ctx, parseInt(ctx.match[1], 10));
+    });
+
     // Execute / cancel
     this.bot.action('pos_execute_sell', handlePositionExecuteSell);
     this.bot.action('pos_execute_buy', handlePositionExecuteBuy);
@@ -845,6 +893,7 @@ export class TelegramBot {
     this.bot.action('admin_reset_me_cancel', handleResetMeCancel);
     this.bot.action('admin_search_user', handleSearchUser);
     this.bot.action('admin_builder_setup', handleBuilderSetup);
+    this.bot.action('admin_broadcast_cancel', handleBroadcastCancel);
 
     // Admin user management
     this.bot.action(/^admin_users_page_(\d+)$/, async (ctx) => {
@@ -1125,6 +1174,39 @@ export class TelegramBot {
 
     // ── Auto Strategies / Bond Trading ─────────────────────────────────────
     this.bot.action('auto_strategies', handleAutoStrategies);
+
+    // ── Backtest ──────────────────────────────────────────────────────────
+    this.bot.action('bt_menu', handleBacktestMenu);
+    this.bot.action('bt_bond', handleBacktestBond);
+    this.bot.action('bt_copy', handleBacktestCopy);
+    this.bot.action('bt_updown', handleBacktestUpDown);
+    this.bot.action(/^btb_sel_(.+)$/, (ctx) => handleBacktestSelectStrategy(ctx, 'bond', ctx.match[1]));
+    this.bot.action(/^btc_sel_(.+)$/, (ctx) => handleBacktestSelectStrategy(ctx, 'copy', ctx.match[1]));
+    this.bot.action(/^btu_sel_(.+)$/, (ctx) => handleBacktestSelectStrategy(ctx, 'updown', ctx.match[1]));
+    this.bot.action('bt_p_7', (ctx) => handleBacktestPeriod(ctx, 7));
+    this.bot.action('bt_p_14', (ctx) => handleBacktestPeriod(ctx, 14));
+    this.bot.action('bt_p_30', (ctx) => handleBacktestPeriod(ctx, 30));
+    this.bot.action('bt_hist', (ctx) => handleBacktestHistory(ctx, 1));
+    this.bot.action(/^bt_hist_(\d+)$/, (ctx) => handleBacktestHistory(ctx, parseInt(ctx.match[1])));
+    this.bot.action(/^bt_view_(.+)$/, (ctx) => handleBacktestViewByShortId(ctx, ctx.match[1]));
+
+    // ── Analyze ───────────────────────────────────────────────────────────
+    this.bot.action('az_menu', handleAnalyzeMenu);
+    this.bot.action('az_market', handleAnalyzeMarketPrompt);
+    this.bot.action('az_wallet', handleAnalyzeWalletPrompt);
+    this.bot.action('az_smart', (ctx) => handleAnalyzeSmartScan(ctx, 1));
+    this.bot.action('azm_detail', handleAnalyzeMarketDetail);
+    this.bot.action('azm_vol', handleAnalyzeMarketVolume);
+    this.bot.action('azm_smart', handleAnalyzeMarketSmart);
+    this.bot.action('azm_hold_y', (ctx) => handleAnalyzeMarketHolders(ctx, 'yes'));
+    this.bot.action('azm_hold_n', (ctx) => handleAnalyzeMarketHolders(ctx, 'no'));
+    this.bot.action('azw_detail', handleAnalyzeWalletDetail);
+    this.bot.action('azw_pnl', handleAnalyzeWalletPnl);
+    this.bot.action('azw_mkts', handleAnalyzeWalletMarkets);
+    this.bot.action('azw_sim', handleAnalyzeWalletSimilar);
+    this.bot.action('azw_copy', handleAnalyzeWalletCopy);
+    this.bot.action(/^azs_p_(\d+)$/, (ctx) => handleAnalyzeSmartScan(ctx, parseInt(ctx.match[1])));
+
     this.bot.action('bond_list', handleBondList);
     this.bot.action('bond_start_add', handleBondStartAdd);
     this.bot.action('bond_start_all', handleBondStartAll);
@@ -1522,6 +1604,13 @@ export class TelegramBot {
         if (consumed) return;
       }
 
+      // Check if user is in an analyze flow (market search or wallet address)
+      const azState = await analyzeState.get(telegramId);
+      if (azState) {
+        const consumed = await handleAnalyzeInput(ctx, text);
+        if (consumed) return;
+      }
+
       // Check if user is in a copy-add flow (entering address or amount)
       // Copy trade flows checked BEFORE withdraw — withdraw deletes user messages,
       // and a stale withdraw state must never intercept copy trade text input.
@@ -1559,6 +1648,13 @@ export class TelegramBot {
       const slippageStateData = await settingsSlippageState.get(telegramId);
       if (slippageStateData) {
         await handleCustomSlippageInput(ctx, text);
+        return;
+      }
+
+      // Check if admin is in broadcast flow (text message)
+      const broadcastData = await adminBroadcastState.get(telegramId);
+      if (broadcastData) {
+        await handleBroadcastTextInput(ctx, text);
         return;
       }
 
@@ -1640,6 +1736,18 @@ export class TelegramBot {
           'Use /help to see available commands.',
           { parse_mode: 'Markdown' }
         );
+      }
+    });
+
+    // ── Photo handler (broadcast flow) ──────────────────────────────────
+    this.bot.on('photo', async (ctx: Context) => {
+      const telegramId = ctx.from?.id.toString();
+      if (!telegramId) return;
+
+      const broadcastData = await adminBroadcastState.get(telegramId);
+      if (broadcastData) {
+        await handleBroadcastPhotoInput(ctx);
+        return;
       }
     });
 

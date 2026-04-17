@@ -4,6 +4,8 @@ import { Markup } from 'telegraf';
 import {
   getTrendingEvents,
   getTopEvents,
+  getBreakingEvents,
+  getNewestEvents,
   getEventsByCategory,
   getLiveSportsEvents,
   formatVolume,
@@ -41,6 +43,8 @@ export const IMG_COPYTRADE = path.join(__dirname, '../img/copytrade.jpg');
 
 const CATEGORY_IMAGE: Record<string, string> = {
   'trending':    IMG_TRENDS,
+  'breaking':    IMG_TRENDS,
+  'newest':      IMG_ALLMARKETS,
   'politics':    IMG_POLITICS,
   'crypto':      IMG_CRYPTO,
   'sports':      IMG_SPORTS,
@@ -91,6 +95,8 @@ async function fetchOgImage(pageUrl: string): Promise<string | null> {
 const EVENTS_PER_PAGE = 3;
 
 const CATEGORY_META: Record<string, { name: string; emoji: string }> = {
+  'breaking':    { name: 'Breaking',    emoji: '🚨' },
+  'newest':      { name: 'Newest',      emoji: '🆕' },
   'trending':    { name: 'Trending',    emoji: '🌎' },
   'politics':    { name: 'Politics',    emoji: '🇺🇸' },
   'crypto':      { name: 'Crypto',      emoji: '🔥' },
@@ -194,8 +200,10 @@ function buildEventCard(event: Event, pageIdx: number, category: string): string
   );
 }
 
-/** Fetch events for a given category string (handles 'trending' and 'all'). */
+/** Fetch events for a given category string (handles special categories). */
 async function fetchCategoryEvents(category: string): Promise<Event[]> {
+  if (category === 'breaking') return getBreakingEvents(30);
+  if (category === 'newest')   return getNewestEvents(30);
   if (category === 'trending') return getTrendingEvents(30);
   if (category === 'all')      return getTopEvents(30);
   return getEventsByCategory(category, 30);
@@ -229,6 +237,10 @@ export async function handleShowCategories(ctx: Context): Promise<void> {
         parse_mode: 'HTML',
         image_path: IMG_ALLMARKETS,
         ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback(t(lang, 'btn.breaking'),   'category_breaking'),
+            Markup.button.callback(t(lang, 'btn.newest'),     'category_newest'),
+          ],
           [Markup.button.callback(t(lang, 'btn.trending'),    'category_trending')],
           [
             Markup.button.callback(t(lang, 'btn.politics'), 'category_politics'),
@@ -318,14 +330,17 @@ export async function handleCategorySelection(ctx: Context, category: string, pa
 
     let buttons: any[];
     if (inGroup) {
-      // Group chat: no pagination/refresh/back-to-menu callbacks — other group
-      // members clicking them would trigger private-chat navigation they don't
-      // own. Offer per-event Open-in-DM deep-links + a single group DM link.
       const eventRow = pageEvents.map((e, idx) =>
         Markup.button.url(`${idx + 1}️⃣`, `https://t.me/${botUsername}?start=event_${e.id}`)
       );
+      // Pagination row for groups (stateless — encoded in callback data)
+      const navRow: any[] = [];
+      if (currentPage > 1) navRow.push(Markup.button.callback('◀️', `page_${category}_${currentPage - 1}`));
+      navRow.push(Markup.button.callback(`· ${currentPage} / ${totalPages} ·`, 'noop'));
+      if (currentPage < totalPages) navRow.push(Markup.button.callback('▶️', `page_${category}_${currentPage + 1}`));
       buttons = [
         eventRow,
+        navRow,
         [Markup.button.url(t(lang, 'group.cta.openDm'), dmDeepLinkUrlSync(botUsername))],
       ];
     } else {
@@ -558,10 +573,7 @@ export async function handleEventDetails(
     const inGroup = isGroupChat(ctx);
 
     // Row 1 — Navigation between markets within a multi-market event.
-    // In groups we skip this (callback navigation would fire for anyone
-    // clicking) and instead offer a single "Open in DM" deep-link so the
-    // original caller can browse the full event in private.
-    if (totalMarkets > 1 && !inGroup) {
+    if (totalMarkets > 1) {
       const navRow: any[] = [];
       if (currentPage > 1)
         navRow.push(Markup.button.callback('⬅️', `evd_mkt_${event.id}_${currentPage - 1}${backSuffix}`));
@@ -695,6 +707,7 @@ export function mainMenuKeyboard(lang: Locale = 'en') {
     ],
     [
       Markup.button.callback(t(lang, 'btn.refresh'), 'back_to_menu'),
+      Markup.button.url('❓ Help', 'https://t.me/tradepolytech'),
     ],
   ]);
 }

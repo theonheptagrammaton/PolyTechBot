@@ -2,7 +2,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { config } from '../../config';
-import { getActivePositions, getBalance, ActivePosition, fetchTxHashForOrder } from '../../services/portfolio';
+import { getActivePositions, getClosedPositions, getBalance, ActivePosition, ClosedPosition, fetchTxHashForOrder } from '../../services/portfolio';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
 import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
@@ -39,6 +39,9 @@ const MIN_ORDER_SIZE = 1;
 
 /** telegramId → fetched positions array (populated when user opens positions page) */
 export const positionListCache = new Map<string, ActivePosition[]>();
+
+/** telegramId → fetched closed positions array (populated when user opens closed positions page) */
+export const closedPositionListCache = new Map<string, ClosedPosition[]>();
 
 // ─── State ─────────────────────────────────────────────────────────────────
 
@@ -90,6 +93,24 @@ async function getPosOrFetch(telegramId: string, idx: number): Promise<ActivePos
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.substring(0, n) + '...' : s;
+}
+
+function getClosedPos(telegramId: string, idx: number): ClosedPosition | null {
+  const list = closedPositionListCache.get(telegramId);
+  if (!list || idx < 0 || idx >= list.length) return null;
+  return list[idx];
+}
+
+async function getClosedPosOrFetch(telegramId: string, idx: number): Promise<ClosedPosition | null> {
+  const cached = getClosedPos(telegramId, idx);
+  if (cached) return cached;
+
+  const user = await getUserByTelegramId(telegramId);
+  if (!user?.polymarketProxyAddress) return null;
+
+  const fresh = await getClosedPositions(user.polymarketProxyAddress).catch(() => []);
+  if (fresh.length > 0) closedPositionListCache.set(telegramId, fresh);
+  return idx >= 0 && idx < fresh.length ? fresh[idx] : null;
 }
 
 // ─── Full list ─────────────────────────────────────────────────────────────
@@ -400,6 +421,201 @@ export async function handlePositionPnlShare(ctx: Context, idx: number): Promise
     }
   } catch (error) {
     logger.error('Error in handlePositionPnlShare:', error);
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(`❌ ${t(lang, 'Failed to generate share image.')}`);
+  }
+}
+
+// ─── Closed Position PNL ────────────────────────────────────────────────────
+
+export async function handleClosedPositionPnl(ctx: Context, idx: number): Promise<void> {
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    let pos: ClosedPosition | null = null;
+    if (ctx.callbackQuery) {
+      const user = await getUserByTelegramId(telegramId);
+      if (user?.polymarketProxyAddress) {
+        const fresh = await getClosedPositions(user.polymarketProxyAddress, true).catch(() => []);
+        if (fresh.length > 0) closedPositionListCache.set(telegramId, fresh);
+        pos = idx >= 0 && idx < fresh.length ? fresh[idx] : null;
+      }
+    } else {
+      pos = await getClosedPosOrFetch(telegramId, idx);
+    }
+
+    if (!pos) {
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(t(lang, 'position.notFound'));
+      return;
+    }
+
+    const user = await getUserByTelegramId(telegramId);
+    const lang = getLang(user);
+
+    // Compute derived fields from closed position data
+    const invested = pos.totalBought * pos.avgPrice;
+    const received = invested + pos.realizedPnl;
+    const percentPnl = invested > 0 ? (pos.realizedPnl / invested) * 100 : 0;
+    const exitPrice = pos.totalBought > 0 ? received / pos.totalBought : 0;
+
+    // Build referral share URL
+    let shareUrl = '';
+    try {
+      const senderUser = await getUserByTelegramId(telegramId);
+      if (senderUser) {
+        const { ensureReferralCode } = await import('../../services/referral');
+        const code = await ensureReferralCode(senderUser.id, senderUser.username ?? undefined);
+        const refLink = `https://t.me/${config.telegram.botUsername}?start=ref_${code}`;
+        const shareText = encodeURIComponent('🌸 Start winning with PolyTech\n');
+        shareUrl = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${shareText}`;
+      }
+    } catch { /* proceed without share button */ }
+
+    const marketUrl = (pos.eventSlug || pos.slug)
+      ? `https://polymarket.com/event/${pos.eventSlug || pos.slug}`
+      : '';
+
+    const pnlKeyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(t(lang, 'btn.refresh'), `cp_pnl_${idx}`),
+        ...(shareUrl ? [Markup.button.url(t(lang, 'btn.share'), shareUrl)] : []),
+      ],
+      ...(marketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), marketUrl)]] : []),
+      [Markup.button.callback(`« ${t(lang, 'Back to Closed Positions')}`, 'portfolio_closed_1')],
+    ]);
+
+    // Build rich HTML caption
+    const pnlDir = pos.realizedPnl >= 0 ? ce(EMOJI.pnlUp, '📈') : ce(EMOJI.pnlDown, '📉');
+    const pnlSign = pos.realizedPnl >= 0 ? '+' : '';
+    const pctSign = percentPnl >= 0 ? '+' : '';
+    const escTitle = pos.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    let caption = `${ce(EMOJI.pnlChart, '📊')} <b>${t(lang, 'Closed Position P&L')}</b>\n\n`;
+    caption += `${ce(EMOJI.fire, '🔥')} <b>${pos.outcome}</b> — ${escTitle}\n\n`;
+    caption += `${ce(EMOJI.diamond, '💎')} <b>Realized P&amp;L:</b>  ${pnlDir} <b>${pnlSign}$${pos.realizedPnl.toFixed(2)}</b>\n`;
+    caption += `${ce(EMOJI.rocket, '🚀')} <b>ROI:</b>  ${pctSign}${percentPnl.toFixed(1)}%\n\n`;
+    caption += `${ce(EMOJI.target, '🎯')} <b>${t(lang, 'Entry')}:</b>  ${(pos.avgPrice * 100).toFixed(1)}¢\n`;
+    caption += `${ce(EMOJI.trophy, '🏆')} <b>${t(lang, 'Exit')}:</b>  ${(exitPrice * 100).toFixed(1)}¢\n\n`;
+    caption += `💰 <b>${t(lang, 'Invested')}:</b> $${invested.toFixed(2)}\n`;
+    caption += `📦 <b>${t(lang, 'Received')}:</b> $${received.toFixed(2)}\n`;
+    caption += `📊 <b>${t(lang, 'shares')}:</b> ${pos.totalBought.toFixed(2)}`;
+
+    // Try image generation
+    try {
+      const [profilePhotoBuffer, eventIconBuffer] = await Promise.all([
+        fetchProfilePhoto(ctx),
+        fetchImageBuffer(pos.icon),
+      ]);
+      const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+
+      const imageBuffer = await generatePositionPnlImage({
+        title: pos.title,
+        outcome: pos.outcome,
+        cashPnl: pos.realizedPnl,
+        percentPnl,
+        avgPrice: pos.avgPrice,
+        curPrice: exitPrice,
+        invested,
+        currentValue: received,
+        username: ctx.from?.username,
+        displayName,
+        profilePhotoBuffer,
+        eventIconBuffer,
+      });
+
+      if (imageBuffer) {
+        await sendImageBufferPage(ctx, imageBuffer, caption, {
+          parse_mode: 'HTML',
+          ...pnlKeyboard,
+        });
+        return;
+      }
+    } catch (imgErr) {
+      logger.warn('[pnlImage] Closed position PNL image generation failed, using text fallback:', imgErr);
+    }
+
+    // Text fallback
+    await sendPage(ctx, caption, {
+      parse_mode: 'HTML',
+      ...pnlKeyboard,
+    });
+  } catch (error) {
+    logger.error('Error in handleClosedPositionPnl:', error);
+    const lang = ((ctx as any).userLanguage as Locale) || 'en';
+    await ctx.reply(`❌ ${t(lang, 'Failed to generate P&L. Please try again.')}`).catch(() => {});
+  }
+}
+
+/**
+ * Share a closed position PNL image (forwardable, no keyboard)
+ */
+export async function handleClosedPositionPnlShare(ctx: Context, idx: number): Promise<void> {
+  try {
+    await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'Generating share image...')).catch(() => {});
+    const telegramId = ctx.from?.id.toString();
+    if (!telegramId) return;
+
+    const pos = await getClosedPosOrFetch(telegramId, idx);
+    if (!pos) {
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.reply(`⚠️ ${t(lang, 'Position not found.')}`);
+      return;
+    }
+
+    const invested = pos.totalBought * pos.avgPrice;
+    const received = invested + pos.realizedPnl;
+    const percentPnl = invested > 0 ? (pos.realizedPnl / invested) * 100 : 0;
+    const exitPrice = pos.totalBought > 0 ? received / pos.totalBought : 0;
+
+    const [profilePhotoBuffer, eventIconBuffer] = await Promise.all([
+      fetchProfilePhoto(ctx),
+      fetchImageBuffer(pos.icon),
+    ]);
+    const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ');
+
+    const imageBuffer = await generatePositionPnlImage({
+      title: pos.title,
+      outcome: pos.outcome,
+      cashPnl: pos.realizedPnl,
+      percentPnl,
+      avgPrice: pos.avgPrice,
+      curPrice: exitPrice,
+      invested,
+      currentValue: received,
+      username: ctx.from?.username,
+      displayName,
+      profilePhotoBuffer,
+      eventIconBuffer,
+    });
+
+    if (imageBuffer) {
+      let senderReferralLink = '';
+      try {
+        const senderUser = await getUserByTelegramId(telegramId);
+        if (senderUser) {
+          const { ensureReferralCode } = await import('../../services/referral');
+          const code = await ensureReferralCode(senderUser.id, senderUser.username ?? undefined);
+          senderReferralLink = `https://t.me/${config.telegram.botUsername}?start=ref_${code}`;
+        }
+      } catch { /* proceed without link */ }
+
+      const shareCaption =
+        `${ce(EMOJI.cherry, '🌸')} <b>Start winning with PolyTech</b>\n` +
+        (senderReferralLink ? `\n${senderReferralLink}` : '');
+
+      await ctx.replyWithPhoto(
+        { source: imageBuffer },
+        { caption: shareCaption, parse_mode: 'HTML' },
+      );
+    } else {
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.answerCbQuery(t(lang, 'No PNL templates available yet.'), { show_alert: true });
+    }
+  } catch (error) {
+    logger.error('Error in handleClosedPositionPnlShare:', error);
     const lang = ((ctx as any).userLanguage as Locale) || 'en';
     await ctx.reply(`❌ ${t(lang, 'Failed to generate share image.')}`);
   }

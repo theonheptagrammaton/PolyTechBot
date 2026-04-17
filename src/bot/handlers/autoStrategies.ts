@@ -77,6 +77,10 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
       Markup.button.callback(`🎯 ${t(lang, 'Bonding')}`, 'bond_list'),
       Markup.button.callback(`📊 ${t(lang, 'Up-Down')}`, 'updown_list'),
     ],
+    [
+      Markup.button.callback(`🧪 ${t(lang, 'bt.menu.title')}`, 'bt_menu'),
+      Markup.button.callback(`🔬 ${t(lang, 'az.menu.title')}`, 'az_menu'),
+    ],
     [Markup.button.callback(`🔙 ${t(lang, 'Main Menu')}`, 'back_to_menu')],
   ];
 

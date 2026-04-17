@@ -32,8 +32,8 @@ async function pollActualFillPrice(
       if (order.status === 'cancelled' || order.status === 'expired') {
         return { price: null, sizeMatched: null };
       }
-    } catch {
-      // ignore transient errors during polling
+    } catch (err: any) {
+      logger.debug(`[updown] Fill poll attempt ${i + 1}/${FILL_POLL_MAX_ATTEMPTS}: ${err?.message}`);
     }
     await new Promise(r => setTimeout(r, FILL_POLL_INTERVAL_MS));
   }
@@ -302,14 +302,25 @@ function scheduleLimitTtl(
       const order = await getOrder(predexonUserId, orderId);
       if (order.status === 'filled') {
         cleanup();
-        // Update DB
-        const price = parseFloat(order.price ?? '0');
-        if (isNaN(price) || price <= 0) {
-          logger.warn(`[updown] Limit order ${orderId} filled with invalid price: ${order.price}`);
+        // Update DB — use order.price if valid, otherwise try sizeMatched-based calc,
+        // and fall back to the strategy's limitPrice to ensure fillPrice is never null
+        let fillPrice: number | null = null;
+        const rawPrice = parseFloat(order.price ?? '0');
+        if (!isNaN(rawPrice) && rawPrice > 0) {
+          fillPrice = rawPrice;
+        } else {
+          // Fallback: fetch strategy's limitPrice from the trade record
+          const trade = await prisma.upDownTrade.findFirst({ where: { orderId }, select: { strategy: { select: { limitPrice: true } } } });
+          if (trade?.strategy?.limitPrice != null && trade.strategy.limitPrice > 0) {
+            fillPrice = trade.strategy.limitPrice;
+            logger.warn(`[updown] Limit order ${orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
+          } else {
+            logger.warn(`[updown] Limit order ${orderId} filled with invalid price: ${order.price}, no fallback available`);
+          }
         }
         await prisma.upDownTrade.updateMany({
           where: { orderId },
-          data: { status: 'filled', fillPrice: isNaN(price) ? null : price },
+          data: { status: 'filled', fillPrice },
         });
       } else if (order.status === 'cancelled' || order.status === 'expired') {
         cleanup();
@@ -318,7 +329,9 @@ function scheduleLimitTtl(
           data: { status: 'cancelled' },
         });
       }
-    } catch { /* ignore check errors */ }
+    } catch (err: any) {
+      logger.debug(`[updown] Limit fill check error for ${orderId}: ${err?.message}`);
+    }
   }, 3000);
 
   // Cancel after TTL
@@ -608,12 +621,23 @@ async function recoverOrphanedLimitOrders(): Promise<void> {
       // Check if the order actually filled while we were down
       const order = await getOrder(trade.user.predexonUserId, trade.orderId);
       if (order.status === 'filled') {
-        const price = parseFloat(order.price ?? '0');
+        let fillPrice: number | null = null;
+        const rawPrice = parseFloat(order.price ?? '0');
+        if (!isNaN(rawPrice) && rawPrice > 0) {
+          fillPrice = rawPrice;
+        } else {
+          // Fallback: fetch strategy's limitPrice from the trade record
+          const strat = trade.strategyId ? await prisma.upDownStrategy.findUnique({ where: { id: trade.strategyId }, select: { limitPrice: true } }) : null;
+          if (strat?.limitPrice != null && strat.limitPrice > 0) {
+            fillPrice = strat.limitPrice;
+            logger.warn(`[updown] Orphaned order ${trade.orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
+          }
+        }
         await prisma.upDownTrade.update({
           where: { id: trade.id },
-          data: { status: 'filled', fillPrice: isNaN(price) ? null : price },
+          data: { status: 'filled', fillPrice },
         });
-        logger.info(`[updown] Orphaned order ${trade.orderId} was actually filled at ${price}`);
+        logger.info(`[updown] Orphaned order ${trade.orderId} was actually filled at ${fillPrice}`);
       } else if (order.status === 'cancelled' || order.status === 'expired') {
         await prisma.upDownTrade.update({
           where: { id: trade.id },
