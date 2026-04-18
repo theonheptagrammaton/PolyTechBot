@@ -568,7 +568,13 @@ async function tickForTrader(
     },
   });
 
-  if (subs.length === 0) return;
+  if (subs.length === 0) {
+    // All subscriptions for this trader are paused — advance cursor to now
+    // so trades during the pause window are not replayed when unpaused.
+    const cursorKey = `copy:last_seen:${traderAddress}`;
+    await redisCache.set(cursorKey, Date.now(), 7 * 24 * 3600);
+    return;
+  }
 
   const newTrades = preloadedTrades ?? await fetchNewTradesForTrader(traderAddress);
 
