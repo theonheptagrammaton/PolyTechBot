@@ -5,6 +5,7 @@ import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { RedisBackedState } from '../../utils/redisState';
 import { UPDOWN_COIN_MAP } from '../../services/market';
+import { config } from '../../config';
 import { logger } from '../../utils/logger';
 import { t, Locale } from '../../i18n';
 
@@ -172,6 +173,8 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
     ``,
   ];
 
+  const botUsername = (ctx as any).botInfo?.username ?? config.telegram.botUsername ?? '';
+
   if (strategies.length === 0) {
     lines.push('No strategies yet.');
     lines.push('Tap <b>+ New</b> to get started.');
@@ -208,6 +211,10 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       const tpStr = s.takeProfitPct != null ? `+${s.takeProfitPct}%` : '—';
       const slStr = s.stopLossPct != null ? `-${s.stopLossPct}%` : '—';
 
+      const manageLink = botUsername
+        ? `<a href="https://t.me/${botUsername}?start=ap_manage_${s.id}">Manage</a>`
+        : `Manage`;
+
       lines.push(
         `${i + 1}. ${statusDot} ${coins.map(c => coinEmoji(c)).join('')} ${coins.join(', ')} · ${tfs.map(tf => tfShort(tf)).join(', ')} · ${dirStr}\n` +
         `├ 💰 Amount: $${s.amount.toFixed(2)}\n` +
@@ -216,21 +223,13 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
         `├ 📈 TP: ${tpStr}  ·  📉 SL: ${slStr}\n` +
         `├ 🔥 Fires: ${fires}\n` +
         `├ 💵 PnL: ${pnlStr}\n` +
-        `└ <i>Manage</i>`
+        `└ ${manageLink}`
       );
       lines.push(``);
     }
   }
 
   const buttons: any[][] = [];
-
-  // Per-strategy manage buttons
-  for (let i = 0; i < strategies.length; i++) {
-    const s = strategies[i];
-    buttons.push([
-      Markup.button.callback(`⚙️ Manage #${i + 1}`, `ud_task_${s.id}`),
-    ]);
-  }
 
   if (strategies.length > 0) {
     buttons.push([

@@ -173,6 +173,17 @@ export async function handleStart(ctx: Context): Promise<void> {
       // User not registered yet — fall through to normal registration
     }
 
+    if (startParam?.startsWith('ap_manage_')) {
+      const stratId = startParam.slice(10); // strip 'ap_manage_'
+      logger.info(`Deep link AutoPilot manage ${stratId} from user: ${telegramId}`);
+      const user = await getUserByTelegramId(telegramId);
+      if (user) {
+        const { handleManage } = await import('./updown');
+        await handleManage(ctx, stratId);
+        return;
+      }
+    }
+
     if (startParam?.startsWith('ref_')) {
       // Referral deep link — record referrer; continue to normal registration flow below
       const referralCode = startParam.replace('ref_', '');
