@@ -214,7 +214,7 @@ export async function handlePortfolio(ctx: Context): Promise<void> {
     const totalInvested     = visiblePositions.reduce((s, p) => s + (p.initialValue), 0);
     const totalCurrentValue = visiblePositions.reduce((s, p) => s + p.currentValue, 0);
     const totalUnrealizedPnl = visiblePositions.reduce((s, p) => s + p.cashPnl, 0);
-    const totalRealizedPnl  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
+    const totalRealizedPnl  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0) + visiblePositions.reduce((s, p) => s + p.realizedPnl, 0);
     const totalClosedInvested = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
 
     const unPnlSign  = totalUnrealizedPnl >= 0 ? '+' : '';
@@ -1323,8 +1323,8 @@ export async function handlePnl(ctx: Context): Promise<void> {
     const activeRealized  = activePositions.reduce((s, p) => s + p.realizedPnl, 0);
     const closedRealized  = closedPositions.reduce((s, p) => s + p.realizedPnl, 0);
     const totalPnl        = totalUnrealized + activeRealized + closedRealized;
-    const activeInvested  = activePositions.reduce((s, p) => s + p.totalBought, 0);
-    const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought, 0);
+    const activeInvested  = activePositions.reduce((s, p) => s + p.initialValue, 0);
+    const closedInvested  = closedPositions.reduce((s, p) => s + p.totalBought * p.avgPrice, 0);
     const totalInvested   = activeInvested + closedInvested;
     const percentPnl      = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0;
 
