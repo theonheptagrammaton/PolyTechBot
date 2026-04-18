@@ -523,6 +523,8 @@ export async function getNewestEvents(limit: number = 30): Promise<Event[]> {
         if (!Array.isArray(e.markets) || e.markets.length === 0) return false;
         const endMs = (e as any).endDate ? new Date((e as any).endDate).getTime() : 0;
         if (endMs > 0 && endMs < now) return false;
+        // Skip established markets with $50K+ liquidity — newest should show fresh markets
+        if ((e.liquidity ?? 0) >= 50_000) return false;
         return true;
       })
       .slice(0, limit);
