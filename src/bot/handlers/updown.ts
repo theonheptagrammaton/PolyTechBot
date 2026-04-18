@@ -31,6 +31,15 @@ function coinEmoji(sym: string): string {
   return '';
 }
 
+const COIN_LIST = ['BTC', 'ETH', 'SOL', 'XRP'];
+
+const TF_LIST = [
+  { key: '5-Minute', label: '5 Min' },
+  { key: '15-Minute', label: '15 Min' },
+  { key: '1-Hour', label: '1 Hr' },
+  { key: '4-Hour', label: '4 Hr' },
+];
+
 const TF_SHORT: Record<string, string> = {
   '1-Minute': '1m', '5-Minute': '5m', '15-Minute': '15m',
   '30-Minute': '30m', '1-Hour': '1h', '4-Hour': '4h',
@@ -39,57 +48,31 @@ function tfShort(tf: string): string {
   return TF_SHORT[tf] || tf;
 }
 
-/** Validate mm:ss format. Returns total seconds or null if invalid. */
-function parseTimeStr(s: string): number | null {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
-  if (!m) return null;
-  const mins = parseInt(m[1], 10);
-  const secs = parseInt(m[2], 10);
-  if (mins < 0 || mins > 59 || secs < 0 || secs > 59) return null;
-  return mins * 60 + secs;
+/** Get candle duration in seconds for a timeframe */
+function tfDurationSecs(tf: string): number {
+  const map: Record<string, number> = {
+    '5-Minute': 300, '15-Minute': 900, '1-Hour': 3600, '4-Hour': 14400,
+  };
+  return map[tf] || 900;
 }
 
 // ─── Add Flow State ─────────────────────────────────────────────────────────
 
-interface UpDownAddState {
-  step:
-    | 'name' | 'coin' | 'timeframe' | 'direction' | 'amount'
-    | 'triggers_time' | 'triggers_up_price' | 'triggers_price_change'
-    | 'total_rounds' | 'review'
-    // Advanced
-    | 'adv_order_type' | 'adv_limit_price' | 'adv_limit_ttl'
-    | 'adv_max_rounds' | 'adv_slippage'
-    | 'adv_tp_type' | 'adv_tp_value' | 'adv_sl_type' | 'adv_sl_value';
-  name?: string;
-  coin?: string;
-  timeframe?: string;
+interface AutoPilotAddState {
+  step: 'category' | 'coins' | 'timeframes' | 'direction' | 'amount' | 'window' | 'range' | 'tpsl';
+  coins: string[];
+  timeframes: string[];
   direction?: string;
   amount?: number;
-  timeRangeStart?: string;
-  timeRangeEnd?: string;
-  upPriceMin?: number;
-  upPriceMax?: number;
-  priceChangeMin?: number;
-  priceChangeMax?: number;
-  // Advanced
-  orderType?: string;
-  limitPrice?: number | null;
-  limitTtlSeconds?: number;
-  maxRounds?: number;
-  slippage?: number;
+  entryWindowSecs?: number | null; // null = anytime
+  priceRangeMin?: number; // cents 0-100
+  priceRangeMax?: number;
   takeProfitPct?: number | null;
-  takeProfitPrice?: number | null;
   stopLossPct?: number | null;
-  stopLossPrice?: number | null;
-  tpType?: string; // 'pct' | 'price'
-  slType?: string; // 'pct' | 'price'
-  advStep?: number;
-  // Template source
-  fromTemplate?: boolean;
   timestamp: number;
 }
 
-export const updownAddState = new RedisBackedState<UpDownAddState>('updownAdd', 600);
+export const updownAddState = new RedisBackedState<AutoPilotAddState>('updownAdd', 600);
 
 const _updownAddCleanup = setInterval(() => {
   const cutoff = Date.now() - STATE_TTL_MS;
@@ -108,7 +91,9 @@ interface UpDownEditState {
     | 'awaiting_rename'
     | 'awaiting_limit_price' | 'awaiting_limit_ttl'
     | 'awaiting_tp_pct' | 'awaiting_tp_price'
-    | 'awaiting_sl_pct' | 'awaiting_sl_price';
+    | 'awaiting_sl_pct' | 'awaiting_sl_price'
+    | 'awaiting_entry_window' | 'awaiting_coins'
+    | 'awaiting_timeframes';
   stratId: string;
   timestamp: number;
 }
@@ -140,7 +125,17 @@ function onOff(v: boolean): string {
   return v ? '🟢' : '🔴';
 }
 
-// ─── /afk Command ───────────────────────────────────────────────────────────
+/** Get the coins a strategy uses */
+function getStratCoins(strat: any): string[] {
+  return strat.coins ? strat.coins.split(',') : [strat.coin];
+}
+
+/** Get the timeframes a strategy uses */
+function getStratTimeframes(strat: any): string[] {
+  return strat.timeframes ? strat.timeframes.split(',') : [strat.timeframe];
+}
+
+// ─── /afk & /autopilot Command ──────────────────────────────────────────────
 
 export async function handleUpDownCommand(ctx: Context): Promise<void> {
   await handleUpDownList(ctx);
@@ -173,32 +168,27 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
   });
 
   const lines: string[] = [
-    `<b>${t(lang, 'Up/Down Strategies')}</b>`,
+    `🤖 <b>AutoPilot Strategies (${strategies.length})</b>`,
     ``,
   ];
 
   if (strategies.length === 0) {
-    lines.push(t(lang, 'No strategies yet.'));
-    lines.push(t(lang, 'Tap <b>Add</b> or use a <b>Template</b> to get started.'));
+    lines.push('No strategies yet.');
+    lines.push('Tap <b>+ New</b> to get started.');
   } else {
-    const running = strategies.filter(s => s.isActive && !s.isPaused).length;
-    lines.push(`${running}/${strategies.length} ${t(lang, 'active')}\n`);
-
     for (let i = 0; i < strategies.length; i++) {
       const s = strategies[i];
       const statusDot = s.isActive && !s.isPaused ? '🟢' : '🔴';
-      const name = s.label || `AFK ${i + 1}`;
-      const dirStr = s.direction === 'up' ? 'UP' : 'DOWN';
-      const orderStr = s.orderType === 'limit' && s.limitPrice
-        ? `Limit ${s.limitPrice}` : 'Market';
-      const tf = tfShort(s.timeframe);
+      const coins = getStratCoins(s);
+      const tfs = getStratTimeframes(s);
+      const dirStr = s.direction === 'up' ? '📈 Up'
+        : s.direction === 'down' ? '📉 Down'
+        : s.direction === 'both' ? '🔄 Both'
+        : '🔀 Either';
 
       const filledTrades = s.trades || [];
-      const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
-      const wins = filledTrades.filter(t => t.tpSlStatus === 'tp_triggered').length;
-      const losses = filledTrades.filter(t => t.tpSlStatus === 'sl_triggered').length;
+      const fires = filledTrades.length;
 
-      // Estimated PnL: won trades -> profit from entry, lost trades -> full loss
       const estPnl = filledTrades.reduce((sum, t) => {
         if (t.tpSlStatus === 'tp_triggered' && t.fillPrice && t.fillPrice > 0) {
           return sum + (t.amount / t.fillPrice - t.amount);
@@ -210,18 +200,23 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       const pnlSign = estPnl >= 0 ? '+' : '';
       const pnlStr = `${pnlSign}$${estPnl.toFixed(2)}`;
 
-      const pcMinStr = s.priceChangeMin <= -9999 ? 'Any' : `$${s.priceChangeMin}`;
-      const pcMaxStr = s.priceChangeMax >= 9999 ? 'Any' : `$${s.priceChangeMax}`;
-      const trigChange = s.priceChangeMin > -9999 || s.priceChangeMax < 9999
-        ? `\n│  ${s.coin} ${t(lang, 'change')}: ${pcMinStr}–${pcMaxStr}`
-        : '';
+      const windowStr = s.entryWindowSecs != null ? `${s.entryWindowSecs}s` : 'Anytime';
+      const rangeMinCents = Math.round(s.upPriceMin * 100);
+      const rangeMaxCents = Math.round(s.upPriceMax * 100);
+      const rangeStr = `${rangeMinCents}–${rangeMaxCents}¢`;
+
+      const tpStr = s.takeProfitPct != null ? `+${s.takeProfitPct}%` : '—';
+      const slStr = s.stopLossPct != null ? `-${s.stopLossPct}%` : '—';
 
       lines.push(
-        `${statusDot} <b>${esc(name)}</b>\n` +
-        `│  ${s.coin} · ${tf} · ${dirStr} · ${orderStr} · $${s.amount.toFixed(2)}\n` +
-        `│  ${s.timeRangeStart}–${s.timeRangeEnd} · UP ${s.upPriceMin.toFixed(2)}–${s.upPriceMax.toFixed(2)}${trigChange}\n` +
-        `│  ${wins}W/${losses}L · ${s.roundsExecuted}/${s.maxRounds} ${t(lang, 'rounds')}\n` +
-        `└  $${totalSpent.toFixed(2)} ${t(lang, 'spent')} · PnL: ${pnlStr}`
+        `${i + 1}. ${statusDot} ${coins.map(c => coinEmoji(c)).join('')} ${coins.join(', ')} · ${tfs.map(tf => tfShort(tf)).join(', ')} · ${dirStr}\n` +
+        `├ 💰 Amount: $${s.amount.toFixed(2)}\n` +
+        `├ ⏱ Window: ${windowStr}\n` +
+        `├ 🎯 Range: ${rangeStr}\n` +
+        `├ 📈 TP: ${tpStr}  ·  📉 SL: ${slStr}\n` +
+        `├ 🔥 Fires: ${fires}\n` +
+        `├ 💵 PnL: ${pnlStr}\n` +
+        `└ <i>Manage</i>`
       );
       lines.push(``);
     }
@@ -229,38 +224,27 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
 
   const buttons: any[][] = [];
 
-  // Per-strategy action buttons
+  // Per-strategy manage buttons
   for (let i = 0; i < strategies.length; i++) {
     const s = strategies[i];
-    const isRunning = s.isActive && !s.isPaused;
     buttons.push([
-      Markup.button.callback(
-        isRunning ? `⏹ ${t(lang, 'Stop')} ${i + 1}` : `▶️ ${t(lang, 'Start')} ${i + 1}`,
-        isRunning ? `udm_pause_${s.id}` : `udm_start_${s.id}`
-      ),
-      Markup.button.callback(`✏️ ${t(lang, 'Edit')} ${i + 1}`, `ud_task_${s.id}`),
+      Markup.button.callback(`⚙️ Manage #${i + 1}`, `ud_task_${s.id}`),
     ]);
   }
-
-  buttons.push([
-    Markup.button.callback(`+ ${t(lang, 'Add')}`, 'ud_start_add'),
-    Markup.button.callback(t(lang, 'Templates'), 'udt_list'),
-    Markup.button.callback(t(lang, 'Remove'), 'ud_remove_prompt'),
-  ]);
 
   if (strategies.length > 0) {
     buttons.push([
-      Markup.button.callback(`▶️ ${t(lang, 'Start All')}`, 'ud_start_all'),
-      Markup.button.callback(`⏹ ${t(lang, 'Stop All')}`, 'ud_stop_all'),
-    ]);
-    buttons.push([
-      Markup.button.callback(t(lang, 'History'), 'ud_history_10'),
-      Markup.button.callback(t(lang, 'Delete All'), 'ud_del_all_cfm'),
+      Markup.button.callback(`📋 Activity`, 'ud_history_10'),
     ]);
   }
 
   buttons.push([
-    Markup.button.callback(`← ${t(lang, 'Back')}`, 'auto_strategies'),
+    Markup.button.callback(`+ New`, 'ud_start_add'),
+    Markup.button.callback(`🔄 Refresh`, 'updown_list'),
+  ]);
+
+  buttons.push([
+    Markup.button.callback(`← Back`, 'auto_strategies'),
   ]);
 
   await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
@@ -300,13 +284,12 @@ export async function handleStopAll(ctx: Context): Promise<void> {
 
 export async function handleDeleteAllConfirm(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `⚠️ <b>${t(lang, 'Delete All Up-Down Strategies')}</b>\n\n${t(lang, 'This will permanently delete all your up-down strategies. Are you sure?')}`,
+    `⚠️ <b>Delete All AutoPilot Strategies</b>\n\nThis will permanently delete all your AutoPilot strategies. Are you sure?`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback(`🗑 ${t(lang, 'Yes, Delete All')}`, 'ud_del_all_do'),
-        Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list'),
+        Markup.button.callback(`🗑 Yes, Delete All`, 'ud_del_all_do'),
+        Markup.button.callback(`← Cancel`, 'updown_list'),
       ],
     ]),
   );
@@ -318,7 +301,6 @@ export async function handleDeleteAllExecute(ctx: Context): Promise<void> {
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
-  const lang = getLang(user);
   try {
     const stratIds = await prisma.upDownStrategy.findMany({
       where: { userId: user.id },
@@ -331,8 +313,8 @@ export async function handleDeleteAllExecute(ctx: Context): Promise<void> {
     }
     await prisma.upDownStrategy.deleteMany({ where: { userId: user.id } });
   } catch (err: any) {
-    logger.error(`[updown] Failed to delete all strategies: ${err?.message}`);
-    await sendHtml(ctx, t(lang, 'Failed to delete strategies. Please try again.'));
+    logger.error(`[autopilot] Failed to delete all strategies: ${err?.message}`);
+    await sendHtml(ctx, 'Failed to delete strategies. Please try again.');
     return;
   }
   await handleUpDownList(ctx);
@@ -346,29 +328,27 @@ export async function handleRemovePrompt(ctx: Context): Promise<void> {
   const user = await getUserByTelegramId(telegramId);
   if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
-  const lang = getLang(user);
-
   const strategies = await prisma.upDownStrategy.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'asc' },
   });
 
   if (strategies.length === 0) {
-    await ctx.answerCbQuery(t(lang, 'No strategies to remove')).catch(() => {});
+    await ctx.answerCbQuery('No strategies to remove').catch(() => {});
     return;
   }
   await ctx.answerCbQuery().catch(() => {});
 
   const buttons = strategies.map((s, i) => [
     Markup.button.callback(
-      `🗑 ${s.label || `AFK ${i + 1}`}`,
+      `🗑 ${s.label || `AutoPilot ${i + 1}`}`,
       `ud_rm_${s.id}`
     ),
   ]);
-  buttons.push([Markup.button.callback(`← ${t(lang, 'Back')}`, 'updown_list')]);
+  buttons.push([Markup.button.callback(`← Back`, 'updown_list')]);
 
   await sendHtml(ctx,
-    `🗑 <b>${t(lang, 'Remove Strategy')}</b>\n\n${t(lang, 'Select a strategy to remove:')}`,
+    `🗑 <b>Remove Strategy</b>\n\nSelect a strategy to remove:`,
     Markup.inlineKeyboard(buttons),
   );
 }
@@ -379,13 +359,12 @@ export async function handleRemoveExecute(ctx: Context, stratId: string): Promis
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
-  const lang = getLang(user);
   try {
     await prisma.upDownTrade.deleteMany({ where: { strategyId: stratId } });
     await prisma.upDownStrategy.deleteMany({ where: { id: stratId, userId: user.id } });
   } catch (err: any) {
-    logger.error(`[updown] Failed to delete strategy ${stratId}: ${err?.message}`);
-    await sendHtml(ctx, t(lang, 'Failed to delete strategy. Please try again.'));
+    logger.error(`[autopilot] Failed to delete strategy ${stratId}: ${err?.message}`);
+    await sendHtml(ctx, 'Failed to delete strategy. Please try again.');
     return;
   }
   await handleUpDownList(ctx);
@@ -400,8 +379,6 @@ export async function handleHistory(ctx: Context, limit: number): Promise<void> 
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
-  const lang = getLang(user);
-
   const trades = await prisma.upDownTrade.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
@@ -410,13 +387,13 @@ export async function handleHistory(ctx: Context, limit: number): Promise<void> 
 
   if (trades.length === 0) {
     await sendHtml(ctx,
-      `📜 <b>${t(lang, 'Up-Down Trade History')}</b>\n\n${t(lang, 'No trades yet.')}`,
-      Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'updown_list')]]),
+      `📜 <b>AutoPilot Activity</b>\n\nNo trades yet.`,
+      Markup.inlineKeyboard([[Markup.button.callback(`← Back`, 'updown_list')]]),
     );
     return;
   }
 
-  const lines = [`📜 <b>${t(lang, 'Up-Down Trade History')}</b> (${t(lang, 'last')} ${trades.length})\n`];
+  const lines = [`📜 <b>AutoPilot Activity</b> (last ${trades.length})\n`];
   for (const tr of trades) {
     const icon = tr.status === 'filled' ? '✅' : tr.status === 'failed' ? '❌' : tr.status === 'cancelled' ? '⏹' : '⏳';
     const dir = tr.direction === 'up' ? '🟢UP' : '🔴DN';
@@ -425,7 +402,7 @@ export async function handleHistory(ctx: Context, limit: number): Promise<void> 
 
   await sendHtml(ctx,
     lines.join('\n'),
-    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'updown_list')]]),
+    Markup.inlineKeyboard([[Markup.button.callback(`← Back`, 'updown_list')]]),
   );
 }
 
@@ -436,328 +413,225 @@ export async function handleClose(ctx: Context): Promise<void> {
   await ctx.deleteMessage().catch(() => {});
 }
 
-// ─── Templates ──────────────────────────────────────────────────────────────
+// ─── 8-Step AutoPilot Add Flow ──────────────────────────────────────────────
 
-interface Template {
-  id: string;
-  name: string;
-  emoji: string;
-  description: string;
-  coin: string;
-  timeframe: string;
-  direction: string;
-  timeRangeStart: string;
-  timeRangeEnd: string;
-  upPriceMin: number;
-  upPriceMax: number;
-  priceChangeMin: number;
-  priceChangeMax: number;
-  amount: number;
-  maxRounds: number;
-}
-
-const TEMPLATES: Template[] = [
-  {
-    id: 'momentum_closer',
-    name: 'Momentum Closer',
-    emoji: '₿',
-    description: 'Buy UP late in the round when price is already high (riding momentum)',
-    coin: 'BTC',
-    timeframe: '15-Minute',
-    direction: 'up',
-    timeRangeStart: '13:00',
-    timeRangeEnd: '14:55',
-    upPriceMin: 0.65,
-    upPriceMax: 0.95,
-    priceChangeMin: -9999,
-    priceChangeMax: 9999,
-    amount: 25,
-    maxRounds: 10,
-  },
-  {
-    id: 'early_scalp',
-    name: 'Early Scalp',
-    emoji: '₿',
-    description: 'Catch early momentum in the first minute',
-    coin: 'BTC',
-    timeframe: '5-Minute',
-    direction: 'up',
-    timeRangeStart: '00:15',
-    timeRangeEnd: '01:00',
-    upPriceMin: 0.40,
-    upPriceMax: 0.70,
-    priceChangeMin: -9999,
-    priceChangeMax: 9999,
-    amount: 25,
-    maxRounds: 10,
-  },
-  {
-    id: 'dip_buyer',
-    name: 'Dip Buyer',
-    emoji: '₿',
-    description: 'Buy UP when spot drops and price is cheap',
-    coin: 'BTC',
-    timeframe: '15-Minute',
-    direction: 'up',
-    timeRangeStart: '02:00',
-    timeRangeEnd: '12:00',
-    upPriceMin: 0.10,
-    upPriceMax: 0.40,
-    priceChangeMin: -9999,
-    priceChangeMax: -50,
-    amount: 25,
-    maxRounds: 5,
-  },
-  {
-    id: 'eth_breakout',
-    name: 'ETH Breakout',
-    emoji: 'Ξ',
-    description: 'Buy ETH UP early when price starts moving in your favor',
-    coin: 'ETH',
-    timeframe: '15-Minute',
-    direction: 'up',
-    timeRangeStart: '01:00',
-    timeRangeEnd: '05:00',
-    upPriceMin: 0.50,
-    upPriceMax: 0.75,
-    priceChangeMin: 10,
-    priceChangeMax: 9999,
-    amount: 25,
-    maxRounds: 10,
-  },
-  {
-    id: 'sol_momentum',
-    name: 'SOL Momentum',
-    emoji: '◎',
-    description: 'Buy SOL UP late in the round when momentum is strong',
-    coin: 'SOL',
-    timeframe: '15-Minute',
-    direction: 'up',
-    timeRangeStart: '12:00',
-    timeRangeEnd: '14:55',
-    upPriceMin: 0.60,
-    upPriceMax: 0.90,
-    priceChangeMin: -9999,
-    priceChangeMax: 9999,
-    amount: 25,
-    maxRounds: 10,
-  },
-  {
-    id: 'sol_dip_buyer',
-    name: 'SOL Dip Buyer',
-    emoji: '◎',
-    description: 'Buy SOL UP when spot drops and odds are cheap',
-    coin: 'SOL',
-    timeframe: '15-Minute',
-    direction: 'up',
-    timeRangeStart: '02:00',
-    timeRangeEnd: '12:00',
-    upPriceMin: 0.10,
-    upPriceMax: 0.40,
-    priceChangeMin: -9999,
-    priceChangeMax: -2,
-    amount: 25,
-    maxRounds: 5,
-  },
-];
-
-export async function handleTemplateList(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  const lines = [
-    `<b>${t(lang, 'Templates')}</b>`,
-    ``,
-    t(lang, 'Quick-start with a preset strategy.'),
-    ``,
-  ];
-
-  for (const tmpl of TEMPLATES) {
-    const pcStr = tmpl.priceChangeMin > -9999 || tmpl.priceChangeMax < 9999
-      ? ` · $${tmpl.priceChangeMin > -9999 ? tmpl.priceChangeMin : ''}–$${tmpl.priceChangeMax < 9999 ? tmpl.priceChangeMax : ''}`
-      : '';
-    const tf = tfShort(tmpl.timeframe);
-    lines.push(
-      `<b>${tmpl.name}</b>`,
-      `├ ${tmpl.coin} · ${tf} · ${tmpl.direction.toUpperCase()} · $${tmpl.amount}`,
-      `└ ${tmpl.timeRangeStart}–${tmpl.timeRangeEnd} · UP ${tmpl.upPriceMin}–${tmpl.upPriceMax}${pcStr}`,
-      ``,
-    );
-  }
-
-  const buttons = TEMPLATES.map(tmpl => [
-    Markup.button.callback(tmpl.name, `udt_use_${tmpl.id}`),
-  ]);
-  buttons.push([Markup.button.callback(`← ${t(lang, 'Back')}`, 'updown_list')]);
-
-  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
-}
-
-export async function handleTemplateUse(ctx: Context, templateId: string): Promise<void> {
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
-  const user = await getUserByTelegramId(telegramId);
-  if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
-
-  const lang = getLang(user);
-
-  const tmpl = TEMPLATES.find(t => t.id === templateId);
-  if (!tmpl) { await ctx.answerCbQuery(t(lang, 'Template not found')).catch(() => {}); return; }
-
-  // Use transaction to prevent race condition on MAX_STRATEGIES
-  const created = await prisma.$transaction(async (tx) => {
-    const count = await tx.upDownStrategy.count({ where: { userId: user.id } });
-    if (count >= MAX_STRATEGIES) return null;
-    return tx.upDownStrategy.create({
-      data: {
-        userId: user.id,
-        label: tmpl.name,
-        coin: tmpl.coin,
-        timeframe: tmpl.timeframe,
-        direction: tmpl.direction,
-        timeRangeStart: tmpl.timeRangeStart,
-        timeRangeEnd: tmpl.timeRangeEnd,
-        upPriceMin: tmpl.upPriceMin,
-        upPriceMax: tmpl.upPriceMax,
-        priceChangeMin: tmpl.priceChangeMin,
-        priceChangeMax: tmpl.priceChangeMax,
-        amount: tmpl.amount,
-        maxRounds: tmpl.maxRounds,
-        isPaused: true,
-      },
-    });
-  });
-
-  if (!created) {
-    await ctx.answerCbQuery(t(lang, 'Max {{max}} strategies reached', { max: MAX_STRATEGIES })).catch(() => {});
-    return;
-  }
-
-  await ctx.answerCbQuery(t(lang, '"{{name}}" created (paused)', { name: tmpl.name })).catch(() => {});
-  await handleUpDownList(ctx);
-}
-
-// ─── Add Flow ───────────────────────────────────────────────────────────────
-
+// Step 1: Category
 export async function handleStartAdd(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
   const user = await getUserByTelegramId(telegramId);
   if (!user) { await ctx.answerCbQuery().catch(() => {}); return; }
 
-  const lang = getLang(user);
-
   const count = await prisma.upDownStrategy.count({ where: { userId: user.id } });
   if (count >= MAX_STRATEGIES) {
-    await ctx.answerCbQuery(t(lang, 'Max {{max}} strategies reached', { max: MAX_STRATEGIES })).catch(() => {});
+    await ctx.answerCbQuery(`Max ${MAX_STRATEGIES} strategies reached`).catch(() => {});
     return;
   }
   await ctx.answerCbQuery().catch(() => {});
 
-  updownAddState.set(telegramId, { step: 'name', timestamp: Date.now() });
+  updownAddState.set(telegramId, {
+    step: 'category',
+    coins: [],
+    timeframes: [],
+    timestamp: Date.now(),
+  });
 
-  await sendHtml(ctx,
-    `✏️ <b>${t(lang, 'Step 1/6: Strategy Name')}</b>\n\n` +
-    t(lang, 'Give your strategy a name (e.g. "BTC Scalper", "ETH Breakout"):'),
-    Markup.inlineKeyboard([
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
-    ]),
-  );
+  await showCategoryStep(ctx);
 }
 
-// Step 1: Coin selection
-export async function handleAddCoin(ctx: Context, coin: string): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  state.coin = coin;
-  state.step = 'timeframe';
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-
+async function showCategoryStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `⏱ <b>${t(lang, 'Step 3/6: Timeframe')}</b>\n\n` +
-    t(lang, 'Select market timeframe:'),
+    `🤖 <b>AutoPilot · Step 1 / 8</b>\n\nSelect a category:`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback('⚡ 5-Min', 'ud_add_tf_5'),
-        Markup.button.callback('⏱ 15-Min', 'ud_add_tf_15'),
-        Markup.button.callback('🕐 1-Hour', 'ud_add_tf_60'),
+        Markup.button.callback(`⚽ Crypto`, 'ap_cat_crypto'),
+        Markup.button.callback(`⚽ Sport (Coming Soon)`, 'ap_cat_sport'),
       ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
+      [Markup.button.callback(`↩️ Back`, 'updown_list')],
     ]),
   );
 }
 
-// Step 2: Timeframe selection
-export async function handleAddTimeframe(ctx: Context, tf: string): Promise<void> {
+export async function handleCategorySelect(ctx: Context, cat: string): Promise<void> {
+  await ctx.answerCbQuery(cat === 'sport' ? '🚧 Coming Soon!' : undefined).catch(() => {});
+  if (cat === 'sport') return;
+
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.step = 'coins';
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showCoinsStep(ctx, state);
+}
+
+// Step 2: Assets (multi-select)
+async function showCoinsStep(ctx: Context, state: AutoPilotAddState): Promise<void> {
+  const selectedStr = state.coins.length === 0 ? 'none' : state.coins.join(', ');
+  const coinButtons = COIN_LIST.map(c => {
+    const sel = state.coins.includes(c) ? '✅ ' : '';
+    return Markup.button.callback(`${sel}${c}`, `ap_coin_${c}`);
+  });
+
+  await sendHtml(ctx,
+    `🤖 <b>AutoPilot · Step 2 / 8</b>\n\n` +
+    `Which assets should the bot autonomously trade? Pick one or more.\n\n` +
+    `Selected: <b>${selectedStr}</b>`,
+    Markup.inlineKeyboard([
+      coinButtons,
+      [
+        Markup.button.callback(`↩️ Back`, 'ap_back'),
+        Markup.button.callback(`Next Step ▶️`, 'ap_coin_next'),
+      ],
+    ]),
+  );
+}
+
+export async function handleCoinToggle(ctx: Context, coin: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+  const idx = state.coins.indexOf(coin);
+  if (idx >= 0) state.coins.splice(idx, 1);
+  else state.coins.push(coin);
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showCoinsStep(ctx, state);
+}
 
-  const tfMap: Record<string, string> = { '5': '5-Minute', '15': '15-Minute', '60': '1-Hour' };
-  state.timeframe = tfMap[tf] || '15-Minute';
+export async function handleCoinNext(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
+  const state = await updownAddState.get(telegramId);
+  if (!state) { await ctx.answerCbQuery().catch(() => {}); return; }
+
+  if (state.coins.length === 0) {
+    await ctx.answerCbQuery('Select at least one asset').catch(() => {});
+    return;
+  }
+  await ctx.answerCbQuery().catch(() => {});
+
+  state.step = 'timeframes';
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showTimeframesStep(ctx, state);
+}
+
+// Step 3: Timeframes (multi-select)
+async function showTimeframesStep(ctx: Context, state: AutoPilotAddState): Promise<void> {
+  const selectedStr = state.timeframes.length === 0 ? 'none' : state.timeframes.map(tf => tfShort(tf)).join(', ');
+  const tfButtons = TF_LIST.map(tf => {
+    const sel = state.timeframes.includes(tf.key) ? '✅ ' : '';
+    return Markup.button.callback(`${sel}${tf.label}`, `ap_tf_${tf.key}`);
+  });
+
+  await sendHtml(ctx,
+    `🤖 <b>AutoPilot · Step 3 / 8</b>\n\n` +
+    `Which timeframes should the bot scan? Pick one or more.\n\n` +
+    `Selected: <b>${selectedStr}</b>`,
+    Markup.inlineKeyboard([
+      tfButtons,
+      [
+        Markup.button.callback(`↩️ Back`, 'ap_back'),
+        Markup.button.callback(`Next Step ▶️`, 'ap_tf_next'),
+      ],
+    ]),
+  );
+}
+
+export async function handleTfToggle(ctx: Context, tf: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  const idx = state.timeframes.indexOf(tf);
+  if (idx >= 0) state.timeframes.splice(idx, 1);
+  else state.timeframes.push(tf);
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showTimeframesStep(ctx, state);
+}
+
+export async function handleTfNext(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) { await ctx.answerCbQuery().catch(() => {}); return; }
+  const state = await updownAddState.get(telegramId);
+  if (!state) { await ctx.answerCbQuery().catch(() => {}); return; }
+
+  if (state.timeframes.length === 0) {
+    await ctx.answerCbQuery('Select at least one timeframe').catch(() => {});
+    return;
+  }
+  await ctx.answerCbQuery().catch(() => {});
+
   state.step = 'direction';
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
+  await showDirectionStep(ctx);
+}
 
+// Step 4: Direction
+async function showDirectionStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `🎯 <b>${t(lang, 'Step 4/6: Direction & Amount')}</b>\n\n` +
-    t(lang, 'Which direction do you want to bet?'),
+    `🤖 <b>AutoPilot · Step 4 / 8</b>\n\n` +
+    `Pick how the bot should trade:\n\n` +
+    `📈 <b>Up</b> — Buy UP tokens only\n` +
+    `📉 <b>Down</b> — Buy DOWN tokens only\n` +
+    `🔄 <b>Both</b> — Buy UP <i>and</i> DOWN (2 trades per candle)\n` +
+    `🔀 <b>Either</b> — Buy whichever side is in range`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback(`🟢 ${t(lang, 'Buy UP')}`, 'ud_add_dir_up'),
-        Markup.button.callback(`🔴 ${t(lang, 'Buy DOWN')}`, 'ud_add_dir_dn'),
+        Markup.button.callback(`📈 Up`, 'ap_dir_up'),
+        Markup.button.callback(`📉 Down`, 'ap_dir_down'),
       ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
+      [
+        Markup.button.callback(`🔄 Both`, 'ap_dir_both'),
+        Markup.button.callback(`🔀 Either`, 'ap_dir_either'),
+      ],
+      [Markup.button.callback(`↩️ Back`, 'ap_back')],
     ]),
   );
 }
 
-// Step 3a: Direction
-export async function handleAddDirection(ctx: Context, dir: string): Promise<void> {
+export async function handleDirectionSelect(ctx: Context, dir: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
   if (!state) return;
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
 
   state.direction = dir;
   state.step = 'amount';
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
+  await showAmountStep(ctx);
+}
 
-  const dirLabel = dir === 'up' ? `🟢 ${t(lang, 'UP')}` : `🔴 ${t(lang, 'DOWN')}`;
+// Step 5: Amount
+async function showAmountStep(ctx: Context): Promise<void> {
   await sendHtml(ctx,
-    `💰 <b>${t(lang, 'Amount Per Trade')}</b>\n\n` +
-    `${t(lang, 'Direction')}: <b>${dirLabel}</b>\n\n` +
-    t(lang, 'Enter USD amount per trade (e.g. 25, 50, 100):'),
+    `🤖 <b>AutoPilot · Step 5 / 8</b>\n\n` +
+    `How much USD per trade?`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback('$10', 'ud_add_amt_10'),
-        Markup.button.callback('$25', 'ud_add_amt_25'),
-        Markup.button.callback('$50', 'ud_add_amt_50'),
-        Markup.button.callback('$100', 'ud_add_amt_100'),
+        Markup.button.callback(`$5`, 'ap_amt_5'),
+        Markup.button.callback(`$20`, 'ap_amt_20'),
+        Markup.button.callback(`$50`, 'ap_amt_50'),
       ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
+      [Markup.button.callback(`✏️ Custom amount`, 'ap_amt_custom')],
+      [Markup.button.callback(`↩️ Back`, 'ap_back')],
     ]),
   );
 }
 
-// Step 3b: Amount preset
-export async function handleAddAmountPreset(ctx: Context, amount: number): Promise<void> {
+export async function handleAmountPreset(ctx: Context, amount: number): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
@@ -765,620 +639,374 @@ export async function handleAddAmountPreset(ctx: Context, amount: number): Promi
   if (!state) return;
 
   state.amount = amount;
+  state.step = 'window';
   state.timestamp = Date.now();
-  await showTriggersTimeStep(ctx, state, telegramId);
-}
-
-// Step 4: Triggers — Time range
-async function showTriggersTimeStep(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
-  state.step = 'triggers_time';
   updownAddState.set(telegramId, state);
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  await sendHtml(ctx,
-    `⏱ <b>${t(lang, 'Step 5/6: Triggers')}</b>\n\n` +
-    `<b>${t(lang, 'Time Range')}</b> — ${t(lang, 'When during the round should the bot look for entries?')}\n` +
-    `${t(lang, 'Enter as')} <code>mm:ss, mm:ss</code> (${t(lang, 'start')}, ${t(lang, 'end')})\n\n` +
-    `${t(lang, 'Examples')}:\n` +
-    `• <code>00:00, 14:55</code> — ${t(lang, 'entire round')}\n` +
-    `• <code>13:00, 14:55</code> — ${t(lang, 'last 2 minutes only')}\n` +
-    `• <code>00:30, 01:00</code> — ${t(lang, 'first 30 seconds')}\n\n` +
-    `${t(lang, 'Or pick a preset:')}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(t(lang, 'Full Round'), 'ud_add_tr_full'),
-        Markup.button.callback(t(lang, 'Last 2min'), 'ud_add_tr_late'),
-      ],
-      [
-        Markup.button.callback(t(lang, 'First 1min'), 'ud_add_tr_early'),
-        Markup.button.callback(t(lang, 'Mid Round'), 'ud_add_tr_mid'),
-      ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
-    ]),
-  );
+  await showWindowStep(ctx, state);
 }
 
-// Time range presets
-export async function handleAddTimeRangePreset(ctx: Context, preset: string): Promise<void> {
+export async function handleAmountCustom(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  const presets: Record<string, [string, string]> = {
-    full: ['00:00', '14:55'],
-    late: ['13:00', '14:55'],
-    early: ['00:00', '01:00'],
-    mid: ['05:00', '10:00'],
-  };
-  const [start, end] = presets[preset] || presets.full;
-  state.timeRangeStart = start;
-  state.timeRangeEnd = end;
+  // Keep step as 'amount' — text handler will pick it up
   state.timestamp = Date.now();
-  await showTriggersUpPriceStep(ctx, state, telegramId);
+  updownAddState.set(telegramId, state);
+  await sendHtml(ctx,
+    `🤖 <b>AutoPilot · Step 5 / 8</b>\n\nEnter a custom amount in USD (1–10000):`,
+    Markup.inlineKeyboard([[Markup.button.callback(`↩️ Back`, 'ap_back')]]),
+  );
 }
 
-// Step 4b: UP price range
-async function showTriggersUpPriceStep(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
-  state.step = 'triggers_up_price';
-  updownAddState.set(telegramId, state);
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+// Step 6: Entry Window
+async function showWindowStep(ctx: Context, state: AutoPilotAddState): Promise<void> {
+  // Find shortest selected timeframe for dynamic text
+  const shortestTf = state.timeframes.reduce((min, tf) => {
+    const d = tfDurationSecs(tf);
+    return d < tfDurationSecs(min) ? tf : min;
+  }, state.timeframes[0]);
+  const duration = tfDurationSecs(shortestTf);
 
   await sendHtml(ctx,
-    `📈 <b>${t(lang, 'UP Price Range')}</b>\n\n` +
-    t(lang, 'Only trigger when UP token price is within this range.') + `\n` +
-    `${t(lang, 'Enter as')} <code>min, max</code> (${t(lang, 'e.g.')} <code>0.70, 0.90</code>)\n\n` +
-    `${t(lang, 'Or pick a preset:')}`,
+    `🤖 <b>AutoPilot · Step 6 / 8</b>\n\n` +
+    `A <b>${tfShort(shortestTf)}</b> candle holds <b>${duration}s</b>.\n` +
+    `How many seconds before candle end should the bot start looking?\n\n` +
+    `Allowed custom range: 5–${duration}s`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback('Any (0.01–0.99)', 'ud_add_up_any'),
-        Markup.button.callback('High (0.70–0.90)', 'ud_add_up_hi'),
+        Markup.button.callback(`60 sec`, 'ap_win_60'),
+        Markup.button.callback(`150 sec`, 'ap_win_150'),
       ],
-      [
-        Markup.button.callback('Low (0.01–0.30)', 'ud_add_up_lo'),
-        Markup.button.callback('Mid (0.30–0.70)', 'ud_add_up_mid'),
-      ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
+      [Markup.button.callback(`Anytime`, 'ap_win_any')],
+      [Markup.button.callback(`✏️ Custom seconds`, 'ap_win_custom')],
+      [Markup.button.callback(`↩️ Back`, 'ap_back')],
     ]),
   );
 }
 
-export async function handleAddUpPricePreset(ctx: Context, preset: string): Promise<void> {
+export async function handleWindowPreset(ctx: Context, secs: number): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  const presets: Record<string, [number, number]> = {
-    any: [0.01, 0.99],
-    hi: [0.70, 0.90],
-    lo: [0.01, 0.30],
-    mid: [0.30, 0.70],
-  };
-  const [min, max] = presets[preset] || presets.any;
-  state.upPriceMin = min;
-  state.upPriceMax = max;
+  state.entryWindowSecs = secs;
+  state.step = 'range';
   state.timestamp = Date.now();
-  await showTriggersPriceChangeStep(ctx, state, telegramId);
-}
-
-// Step 4c: Spot price change
-async function showTriggersPriceChangeStep(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
-  state.step = 'triggers_price_change';
   updownAddState.set(telegramId, state);
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-  const coin = state.coin || 'BTC';
-  await sendHtml(ctx,
-    `🪙 <b>${coin} ${t(lang, 'Spot Price Change')}</b>\n\n` +
-    t(lang, 'Only trigger when {{coin}} spot price change (vs round open) is within this range.', { coin }) + `\n` +
-    `${t(lang, 'Enter as')} <code>min, max</code> ${t(lang, 'in USD')} (${t(lang, 'e.g.')} <code>-100, 9999</code>)\n\n` +
-    `${t(lang, 'Or pick a preset:')}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback('Any', 'ud_add_pc_any'),
-        Markup.button.callback('Pump ≥$40', 'ud_add_pc_pump'),
-      ],
-      [
-        Markup.button.callback('Dump ≤-$10', 'ud_add_pc_dump'),
-        Markup.button.callback(`⏭ ${t(lang, 'Skip')}`, 'ud_add_pc_any'),
-      ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
-    ]),
-  );
+  await showRangeStep(ctx);
 }
 
-export async function handleAddPriceChangePreset(ctx: Context, preset: string): Promise<void> {
+export async function handleWindowAnytime(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  const presets: Record<string, [number, number]> = {
-    any: [-9999, 9999],
-    pump: [40, 9999],
-    dump: [-9999, -10],
-  };
-  const [min, max] = presets[preset] || presets.any;
-  state.priceChangeMin = min;
-  state.priceChangeMax = max;
+  state.entryWindowSecs = null;
+  state.step = 'range';
   state.timestamp = Date.now();
-  await showTotalRoundsStep(ctx, state, telegramId);
-}
-
-// Step 6: Total Rounds
-async function showTotalRoundsStep(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
-  state.step = 'total_rounds';
   updownAddState.set(telegramId, state);
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  await sendHtml(ctx,
-    `🔁 <b>${t(lang, 'Step 6/6: Total Rounds')}</b>\n\n` +
-    t(lang, 'How many rounds should this strategy run?') + `\n\n` +
-    t(lang, 'Enter a number (1–100) or pick a preset:'),
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback('5', 'ud_add_rnd_5'),
-        Markup.button.callback('10', 'ud_add_rnd_10'),
-        Markup.button.callback('25', 'ud_add_rnd_25'),
-        Markup.button.callback('50', 'ud_add_rnd_50'),
-        Markup.button.callback('100', 'ud_add_rnd_100'),
-      ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
-    ]),
-  );
+  await showRangeStep(ctx);
 }
 
-// Rounds presets (main flow)
-export async function handleAddRoundsPreset(ctx: Context, n: number): Promise<void> {
+export async function handleWindowCustom(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  state.maxRounds = n;
-  state.step = 'review';
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showReviewStep(ctx, state);
-}
 
-// Step 7: Review
-async function showReviewStep(ctx: Context, state: UpDownAddState): Promise<void> {
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-  const ce = coinEmoji(state.coin || 'BTC');
-  const dirStr = state.direction === 'up' ? `🟢 ${t(lang, 'Buy UP')}` : `🔴 ${t(lang, 'Buy DOWN')}`;
-  const orderStr = state.orderType === 'limit' && state.limitPrice
-    ? `Limit @ ${state.limitPrice}` : 'Market';
-  const pcStr = (state.priceChangeMin ?? -9999) > -9999 || (state.priceChangeMax ?? 9999) < 9999
-    ? `$${state.priceChangeMin ?? -9999} – $${state.priceChangeMax ?? 9999}`
-    : 'Any';
-
-  const lines = [
-    `📋 <b>${t(lang, 'Review')}</b>\n`,
-    `✏️ ${t(lang, 'Name')}: <b>${esc(state.name || t(lang, 'Strategy'))}</b>`,
-    `${ce} <b>${state.coin}</b> · ${state.timeframe}`,
-    `🎯 ${t(lang, 'Direction')}: ${dirStr}`,
-    `💰 ${t(lang, 'Amount')}: $${state.amount ?? 25}`,
-    `📋 ${t(lang, 'Order')}: ${orderStr}`,
-    `⏱ ${t(lang, 'Time')}: ${state.timeRangeStart ?? '00:00'} – ${state.timeRangeEnd ?? '14:55'}`,
-    `📈 ${t(lang, 'UP Price')}: ${(state.upPriceMin ?? 0.01).toFixed(2)} – ${(state.upPriceMax ?? 0.99).toFixed(2)}`,
-    `🪙 ${state.coin} ${t(lang, 'Change')}: ${pcStr}`,
-    `🔁 ${t(lang, 'Rounds')}: ${state.maxRounds ?? 10}`,
-    `⚡ ${t(lang, 'Slippage')}: ${state.slippage ?? 5}%`,
-  ];
-
-  if (state.takeProfitPct != null) lines.push(`🏆 TP: ${state.takeProfitPct}%`);
-  if (state.takeProfitPrice != null) lines.push(`🏆 TP: @${state.takeProfitPrice}`);
-  if (state.stopLossPct != null) lines.push(`🛑 SL: ${state.stopLossPct}%`);
-  if (state.stopLossPrice != null) lines.push(`🛑 SL: @${state.stopLossPrice}`);
-
-  lines.push(`\n${t(lang, 'Strategy starts <b>paused</b>. Start it from the manage page.')}`);
+  const shortestTf = state.timeframes.reduce((min, tf) => {
+    return tfDurationSecs(tf) < tfDurationSecs(min) ? tf : min;
+  }, state.timeframes[0]);
+  const maxSecs = tfDurationSecs(shortestTf);
 
   await sendHtml(ctx,
-    lines.join('\n'),
+    `🤖 <b>AutoPilot · Step 6 / 8</b>\n\nEnter seconds (5–${maxSecs}):`,
+    Markup.inlineKeyboard([[Markup.button.callback(`↩️ Back`, 'ap_back')]]),
+  );
+}
+
+// Step 7: Price Range (in cents)
+async function showRangeStep(ctx: Context): Promise<void> {
+  await sendHtml(ctx,
+    `🤖 <b>AutoPilot · Step 7 / 8</b>\n\n` +
+    `Price in cents (0–100). The bot fires when the chosen side trades inside this range.`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback(`✅ ${t(lang, 'Confirm')}`, 'ud_add_confirm'),
-        Markup.button.callback(`⚙️ ${t(lang, 'Advanced')}`, 'ud_add_advanced'),
+        Markup.button.callback(`40–45¢`, 'ap_rng_40_45'),
+        Markup.button.callback(`46–48¢`, 'ap_rng_46_48'),
       ],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
+      [
+        Markup.button.callback(`90–98¢`, 'ap_rng_90_98'),
+        Markup.button.callback(`95–98¢`, 'ap_rng_95_98'),
+      ],
+      [Markup.button.callback(`✏️ Custom range`, 'ap_rng_custom')],
+      [
+        Markup.button.callback(`⚡ Scalp preset`, 'ap_rng_scalp'),
+        Markup.button.callback(`🎯 Arb preset`, 'ap_rng_arb'),
+      ],
+      [Markup.button.callback(`↩️ Back`, 'ap_back')],
     ]),
   );
 }
 
-// ─── Confirm Add ────────────────────────────────────────────────────────────
+export async function handleRangePreset(ctx: Context, min: number, max: number): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
 
-export async function handleConfirmAdd(ctx: Context): Promise<void> {
+  state.priceRangeMin = min;
+  state.priceRangeMax = max;
+  state.step = 'tpsl';
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showTpSlStep(ctx, state);
+}
+
+export async function handleRangeCustom(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await sendHtml(ctx,
+    `🤖 <b>AutoPilot · Step 7 / 8</b>\n\nEnter price range in cents as <code>min, max</code> (e.g. <code>40, 60</code>):`,
+    Markup.inlineKeyboard([[Markup.button.callback(`↩️ Back`, 'ap_back')]]),
+  );
+}
+
+// Step 8: TP/SL
+async function showTpSlStep(ctx: Context, state: AutoPilotAddState): Promise<void> {
+  const tpStr = state.takeProfitPct != null ? `+${state.takeProfitPct}%` : '—';
+  const slStr = state.stopLossPct != null ? `-${state.stopLossPct}%` : '—';
+
+  await sendHtml(ctx,
+    `🤖 <b>AutoPilot · Step 8 / 8</b>\n\n` +
+    `Take Profit: <b>${tpStr}</b>\n` +
+    `Stop Loss: <b>${slStr}</b>\n\n` +
+    `Set exit conditions or complete the strategy.`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback(`📈 Set TP %`, 'ap_tp_set'),
+        Markup.button.callback(`📉 Set SL %`, 'ap_sl_set'),
+      ],
+      [Markup.button.callback(`🗑 Clear exits`, 'ap_tpsl_clear')],
+      [
+        Markup.button.callback(`↩️ Back`, 'ap_back'),
+        Markup.button.callback(`✅ Complete & Save`, 'ap_save'),
+      ],
+    ]),
+  );
+}
+
+export async function handleTpSet(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.timestamp = Date.now();
+  // Stay on tpsl step — text handler checks for awaiting_tp
+  (state as any)._awaitTp = true;
+  updownAddState.set(telegramId, state);
+  await sendHtml(ctx,
+    `📈 <b>Take Profit</b>\n\nEnter TP % from entry (e.g. 50 for +50%):`,
+    Markup.inlineKeyboard([[Markup.button.callback(`↩️ Back`, 'ap_tpsl_back')]]),
+  );
+}
+
+export async function handleSlSet(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.timestamp = Date.now();
+  (state as any)._awaitSl = true;
+  updownAddState.set(telegramId, state);
+  await sendHtml(ctx,
+    `📉 <b>Stop Loss</b>\n\nEnter SL % from entry (e.g. 25 for -25%):`,
+    Markup.inlineKeyboard([[Markup.button.callback(`↩️ Back`, 'ap_tpsl_back')]]),
+  );
+}
+
+export async function handleTpSlClear(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  state.takeProfitPct = null;
+  state.stopLossPct = null;
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showTpSlStep(ctx, state);
+}
+
+export async function handleTpSlBack(ctx: Context): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  const state = await updownAddState.get(telegramId);
+  if (!state) return;
+
+  delete (state as any)._awaitTp;
+  delete (state as any)._awaitSl;
+  state.timestamp = Date.now();
+  updownAddState.set(telegramId, state);
+  await showTpSlStep(ctx, state);
+}
+
+// ─── Save (Complete) ────────────────────────────────────────────────────────
+
+export async function handleSave(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
-  const lang = getLang(user);
-
   const state = await updownAddState.get(telegramId);
   if (!state) {
-    await sendHtml(ctx, t(lang, 'Session expired. Please start again.'));
+    await sendHtml(ctx, 'Session expired. Please start again.');
     return;
   }
 
-  // Use transaction to prevent race condition on MAX_STRATEGIES
+  // Validate required fields
+  if (state.coins.length === 0 || state.timeframes.length === 0 || !state.direction || !state.amount) {
+    await sendHtml(ctx, 'Incomplete setup. Please start again.');
+    return;
+  }
+
+  // Convert cents to decimal for storage (upPriceMin/Max)
+  const upPriceMin = (state.priceRangeMin ?? 1) / 100;
+  const upPriceMax = (state.priceRangeMax ?? 99) / 100;
+
   const created = await prisma.$transaction(async (tx) => {
     const count = await tx.upDownStrategy.count({ where: { userId: user.id } });
     if (count >= MAX_STRATEGIES) return null;
     return tx.upDownStrategy.create({
       data: {
         userId: user.id,
-        label: state.name || t(lang, 'Strategy'),
-        coin: state.coin || 'BTC',
-        timeframe: state.timeframe || '15-Minute',
-        direction: state.direction || 'up',
-        amount: state.amount || 25,
-        timeRangeStart: state.timeRangeStart || '00:00',
-        timeRangeEnd: state.timeRangeEnd || '14:55',
-        upPriceMin: state.upPriceMin ?? 0.01,
-        upPriceMax: state.upPriceMax ?? 0.99,
-        priceChangeMin: state.priceChangeMin ?? -9999,
-        priceChangeMax: state.priceChangeMax ?? 9999,
-        orderType: state.orderType || 'market',
-        limitPrice: state.limitPrice,
-        limitTtlSeconds: state.limitTtlSeconds ?? 60,
-        maxRounds: state.maxRounds ?? 10,
-        slippage: state.slippage ?? 5,
+        label: `AutoPilot`,
+        coin: state.coins[0],
+        coins: state.coins.length > 1 ? state.coins.join(',') : null,
+        timeframe: state.timeframes[0],
+        timeframes: state.timeframes.length > 1 ? state.timeframes.join(',') : null,
+        direction: state.direction!,
+        amount: state.amount!,
+        entryWindowSecs: state.entryWindowSecs,
+        upPriceMin,
+        upPriceMax,
+        // Set defaults for legacy fields
+        timeRangeStart: '00:00',
+        timeRangeEnd: '59:59',
+        priceChangeMin: -9999,
+        priceChangeMax: 9999,
+        orderType: 'market',
+        maxRounds: 9999,
+        slippage: 5,
         takeProfitPct: state.takeProfitPct,
-        takeProfitPrice: state.takeProfitPrice,
         stopLossPct: state.stopLossPct,
-        stopLossPrice: state.stopLossPrice,
-        isPaused: true,
+        isPaused: false, // Start active immediately
       },
     });
   });
 
   if (!created) {
-    await sendHtml(ctx, t(lang, 'Maximum {{max}} strategies reached. Delete one first.', { max: MAX_STRATEGIES }));
+    await sendHtml(ctx, `Maximum ${MAX_STRATEGIES} strategies reached. Delete one first.`);
     return;
   }
 
   updownAddState.delete(telegramId);
-  await handleUpDownList(ctx);
-}
 
-// ─── Advanced Settings ──────────────────────────────────────────────────────
-
-export async function handleAddAdvanced(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  await showAdvMenu(ctx, state, telegramId);
-}
-
-async function showAdvMenu(ctx: Context, state: UpDownAddState, telegramId: string): Promise<void> {
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-  const orderStr = state.orderType === 'limit' && state.limitPrice
-    ? `Limit @ ${state.limitPrice}` : (state.orderType || 'Market');
-  const ttlStr = state.limitTtlSeconds ? `${state.limitTtlSeconds}s` : '60s';
-
-  const lines = [
-    `⚙️ <b>${t(lang, 'Advanced Settings')}</b>\n`,
-    `📋 ${t(lang, 'Order Type')}: ${orderStr}`,
-    ...(state.orderType === 'limit' ? [`⏱ ${t(lang, 'Limit TTL')}: ${ttlStr}`] : []),
-    `🔁 ${t(lang, 'Max Rounds')}: ${state.maxRounds ?? 10}`,
-    `⚡ ${t(lang, 'Slippage')}: ${state.slippage ?? 5}%`,
-    `🏆 ${t(lang, 'Take Profit')}: ${state.takeProfitPct != null ? state.takeProfitPct + '%' : state.takeProfitPrice != null ? '@' + state.takeProfitPrice : '–'}`,
-    `🛑 ${t(lang, 'Stop Loss')}: ${state.stopLossPct != null ? state.stopLossPct + '%' : state.stopLossPrice != null ? '@' + state.stopLossPrice : '–'}`,
-    `\n${t(lang, 'Tap a setting to change it:')}`,
-  ];
-
-  const buttons = [
-    [
-      Markup.button.callback(`📋 ${t(lang, 'Order Type')}`, 'ud_adv_edit_order'),
-      Markup.button.callback(`🔁 ${t(lang, 'Rounds')}`, 'ud_adv_edit_rounds'),
-    ],
-    [
-      Markup.button.callback(`⚡ ${t(lang, 'Slippage')}`, 'ud_adv_edit_slippage'),
-    ],
-    [
-      Markup.button.callback(`🏆 ${t(lang, 'Take Profit')}`, 'ud_adv_edit_tp'),
-      Markup.button.callback(`🛑 ${t(lang, 'Stop Loss')}`, 'ud_adv_edit_sl'),
-    ],
-    [Markup.button.callback(`← ${t(lang, 'Back to Review')}`, 'ud_adv_back_review')],
-  ];
-
-  if (state.orderType === 'limit') {
-    buttons.splice(1, 0, [Markup.button.callback(`⏱ ${t(lang, 'Limit TTL')}`, 'ud_adv_edit_ttl')]);
-  }
-
-  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
-}
-
-
-// Advanced: order type
-export async function handleAdvOrderType(ctx: Context, type: string): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  state.orderType = type;
-  state.timestamp = Date.now();
-
-  if (type === 'limit') {
-    state.step = 'adv_limit_price';
-    updownAddState.set(telegramId, state);
-    await sendHtml(ctx,
-      `💲 <b>${t(lang, 'Limit Price')}</b>\n\n${t(lang, 'Enter limit order price (0.01–0.99):')}`,
-      Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')]]),
-    );
-    return;
-  }
-
-  state.limitPrice = null;
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
-}
-
-// Advanced: max rounds preset
-export async function handleAdvMaxRounds(ctx: Context, n: number): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  state.maxRounds = n;
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
-}
-
-// Advanced: slippage preset
-export async function handleAdvSlippage(ctx: Context, pct: number): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  state.slippage = pct;
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
-}
-
-// Advanced: TP type selection
-export async function handleAdvTpType(ctx: Context, type: string): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  state.tpType = type;
-  state.step = 'adv_tp_value';
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-
-  const prompt = type === 'pct'
-    ? `🏆 <b>${t(lang, 'TP Percentage')}</b>\n\n${t(lang, 'Enter TP % from entry (e.g. 50 for +50%):')}`
-    : `🏆 <b>${t(lang, 'TP Price')}</b>\n\n${t(lang, 'Enter target price (0.01–0.99):')}`;
-
+  const shortId = created.id.slice(-6);
   await sendHtml(ctx,
-    prompt,
-    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')]]),
+    `✅ <b>AutoPilot Strategy Created</b>\n\n` +
+    `ID: <code>${shortId}</code>\n` +
+    `The watcher will start scanning for entries on the next tick.`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback(`↩️ Back to list`, 'updown_list'),
+        Markup.button.callback(`+ New`, 'ud_start_add'),
+      ],
+    ]),
   );
 }
 
-// Advanced: SL type selection
-export async function handleAdvSlType(ctx: Context, type: string): Promise<void> {
+// ─── Back Handler ───────────────────────────────────────────────────────────
+
+export async function handleBack(ctx: Context): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
   const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  state.slType = type;
-  state.step = 'adv_sl_value';
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-
-  const prompt = type === 'pct'
-    ? `🛑 <b>${t(lang, 'SL Percentage')}</b>\n\n${t(lang, 'Enter SL % from entry (e.g. 25 for -25%):')}`
-    : `🛑 <b>${t(lang, 'SL Price')}</b>\n\n${t(lang, 'Enter stop-loss price (0.01–0.99):')}`;
-
-  await sendHtml(ctx,
-    prompt,
-    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')]]),
-  );
-}
-
-// Advanced: Skip — return to menu
-export async function handleAdvSkip(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
-}
-
-// Advanced: back to review
-export async function handleAdvBackReview(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  state.step = 'review';
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showReviewStep(ctx, state);
-}
-
-// Advanced: edit a specific field from the menu
-export async function handleAdvEditField(ctx: Context, field: string): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+  if (!state) { await handleUpDownList(ctx); return; }
 
   state.timestamp = Date.now();
 
-  switch (field) {
-    case 'order':
-      state.step = 'adv_order_type';
+  switch (state.step) {
+    case 'category':
+      updownAddState.delete(telegramId);
+      await handleUpDownList(ctx);
+      return;
+    case 'coins':
+      state.step = 'category';
       updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `📋 <b>${t(lang, 'Order Type')}</b>\n\n${t(lang, 'Select order execution type:')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('📈 Market', 'ud_adv_ot_market'),
-            Markup.button.callback('📊 Limit', 'ud_adv_ot_limit'),
-          ],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      break;
-
-    case 'rounds':
-      state.step = 'adv_max_rounds';
+      await showCategoryStep(ctx);
+      return;
+    case 'timeframes':
+      state.step = 'coins';
       updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `🔁 <b>${t(lang, 'Max Rounds')}</b>\n\n${t(lang, 'How many rounds should this strategy run?')}\n\n${t(lang, 'Enter a number (1–100):')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('5', 'ud_adv_mr_5'),
-            Markup.button.callback('10', 'ud_adv_mr_10'),
-            Markup.button.callback('25', 'ud_adv_mr_25'),
-            Markup.button.callback('50', 'ud_adv_mr_50'),
-          ],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      break;
-
-    case 'slippage':
-      state.step = 'adv_slippage';
+      await showCoinsStep(ctx, state);
+      return;
+    case 'direction':
+      state.step = 'timeframes';
       updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `⚡ <b>${t(lang, 'Slippage')}</b>\n\n${t(lang, 'Max slippage tolerance (%).')}\n\n${t(lang, 'Enter a value (0.1–50):')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('2%', 'ud_adv_sl_2'),
-            Markup.button.callback('5%', 'ud_adv_sl_5'),
-            Markup.button.callback('10%', 'ud_adv_sl_10'),
-          ],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      break;
-
-    case 'tp':
-      state.step = 'adv_tp_type';
+      await showTimeframesStep(ctx, state);
+      return;
+    case 'amount':
+      state.step = 'direction';
       updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `🏆 <b>${t(lang, 'Take Profit')}</b>\n\n${t(lang, 'Set TP condition:')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback(`📊 ${t(lang, '% from entry')}`, 'ud_adv_tp_pct'),
-            Markup.button.callback(`💲 ${t(lang, 'Fixed price')}`, 'ud_adv_tp_price'),
-          ],
-          [Markup.button.callback(`❌ ${t(lang, 'Clear TP')}`, 'ud_adv_tp_clear')],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      break;
-
-    case 'sl':
-      state.step = 'adv_sl_type';
+      await showDirectionStep(ctx);
+      return;
+    case 'window':
+      state.step = 'amount';
       updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `🛑 <b>${t(lang, 'Stop Loss')}</b>\n\n${t(lang, 'Set SL condition:')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback(`📊 ${t(lang, '% from entry')}`, 'ud_adv_sl_pct'),
-            Markup.button.callback(`💲 ${t(lang, 'Fixed price')}`, 'ud_adv_sl_price'),
-          ],
-          [Markup.button.callback(`❌ ${t(lang, 'Clear SL')}`, 'ud_adv_sl_clear')],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      break;
-
-    case 'ttl':
-      state.step = 'adv_limit_ttl';
+      await showAmountStep(ctx);
+      return;
+    case 'range':
+      state.step = 'window';
       updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `⏱ <b>${t(lang, 'Limit Order TTL')}</b>\n\n${t(lang, 'How long should limit orders stay active (seconds)?')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('30s', 'ud_adv_ttl_30'),
-            Markup.button.callback('60s', 'ud_adv_ttl_60'),
-            Markup.button.callback('120s', 'ud_adv_ttl_120'),
-          ],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      break;
-
+      await showWindowStep(ctx, state);
+      return;
+    case 'tpsl':
+      state.step = 'range';
+      updownAddState.set(telegramId, state);
+      await showRangeStep(ctx);
+      return;
     default:
-      await showAdvMenu(ctx, state, telegramId);
+      updownAddState.delete(telegramId);
+      await handleUpDownList(ctx);
   }
-}
-
-// Advanced: clear TP
-export async function handleAdvTpClear(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-  state.takeProfitPct = null;
-  state.takeProfitPrice = null;
-  state.tpType = undefined;
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
-}
-
-// Advanced: clear SL
-export async function handleAdvSlClear(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-  state.stopLossPct = null;
-  state.stopLossPrice = null;
-  state.slType = undefined;
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
 }
 
 // ─── Add Flow Text Input Handler ────────────────────────────────────────────
@@ -1389,231 +1017,88 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
   const state = await updownAddState.get(telegramId);
   if (!state) return false;
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
-  switch (state.step) {
-    case 'name': {
-      const name = text.trim();
-      if (!name || name.length < 1 || name.length > 32) {
-        await ctx.reply(t(lang, 'Enter a name (1–32 characters).'));
-        return true;
-      }
-      state.name = name;
-      state.step = 'coin';
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `₿ <b>${t(lang, 'Step 2/6: Select Coin')}</b>\n\n` +
-        t(lang, 'Which cryptocurrency do you want to trade?'),
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('₿ BTC', 'ud_add_coin_BTC'),
-            Markup.button.callback('Ξ ETH', 'ud_add_coin_ETH'),
-            Markup.button.callback('◎ SOL', 'ud_add_coin_SOL'),
-          ],
-          [Markup.button.callback(`← ${t(lang, 'Cancel')}`, 'updown_list')],
-        ]),
-      );
+  // TP input
+  if ((state as any)._awaitTp) {
+    const n = parseNumber(text);
+    if (n == null || n <= 0 || n > 1000) {
+      await ctx.reply('Enter a percentage between 1 and 1000.');
       return true;
     }
+    state.takeProfitPct = n;
+    delete (state as any)._awaitTp;
+    state.timestamp = Date.now();
+    updownAddState.set(telegramId, state);
+    await showTpSlStep(ctx, state);
+    return true;
+  }
 
+  // SL input
+  if ((state as any)._awaitSl) {
+    const n = parseNumber(text);
+    if (n == null || n <= 0 || n > 100) {
+      await ctx.reply('Enter a percentage between 1 and 100.');
+      return true;
+    }
+    state.stopLossPct = n;
+    delete (state as any)._awaitSl;
+    state.timestamp = Date.now();
+    updownAddState.set(telegramId, state);
+    await showTpSlStep(ctx, state);
+    return true;
+  }
+
+  switch (state.step) {
     case 'amount': {
       const n = parseNumber(text);
       if (n == null || n < 1 || n > 10000) {
-        await ctx.reply(t(lang, 'Enter a valid amount (1–10000).'));
+        await ctx.reply('Enter a valid amount (1–10000).');
         return true;
       }
       state.amount = n;
+      state.step = 'window';
       state.timestamp = Date.now();
-      await showTriggersTimeStep(ctx, state, telegramId);
+      updownAddState.set(telegramId, state);
+      await showWindowStep(ctx, state);
       return true;
     }
 
-    case 'triggers_time': {
-      const parts = text.split(',').map(s => s.trim());
-      if (parts.length !== 2) {
-        await ctx.reply(t(lang, 'Enter as mm:ss, mm:ss (e.g. 00:00, 14:55)'));
+    case 'window': {
+      const n = parseNumber(text);
+      const shortestTf = state.timeframes.reduce((min, tf) => {
+        return tfDurationSecs(tf) < tfDurationSecs(min) ? tf : min;
+      }, state.timeframes[0]);
+      const maxSecs = tfDurationSecs(shortestTf);
+
+      if (n == null || n < 5 || n > maxSecs) {
+        await ctx.reply(`Enter seconds between 5 and ${maxSecs}.`);
         return true;
       }
-      const startSec = parseTimeStr(parts[0]);
-      const endSec = parseTimeStr(parts[1]);
-      if (startSec == null || endSec == null) {
-        await ctx.reply(t(lang, 'Invalid time format. Use mm:ss (e.g. 00:00, 14:55)'));
-        return true;
-      }
-      if (startSec >= endSec) {
-        await ctx.reply(t(lang, 'Start time must be before end time.'));
-        return true;
-      }
-      state.timeRangeStart = parts[0].trim();
-      state.timeRangeEnd = parts[1].trim();
+      state.entryWindowSecs = Math.round(n);
+      state.step = 'range';
       state.timestamp = Date.now();
-      await showTriggersUpPriceStep(ctx, state, telegramId);
+      updownAddState.set(telegramId, state);
+      await showRangeStep(ctx);
       return true;
     }
 
-    case 'triggers_up_price': {
+    case 'range': {
       const parts = text.split(',').map(s => s.trim());
       if (parts.length !== 2) {
-        await ctx.reply(t(lang, 'Enter as min, max (e.g. 0.70, 0.90)'));
+        await ctx.reply('Enter as min, max in cents (e.g. 40, 60)');
         return true;
       }
       const min = parseNumber(parts[0]);
       const max = parseNumber(parts[1]);
-      if (min == null || max == null || min < 0.01 || max > 0.99 || min > max) {
-        await ctx.reply(t(lang, 'Invalid range. Use 0.01–0.99, min <= max.'));
+      if (min == null || max == null || min < 0 || max > 100 || min > max) {
+        await ctx.reply('Invalid range. Use 0–100, min ≤ max.');
         return true;
       }
-      state.upPriceMin = min;
-      state.upPriceMax = max;
-      state.timestamp = Date.now();
-      await showTriggersPriceChangeStep(ctx, state, telegramId);
-      return true;
-    }
-
-    case 'triggers_price_change': {
-      const parts = text.split(',').map(s => s.trim());
-      if (parts.length !== 2) {
-        await ctx.reply(t(lang, 'Enter as min, max in USD (e.g. -100, 9999)'));
-        return true;
-      }
-      const min = parseNumber(parts[0]);
-      const max = parseNumber(parts[1]);
-      if (min == null || max == null) {
-        await ctx.reply(t(lang, 'Invalid numbers.'));
-        return true;
-      }
-      if (min > max) {
-        await ctx.reply(t(lang, 'Min must be <= max.'));
-        return true;
-      }
-      state.priceChangeMin = min;
-      state.priceChangeMax = max;
-      state.timestamp = Date.now();
-      await showTotalRoundsStep(ctx, state, telegramId);
-      return true;
-    }
-
-    case 'total_rounds': {
-      const n = parseNumber(text);
-      if (n == null || n < 1 || n > 100) {
-        await ctx.reply(t(lang, 'Enter a number between 1 and 100.'));
-        return true;
-      }
-      state.maxRounds = Math.round(n);
-      state.step = 'review';
+      state.priceRangeMin = Math.round(min);
+      state.priceRangeMax = Math.round(max);
+      state.step = 'tpsl';
       state.timestamp = Date.now();
       updownAddState.set(telegramId, state);
-      await showReviewStep(ctx, state);
-      return true;
-    }
-
-    case 'adv_limit_price': {
-      const n = parseNumber(text);
-      if (n == null || n < 0.01 || n > 0.99) {
-        await ctx.reply(t(lang, 'Enter a price between 0.01 and 0.99.'));
-        return true;
-      }
-      state.limitPrice = n;
-      state.step = 'adv_limit_ttl';
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await sendHtml(ctx,
-        `⏰ <b>${t(lang, 'Limit Order TTL')}</b>\n\n${t(lang, 'How long to wait for fill (seconds)?')}\n\n${t(lang, 'Enter a value (10–300):')}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('30s', 'ud_adv_ttl_30'),
-            Markup.button.callback('60s', 'ud_adv_ttl_60'),
-            Markup.button.callback('120s', 'ud_adv_ttl_120'),
-          ],
-          [Markup.button.callback(`← ${t(lang, 'Back')}`, 'ud_add_advanced')],
-        ]),
-      );
-      return true;
-    }
-
-    case 'adv_limit_ttl': {
-      const n = parseNumber(text);
-      if (n == null || n < 10 || n > 300) {
-        await ctx.reply(t(lang, 'Enter seconds between 10 and 300.'));
-        return true;
-      }
-      state.limitTtlSeconds = Math.round(n);
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await showAdvMenu(ctx, state, telegramId);
-      return true;
-    }
-
-    case 'adv_max_rounds': {
-      const n = parseNumber(text);
-      if (n == null || n < 1 || n > 100) {
-        await ctx.reply(t(lang, 'Enter a number between 1 and 100.'));
-        return true;
-      }
-      state.maxRounds = Math.round(n);
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await showAdvMenu(ctx, state, telegramId);
-      return true;
-    }
-
-    case 'adv_slippage': {
-      const n = parseNumber(text);
-      if (n == null || n < 0.1 || n > 50) {
-        await ctx.reply(t(lang, 'Enter slippage between 0.1 and 50.'));
-        return true;
-      }
-      state.slippage = n;
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await showAdvMenu(ctx, state, telegramId);
-      return true;
-    }
-
-    case 'adv_tp_value': {
-      const n = parseNumber(text);
-      if (state.tpType === 'pct') {
-        if (n == null || n <= 0 || n > 1000) {
-          await ctx.reply(t(lang, 'Enter a percentage between 1 and 1000.'));
-          return true;
-        }
-        state.takeProfitPct = n;
-        state.takeProfitPrice = undefined;
-      } else {
-        if (n == null || n < 0.01 || n > 0.99) {
-          await ctx.reply(t(lang, 'Price must be 0.01–0.99.'));
-          return true;
-        }
-        state.takeProfitPrice = n;
-        state.takeProfitPct = undefined;
-      }
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await showAdvMenu(ctx, state, telegramId);
-      return true;
-    }
-
-    case 'adv_sl_value': {
-      const n = parseNumber(text);
-      if (state.slType === 'pct') {
-        if (n == null || n <= 0 || n > 100) {
-          await ctx.reply(t(lang, 'Enter a percentage between 1 and 100.'));
-          return true;
-        }
-        state.stopLossPct = n;
-        state.stopLossPrice = undefined;
-      } else {
-        if (n == null || n < 0.01 || n > 0.99) {
-          await ctx.reply(t(lang, 'Price must be 0.01–0.99.'));
-          return true;
-        }
-        state.stopLossPrice = n;
-        state.stopLossPct = undefined;
-      }
-      state.timestamp = Date.now();
-      updownAddState.set(telegramId, state);
-      await showAdvMenu(ctx, state, telegramId);
+      await showTpSlStep(ctx, state);
       return true;
     }
   }
@@ -1621,23 +1106,8 @@ export async function handleAddInput(ctx: Context, text: string): Promise<boolea
   return false;
 }
 
-// Advanced: TTL preset
-export async function handleAdvTtlPreset(ctx: Context, seconds: number): Promise<void> {
-  await ctx.answerCbQuery().catch(() => {});
-  const telegramId = ctx.from?.id.toString();
-  if (!telegramId) return;
-  const state = await updownAddState.get(telegramId);
-  if (!state) return;
-
-  state.limitTtlSeconds = seconds;
-  state.timestamp = Date.now();
-  updownAddState.set(telegramId, state);
-  await showAdvMenu(ctx, state, telegramId);
-}
-
 // ─── Ownership Helper ────────────────────────────────────────────────────────
 
-/** Verify the current user owns the strategy. Returns the strategy or null. */
 async function verifyUdOwnership(ctx: Context, stratId: string) {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return null;
@@ -1654,75 +1124,78 @@ export async function handleManage(ctx: Context, stratId: string): Promise<void>
   if (!telegramId) { if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {}); return; }
   updownEditState.delete(telegramId);
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
   const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) {
-    if (ctx.callbackQuery) await ctx.answerCbQuery(t(lang, 'Strategy not found')).catch(() => {});
+    if (ctx.callbackQuery) await ctx.answerCbQuery('Strategy not found').catch(() => {});
     return;
   }
   if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => {});
 
-  const statusStr = strat.isActive && !strat.isPaused ? `🟢 ${t(lang, 'Running')}` : `🔴 ${t(lang, 'Paused')}`;
-  const dirStr = strat.direction === 'up' ? 'UP' : 'DOWN';
+  const statusStr = strat.isActive && !strat.isPaused ? `🟢 Running` : `🔴 Paused`;
+  const coins = getStratCoins(strat);
+  const tfs = getStratTimeframes(strat);
+  const dirStr = strat.direction === 'up' ? 'UP'
+    : strat.direction === 'down' ? 'DOWN'
+    : strat.direction === 'both' ? 'Both'
+    : 'Either';
   const orderStr = strat.orderType === 'limit' && strat.limitPrice
     ? `Limit @ ${strat.limitPrice} (TTL: ${strat.limitTtlSeconds}s)` : 'Market';
-  const tf = tfShort(strat.timeframe);
-  const pcMinLabel = strat.priceChangeMin <= -9999 ? 'Any' : `$${strat.priceChangeMin}`;
-  const pcMaxLabel = strat.priceChangeMax >= 9999 ? 'Any' : `$${strat.priceChangeMax}`;
-  const pcStr = strat.priceChangeMin > -9999 || strat.priceChangeMax < 9999
-    ? `${pcMinLabel} – ${pcMaxLabel}` : 'Any';
+
+  const windowStr = strat.entryWindowSecs != null ? `${strat.entryWindowSecs}s` : 'Anytime';
+  const rangeMinCents = Math.round(strat.upPriceMin * 100);
+  const rangeMaxCents = Math.round(strat.upPriceMax * 100);
+
   const tpStr = strat.takeProfitPct != null ? `${strat.takeProfitPct}%`
     : strat.takeProfitPrice != null ? `@${strat.takeProfitPrice}` : '–';
   const slStr = strat.stopLossPct != null ? `${strat.stopLossPct}%`
     : strat.stopLossPrice != null ? `@${strat.stopLossPrice}` : '–';
 
   const lines = [
-    `<b>${esc(strat.label || 'AFK')}</b> · ${strat.coin} ${tf}`,
+    `<b>${esc(strat.label || 'AutoPilot')}</b>`,
     `${statusStr}`,
     ``,
-    `${t(lang, 'Direction')}: ${dirStr}`,
-    `${t(lang, 'Amount')}: $${strat.amount.toFixed(2)}`,
-    `${t(lang, 'Order')}: ${orderStr}`,
-    `${t(lang, 'Time')}: ${strat.timeRangeStart} – ${strat.timeRangeEnd}`,
-    `${t(lang, 'UP Price')}: ${strat.upPriceMin.toFixed(2)} – ${strat.upPriceMax.toFixed(2)}`,
-    `${strat.coin} ${t(lang, 'Change')}: ${pcStr}`,
-    `${t(lang, 'Rounds')}: ${strat.roundsExecuted}/${strat.maxRounds}`,
+    `Assets: ${coins.join(', ')}`,
+    `Timeframes: ${tfs.map(tf => tfShort(tf)).join(', ')}`,
+    `Direction: ${dirStr}`,
+    `Amount: $${strat.amount.toFixed(2)}`,
+    `Order: ${orderStr}`,
+    `Entry Window: ${windowStr}`,
+    `Price Range: ${rangeMinCents}–${rangeMaxCents}¢`,
+    `Rounds: ${strat.roundsExecuted}/${strat.maxRounds}`,
     `TP: ${tpStr} · SL: ${slStr}`,
-    `${t(lang, 'Slippage')}: ${strat.slippage}%`,
-    `${t(lang, 'Notifications')}: ${onOff(strat.notificationsEnabled)}`,
+    `Slippage: ${strat.slippage}%`,
+    `Notifications: ${onOff(strat.notificationsEnabled)}`,
   ];
 
   const id = strat.id;
   const isRunning = strat.isActive && !strat.isPaused;
 
   const buttons: any[][] = [
-    [Markup.button.callback(isRunning ? `⏹ ${t(lang, 'Pause')}` : `▶️ ${t(lang, 'Start')}`, isRunning ? `udm_pause_${id}` : `udm_start_${id}`)],
+    [Markup.button.callback(isRunning ? `⏹ Pause` : `▶️ Start`, isRunning ? `udm_pause_${id}` : `udm_start_${id}`)],
     [
-      Markup.button.callback(t(lang, 'Direction'), `udm_dir_${id}`),
-      Markup.button.callback(t(lang, 'Amount'), `udm_amt_${id}`),
-      Markup.button.callback(t(lang, 'Order Type'), `udm_ot_${id}`),
+      Markup.button.callback('Coins', `udm_coins_${id}`),
+      Markup.button.callback('Timeframes', `udm_tfs_${id}`),
+      Markup.button.callback('Direction', `udm_dir_${id}`),
     ],
     [
-      Markup.button.callback(t(lang, 'Time Range'), `udm_time_${id}`),
-      Markup.button.callback(t(lang, 'UP Price'), `udm_up_${id}`),
-      Markup.button.callback(`${strat.coin} ${t(lang, 'Change')}`, `udm_pc_${id}`),
+      Markup.button.callback('Amount', `udm_amt_${id}`),
+      Markup.button.callback('Window', `udm_win_${id}`),
+      Markup.button.callback('Range', `udm_up_${id}`),
     ],
     [
-      Markup.button.callback(t(lang, 'Rounds'), `udm_rnd_${id}`),
-      Markup.button.callback(t(lang, 'Slippage'), `udm_slip_${id}`),
-      ...(strat.orderType === 'limit' ? [Markup.button.callback(t(lang, 'Limit TTL'), `udm_ttl_${id}`)] : []),
+      Markup.button.callback('Order Type', `udm_ot_${id}`),
+      Markup.button.callback('Slippage', `udm_slip_${id}`),
     ],
     [
       Markup.button.callback('TP', `udm_tp_${id}`),
       Markup.button.callback('SL', `udm_sl_${id}`),
     ],
     [
-      Markup.button.callback(t(lang, 'Notify'), `udm_notify_${id}`),
-      Markup.button.callback(t(lang, 'Rename'), `udm_rename_${id}`),
-      Markup.button.callback(t(lang, 'Delete'), `udm_del_${id}`),
+      Markup.button.callback('Notify', `udm_notify_${id}`),
+      Markup.button.callback('Rename', `udm_rename_${id}`),
+      Markup.button.callback('Delete', `udm_del_${id}`),
     ],
-    [Markup.button.callback(`← ${t(lang, 'Back')}`, 'updown_list')],
+    [Markup.button.callback(`← Back`, 'updown_list')],
   ];
 
   await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
@@ -1750,9 +1223,12 @@ export async function handleManageToggleDirection(ctx: Context, stratId: string)
   await ctx.answerCbQuery().catch(() => {});
   const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
+  // Cycle: up → down → both → either → up
+  const cycle: Record<string, string> = { up: 'down', down: 'both', both: 'either', either: 'up' };
+  const next = cycle[strat.direction] || 'up';
   await prisma.upDownStrategy.update({
     where: { id: stratId },
-    data: { direction: strat.direction === 'up' ? 'down' : 'up' },
+    data: { direction: next },
   });
   await handleManage(ctx, stratId);
 }
@@ -1773,10 +1249,7 @@ export async function handleManageOrderType(ctx: Context, stratId: string): Prom
   const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
   if (strat.orderType === 'market') {
-    // Switch to limit — prompt for price
     const telegramId = ctx.from?.id.toString();
     if (!telegramId) return;
     updownEditState.set(telegramId, {
@@ -1785,11 +1258,10 @@ export async function handleManageOrderType(ctx: Context, stratId: string): Prom
       timestamp: Date.now(),
     });
     await sendHtml(ctx,
-      `💲 <b>${t(lang, 'Set Limit Price')}</b>\n\n${t(lang, 'Enter limit order price (0.01–0.99):')}`,
-      Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Cancel')}`, `ud_task_${stratId}`)]]),
+      `💲 <b>Set Limit Price</b>\n\nEnter limit order price (0.01–0.99):`,
+      Markup.inlineKeyboard([[Markup.button.callback(`← Cancel`, `ud_task_${stratId}`)]]),
     );
   } else {
-    // Switch back to market
     await prisma.upDownStrategy.update({
       where: { id: stratId },
       data: { orderType: 'market', limitPrice: null },
@@ -1808,22 +1280,20 @@ export async function handleManageEditPrompt(
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   updownEditState.set(telegramId, { step, stratId, timestamp: Date.now() });
   await sendHtml(ctx, prompt,
-    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Cancel')}`, `ud_task_${stratId}`)]]),
+    Markup.inlineKeyboard([[Markup.button.callback(`← Cancel`, `ud_task_${stratId}`)]]),
   );
 }
 
 export async function handleManageDelete(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `⚠️ <b>${t(lang, 'Delete Strategy')}</b>\n\n${t(lang, 'Are you sure?')}`,
+    `⚠️ <b>Delete Strategy</b>\n\nAre you sure?`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback(`🗑 ${t(lang, 'Yes, Delete')}`, `udm_deldo_${stratId}`),
-        Markup.button.callback(`← ${t(lang, 'Cancel')}`, `ud_task_${stratId}`),
+        Markup.button.callback(`🗑 Yes, Delete`, `udm_deldo_${stratId}`),
+        Markup.button.callback(`← Cancel`, `ud_task_${stratId}`),
       ],
     ]),
   );
@@ -1833,13 +1303,12 @@ export async function handleManageDeleteExecute(ctx: Context, stratId: string): 
   await ctx.answerCbQuery().catch(() => {});
   const strat = await verifyUdOwnership(ctx, stratId);
   if (!strat) return;
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   try {
     await prisma.upDownTrade.deleteMany({ where: { strategyId: stratId } });
     await prisma.upDownStrategy.delete({ where: { id: stratId } });
   } catch (err: any) {
-    logger.error(`[updown] Failed to delete strategy ${stratId}: ${err?.message}`);
-    await sendHtml(ctx, t(lang, 'Failed to delete strategy. Please try again.'));
+    logger.error(`[autopilot] Failed to delete strategy ${stratId}: ${err?.message}`);
+    await sendHtml(ctx, 'Failed to delete strategy. Please try again.');
     return;
   }
   await handleUpDownList(ctx);
@@ -1850,74 +1319,66 @@ export async function handleManageRename(ctx: Context, stratId: string): Promise
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
-
   updownEditState.set(telegramId, {
     step: 'awaiting_rename',
     stratId,
     timestamp: Date.now(),
   });
   await sendHtml(ctx,
-    `✏️ <b>${t(lang, 'Rename Strategy')}</b>\n\n${t(lang, 'Enter a new name:')}`,
-    Markup.inlineKeyboard([[Markup.button.callback(`← ${t(lang, 'Cancel')}`, `ud_task_${stratId}`)]]),
+    `✏️ <b>Rename Strategy</b>\n\nEnter a new name:`,
+    Markup.inlineKeyboard([[Markup.button.callback(`← Cancel`, `ud_task_${stratId}`)]]),
   );
 }
 
 // TP/SL manage prompts
 export async function handleManageTpPrompt(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `🏆 <b>${t(lang, 'Take Profit')}</b>\n\n${t(lang, 'Select TP type:')}`,
+    `🏆 <b>Take Profit</b>\n\nSelect TP type:`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback(`📊 ${t(lang, '% from entry')}`, `udm_tp_pct_${stratId}`),
-        Markup.button.callback(`💲 ${t(lang, 'Fixed price')}`, `udm_tp_fix_${stratId}`),
+        Markup.button.callback(`📊 % from entry`, `udm_tp_pct_${stratId}`),
+        Markup.button.callback(`💲 Fixed price`, `udm_tp_fix_${stratId}`),
       ],
-      [Markup.button.callback(`🗑 ${t(lang, 'Clear TP')}`, `udm_tp_clr_${stratId}`)],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, `ud_task_${stratId}`)],
+      [Markup.button.callback(`🗑 Clear TP`, `udm_tp_clr_${stratId}`)],
+      [Markup.button.callback(`← Cancel`, `ud_task_${stratId}`)],
     ]),
   );
 }
 
 export async function handleManageSlPrompt(ctx: Context, stratId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await sendHtml(ctx,
-    `🛑 <b>${t(lang, 'Stop Loss')}</b>\n\n${t(lang, 'Select SL type:')}`,
+    `🛑 <b>Stop Loss</b>\n\nSelect SL type:`,
     Markup.inlineKeyboard([
       [
-        Markup.button.callback(`📊 ${t(lang, '% from entry')}`, `udm_sl_pct_${stratId}`),
-        Markup.button.callback(`💲 ${t(lang, 'Fixed price')}`, `udm_sl_fix_${stratId}`),
+        Markup.button.callback(`📊 % from entry`, `udm_sl_pct_${stratId}`),
+        Markup.button.callback(`💲 Fixed price`, `udm_sl_fix_${stratId}`),
       ],
-      [Markup.button.callback(`🗑 ${t(lang, 'Clear SL')}`, `udm_sl_clr_${stratId}`)],
-      [Markup.button.callback(`← ${t(lang, 'Cancel')}`, `ud_task_${stratId}`)],
+      [Markup.button.callback(`🗑 Clear SL`, `udm_sl_clr_${stratId}`)],
+      [Markup.button.callback(`← Cancel`, `ud_task_${stratId}`)],
     ]),
   );
 }
 
 export async function handleManageTpTypePct(ctx: Context, stratId: string): Promise<void> {
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await handleManageEditPrompt(ctx, stratId, 'awaiting_tp_pct',
-    `🏆 <b>${t(lang, 'TP Percentage')}</b>\n\n${t(lang, 'Enter TP % from entry (e.g. 50 for +50%):')}` );
+    `🏆 <b>TP Percentage</b>\n\nEnter TP % from entry (e.g. 50 for +50%):`);
 }
 
 export async function handleManageTpTypeFix(ctx: Context, stratId: string): Promise<void> {
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await handleManageEditPrompt(ctx, stratId, 'awaiting_tp_price',
-    `🏆 <b>${t(lang, 'TP Price')}</b>\n\n${t(lang, 'Enter target price (0.01–0.99):')}` );
+    `🏆 <b>TP Price</b>\n\nEnter target price (0.01–0.99):`);
 }
 
 export async function handleManageSlTypePct(ctx: Context, stratId: string): Promise<void> {
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await handleManageEditPrompt(ctx, stratId, 'awaiting_sl_pct',
-    `🛑 <b>${t(lang, 'SL Percentage')}</b>\n\n${t(lang, 'Enter SL % from entry (e.g. 25 for -25%):')}` );
+    `🛑 <b>SL Percentage</b>\n\nEnter SL % from entry (e.g. 25 for -25%):`);
 }
 
 export async function handleManageSlTypeFix(ctx: Context, stratId: string): Promise<void> {
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   await handleManageEditPrompt(ctx, stratId, 'awaiting_sl_price',
-    `🛑 <b>${t(lang, 'SL Price')}</b>\n\n${t(lang, 'Enter stop-loss price (0.01–0.99):')}` );
+    `🛑 <b>SL Price</b>\n\nEnter stop-loss price (0.01–0.99):`);
 }
 
 export async function handleManageTpClear(ctx: Context, stratId: string): Promise<void> {
@@ -1942,6 +1403,24 @@ export async function handleManageSlClear(ctx: Context, stratId: string): Promis
   await handleManage(ctx, stratId);
 }
 
+// Manage: Edit entry window
+export async function handleManageWindow(ctx: Context, stratId: string): Promise<void> {
+  await handleManageEditPrompt(ctx, stratId, 'awaiting_entry_window',
+    `⏱ <b>Edit Entry Window</b>\n\nEnter seconds before candle end (5–14400), or "0" for Anytime:`);
+}
+
+// Manage: Edit coins
+export async function handleManageCoins(ctx: Context, stratId: string): Promise<void> {
+  await handleManageEditPrompt(ctx, stratId, 'awaiting_coins',
+    `🪙 <b>Edit Assets</b>\n\nEnter comma-separated assets (e.g. <code>BTC,ETH,SOL</code>):`);
+}
+
+// Manage: Edit timeframes
+export async function handleManageTimeframes(ctx: Context, stratId: string): Promise<void> {
+  await handleManageEditPrompt(ctx, stratId, 'awaiting_timeframes',
+    `⏱ <b>Edit Timeframes</b>\n\nEnter comma-separated (e.g. <code>5-Minute,1-Hour,4-Hour</code>)\n\nValid: 5-Minute, 15-Minute, 1-Hour, 4-Hour`);
+}
+
 // ─── Edit Text Input Handler ────────────────────────────────────────────────
 
 export async function handleEditInput(ctx: Context, text: string): Promise<boolean> {
@@ -1950,14 +1429,12 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
   const state = await updownEditState.get(telegramId);
   if (!state) return false;
 
-  const lang = ((ctx as any).userLanguage as Locale) || 'en';
   const { step, stratId } = state;
 
-  // Verify ownership before any update
   const owned = await verifyUdOwnership(ctx, stratId);
   if (!owned) {
     updownEditState.delete(telegramId);
-    await ctx.reply(t(lang, 'Strategy not found.'));
+    await ctx.reply('Strategy not found.');
     return true;
   }
 
@@ -1965,7 +1442,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_amount': {
       const n = parseNumber(text);
       if (n == null || n < 1 || n > 10000) {
-        await ctx.reply(t(lang, 'Enter a valid amount (1–10000).'));
+        await ctx.reply('Enter a valid amount (1–10000).');
         return true;
       }
       await prisma.upDownStrategy.update({ where: { id: stratId }, data: { amount: n } });
@@ -1977,7 +1454,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_slippage': {
       const n = parseNumber(text);
       if (n == null || n < 0.1 || n > 50) {
-        await ctx.reply(t(lang, 'Enter slippage between 0.1 and 50.'));
+        await ctx.reply('Enter slippage between 0.1 and 50.');
         return true;
       }
       await prisma.upDownStrategy.update({ where: { id: stratId }, data: { slippage: n } });
@@ -1989,17 +1466,13 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_time_range': {
       const parts = text.split(',').map(s => s.trim());
       if (parts.length !== 2) {
-        await ctx.reply(t(lang, 'Enter as mm:ss, mm:ss (e.g. 00:00, 14:55)'));
+        await ctx.reply('Enter as mm:ss, mm:ss (e.g. 00:00, 14:55)');
         return true;
       }
-      const startSec = parseTimeStr(parts[0]);
-      const endSec = parseTimeStr(parts[1]);
-      if (startSec == null || endSec == null) {
-        await ctx.reply(t(lang, 'Invalid time format. Use mm:ss (e.g. 00:00, 14:55)'));
-        return true;
-      }
-      if (startSec >= endSec) {
-        await ctx.reply(t(lang, 'Start time must be before end time.'));
+      const m1 = /^(\d{1,2}):(\d{2})$/.exec(parts[0]);
+      const m2 = /^(\d{1,2}):(\d{2})$/.exec(parts[1]);
+      if (!m1 || !m2) {
+        await ctx.reply('Invalid time format. Use mm:ss');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2014,18 +1487,18 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_up_price': {
       const parts = text.split(',').map(s => s.trim());
       if (parts.length !== 2) {
-        await ctx.reply(t(lang, 'Enter as min, max (e.g. 0.70, 0.90)'));
+        await ctx.reply('Enter as min, max in cents (e.g. 40, 60)');
         return true;
       }
       const min = parseNumber(parts[0]);
       const max = parseNumber(parts[1]);
-      if (min == null || max == null || min < 0.01 || max > 0.99 || min > max) {
-        await ctx.reply(t(lang, 'Invalid range. Use 0.01–0.99, min <= max.'));
+      if (min == null || max == null || min < 0 || max > 100 || min > max) {
+        await ctx.reply('Invalid range. Use 0–100, min ≤ max.');
         return true;
       }
       await prisma.upDownStrategy.update({
         where: { id: stratId },
-        data: { upPriceMin: min, upPriceMax: max },
+        data: { upPriceMin: min / 100, upPriceMax: max / 100 },
       });
       updownEditState.delete(telegramId);
       await handleManage(ctx, stratId);
@@ -2035,17 +1508,13 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_price_change': {
       const parts = text.split(',').map(s => s.trim());
       if (parts.length !== 2) {
-        await ctx.reply(t(lang, 'Enter as min, max in USD (e.g. -100, 9999)'));
+        await ctx.reply('Enter as min, max in USD (e.g. -100, 9999)');
         return true;
       }
       const min = parseNumber(parts[0]);
       const max = parseNumber(parts[1]);
-      if (min == null || max == null) {
-        await ctx.reply(t(lang, 'Invalid numbers.'));
-        return true;
-      }
-      if (min > max) {
-        await ctx.reply(t(lang, 'Min must be <= max.'));
+      if (min == null || max == null || min > max) {
+        await ctx.reply('Invalid. Min must be ≤ max.');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2059,8 +1528,8 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
 
     case 'awaiting_rounds': {
       const n = parseNumber(text);
-      if (n == null || n < 1 || n > 100) {
-        await ctx.reply(t(lang, 'Enter a number between 1 and 100.'));
+      if (n == null || n < 1 || n > 99999) {
+        await ctx.reply('Enter a number between 1 and 99999.');
         return true;
       }
       await prisma.upDownStrategy.update({ where: { id: stratId }, data: { maxRounds: Math.round(n) } });
@@ -2072,7 +1541,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_rename': {
       const name = text.trim().slice(0, 32);
       if (!name) {
-        await ctx.reply(t(lang, 'Name cannot be empty.'));
+        await ctx.reply('Name cannot be empty.');
         return true;
       }
       await prisma.upDownStrategy.update({ where: { id: stratId }, data: { label: name } });
@@ -2084,7 +1553,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_limit_price': {
       const n = parseNumber(text);
       if (n == null || n < 0.01 || n > 0.99) {
-        await ctx.reply(t(lang, 'Enter a price between 0.01 and 0.99.'));
+        await ctx.reply('Enter a price between 0.01 and 0.99.');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2099,7 +1568,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_limit_ttl': {
       const n = parseNumber(text);
       if (n == null || n < 10 || n > 300) {
-        await ctx.reply(t(lang, 'Enter seconds between 10 and 300.'));
+        await ctx.reply('Enter seconds between 10 and 300.');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2114,7 +1583,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_tp_pct': {
       const n = parseNumber(text);
       if (n == null || n <= 0 || n > 1000) {
-        await ctx.reply(t(lang, 'Enter a percentage (1–1000).'));
+        await ctx.reply('Enter a percentage (1–1000).');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2129,7 +1598,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_tp_price': {
       const n = parseNumber(text);
       if (n == null || n < 0.01 || n > 0.99) {
-        await ctx.reply(t(lang, 'Enter a price between 0.01 and 0.99.'));
+        await ctx.reply('Enter a price between 0.01 and 0.99.');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2144,7 +1613,7 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_sl_pct': {
       const n = parseNumber(text);
       if (n == null || n <= 0 || n > 100) {
-        await ctx.reply(t(lang, 'Enter a percentage (1–100).'));
+        await ctx.reply('Enter a percentage (1–100).');
         return true;
       }
       await prisma.upDownStrategy.update({
@@ -2159,12 +1628,70 @@ export async function handleEditInput(ctx: Context, text: string): Promise<boole
     case 'awaiting_sl_price': {
       const n = parseNumber(text);
       if (n == null || n < 0.01 || n > 0.99) {
-        await ctx.reply(t(lang, 'Enter a price between 0.01 and 0.99.'));
+        await ctx.reply('Enter a price between 0.01 and 0.99.');
         return true;
       }
       await prisma.upDownStrategy.update({
         where: { id: stratId },
         data: { stopLossPrice: n, stopLossPct: null },
+      });
+      updownEditState.delete(telegramId);
+      await handleManage(ctx, stratId);
+      return true;
+    }
+
+    case 'awaiting_entry_window': {
+      const n = parseNumber(text);
+      if (n != null && n === 0) {
+        // Anytime
+        await prisma.upDownStrategy.update({ where: { id: stratId }, data: { entryWindowSecs: null } });
+        updownEditState.delete(telegramId);
+        await handleManage(ctx, stratId);
+        return true;
+      }
+      if (n == null || n < 5 || n > 14400) {
+        await ctx.reply('Enter seconds between 5 and 14400, or 0 for Anytime.');
+        return true;
+      }
+      await prisma.upDownStrategy.update({ where: { id: stratId }, data: { entryWindowSecs: Math.round(n) } });
+      updownEditState.delete(telegramId);
+      await handleManage(ctx, stratId);
+      return true;
+    }
+
+    case 'awaiting_coins': {
+      const raw = text.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      const valid = raw.filter(c => COIN_LIST.includes(c));
+      if (valid.length === 0) {
+        await ctx.reply(`Enter valid coins: ${COIN_LIST.join(', ')}`);
+        return true;
+      }
+      await prisma.upDownStrategy.update({
+        where: { id: stratId },
+        data: {
+          coin: valid[0],
+          coins: valid.length > 1 ? valid.join(',') : null,
+        },
+      });
+      updownEditState.delete(telegramId);
+      await handleManage(ctx, stratId);
+      return true;
+    }
+
+    case 'awaiting_timeframes': {
+      const validTfs = TF_LIST.map(t => t.key);
+      const raw = text.split(',').map(s => s.trim()).filter(Boolean);
+      const valid = raw.filter(t => validTfs.includes(t));
+      if (valid.length === 0) {
+        await ctx.reply(`Enter valid timeframes: ${validTfs.join(', ')}`);
+        return true;
+      }
+      await prisma.upDownStrategy.update({
+        where: { id: stratId },
+        data: {
+          timeframe: valid[0],
+          timeframes: valid.length > 1 ? valid.join(',') : null,
+        },
       });
       updownEditState.delete(telegramId);
       await handleManage(ctx, stratId);

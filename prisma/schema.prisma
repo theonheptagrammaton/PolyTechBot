@@ -276,6 +276,9 @@ model UpDownStrategy {
   // Target
   coin                String   @default("BTC")
   timeframe           String   @default("15-Minute")
+  coins               String?  // comma-separated multi-select: "BTC,SOL,XRP" — overrides `coin` when set
+  timeframes          String?  // comma-separated multi-select: "5-Minute,1-Hour,4-Hour" — overrides `timeframe` when set
+  entryWindowSecs     Int?     // seconds before candle end to start looking; null = anytime
 
   // Triggers
   timeRangeStart      String   @default("00:00")

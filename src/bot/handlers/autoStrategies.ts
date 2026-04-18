@@ -68,14 +68,14 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
     `🎯 <b>${t(lang, 'Bonding')}</b>`,
     `└ ${bondTotal === 0 ? '💤' : bondRunning > 0 ? '🟢' : '🔴'} ${bondStatus}`,
     ``,
-    `📊 <b>${t(lang, 'Up-Down')}</b>`,
+    `🤖 <b>${t(lang, 'AutoPilot')}</b>`,
     `└ ${updownTotal === 0 ? '💤' : updownRunning > 0 ? '🟢' : '🔴'} ${updownStatus}`,
   ];
 
   const buttons = [
     [
       Markup.button.callback(`🎯 ${t(lang, 'Bonding')}`, 'bond_list'),
-      Markup.button.callback(`📊 ${t(lang, 'Up-Down')}`, 'updown_list'),
+      Markup.button.callback(`🤖 ${t(lang, 'AutoPilot')}`, 'updown_list'),
     ],
     [
       Markup.button.callback(`🧪 ${t(lang, 'bt.menu.title')}`, 'bt_menu'),

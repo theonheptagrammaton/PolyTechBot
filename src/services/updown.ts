@@ -735,6 +735,29 @@ async function updownTickInner(): Promise<void> {
   }
 }
 
+/** Get remaining seconds until market end */
+function getRemainingSeconds(market: UpDownMarket): number {
+  const endMs = new Date(market.endDate).getTime();
+  return Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+}
+
+/** Resolve directions to execute based on strategy direction mode */
+function getDirections(direction: string, upPrice: number, upPriceMin: number, upPriceMax: number): string[] {
+  switch (direction) {
+    case 'up': return ['up'];
+    case 'down': return ['down'];
+    case 'both': return ['up', 'down'];
+    case 'either': {
+      // Pick whichever side is in range; default to 'up'
+      if (upPrice >= upPriceMin && upPrice <= upPriceMax) return ['up'];
+      const downPrice = 1 - upPrice;
+      if (downPrice >= upPriceMin && downPrice <= upPriceMax) return ['down'];
+      return ['up']; // fallback
+    }
+    default: return ['up'];
+  }
+}
+
 async function processStrategy(
   strat: any,
   markets: UpDownMarket[],
@@ -742,7 +765,6 @@ async function processStrategy(
 ): Promise<void> {
   // 1. Max rounds check
   if (strat.roundsExecuted >= strat.maxRounds) {
-    // Auto-pause
     await prisma.upDownStrategy.update({
       where: { id: strat.id },
       data: { isPaused: true },
@@ -751,7 +773,7 @@ async function processStrategy(
       sendNotification({
         chatId: strat.user.telegramId,
         text:
-          `⏹ <b>Up-Down Strategy Paused</b>\n\n` +
+          `⏹ <b>AutoPilot Strategy Paused</b>\n\n` +
           `${coinEmoji(strat.coin)} ${strat.label || strat.coin} reached max rounds (${strat.maxRounds}).\n` +
           `Strategy has been auto-paused.`,
       });
@@ -759,125 +781,147 @@ async function processStrategy(
     return;
   }
 
-  // 2. Find matching market
-  const market = findMatchingMarket(strat.coin, strat.timeframe, markets);
-  if (!market) return;
+  // Parse multi-values
+  const coins: string[] = strat.coins ? strat.coins.split(',') : [strat.coin];
+  const timeframes: string[] = strat.timeframes ? strat.timeframes.split(',') : [strat.timeframe];
 
-  // 3. Dedup — already traded this round?
-  const dedupKey = `updown:dedup:${strat.id}:${market.conditionId}`;
-  const alreadyTraded = await redisCache.get<number>(dedupKey);
-  if (alreadyTraded) return;
+  for (const coin of coins) {
+    for (const tf of timeframes) {
+      // 2. Find matching market
+      const market = findMatchingMarket(coin, tf, markets);
+      if (!market) continue;
 
-  // 4. Time range check
-  const elapsed = elapsedSeconds(market.startDate);
-  if (elapsed < 0) return;
-  const startSec = parseTimeToSeconds(strat.timeRangeStart);
-  const endSec = parseTimeToSeconds(strat.timeRangeEnd);
-  if (elapsed < startSec || elapsed > endSec) return;
+      // 3. Dedup — already traded this round?
+      const dedupKey = `updown:dedup:${strat.id}:${market.conditionId}`;
+      const alreadyTraded = await redisCache.get<number>(dedupKey);
+      if (alreadyTraded) continue;
 
-  // 5. UP price check
-  const upPrice = market.upPrice;
-  if (upPrice < strat.upPriceMin || upPrice > strat.upPriceMax) return;
-
-  // 6. Spot price change check
-  try {
-    const currentSpot = await fetchSpotPrice(strat.coin);
-    const openSpot = await getRoundOpenPrice(strat.coin, market.conditionId, market.startDate);
-    const delta = currentSpot - openSpot;
-    if (delta < strat.priceChangeMin || delta > strat.priceChangeMax) return;
-  } catch {
-    // If price fetch fails, skip this tick
-    return;
-  }
-
-  // All triggers passed — execute!
-  logger.info(`[updown] Strategy ${strat.id} triggered on ${market.conditionId}`);
-
-  // Set dedup key BEFORE execution to prevent race condition with concurrent ticks
-  await redisCache.set(dedupKey, 1, 1200); // 20min
-
-  const result = await executeUpDownOrder(
-    strat.user,
-    market,
-    strat,
-    sendNotification,
-  );
-
-  // On failure: distinguish retryable vs. fatal errors
-  if (!result.success) {
-    const msg = (result.errorMsg ?? '').toLowerCase();
-    const isFatalForRound =
-      msg.includes('not enough balance') ||
-      msg.includes('insufficient') ||
-      msg.includes('balance too low') ||
-      msg.includes('no proxy address') ||
-      msg.includes('trade amount too small');
-
-    if (isFatalForRound) {
-      // Track consecutive balance failures for this strategy
-      const failCountKey = `updown:balance_fail:${strat.id}`;
-      const prevFails = (await redisCache.get<number>(failCountKey)) ?? 0;
-      const failCount = prevFails + 1;
-      await redisCache.set(failCountKey, failCount, 3600); // 1h TTL
-
-      if (failCount >= 3) {
-        // Auto-pause after 3 consecutive balance failures
-        await prisma.upDownStrategy.update({
-          where: { id: strat.id },
-          data: { isPaused: true },
-        });
-        await redisCache.del(failCountKey);
-        logger.warn(`[updown] Strategy ${strat.id} auto-paused after ${failCount} consecutive balance failures`);
-        if (strat.notificationsEnabled) {
-          sendNotification({
-            chatId: strat.user.telegramId,
-            text:
-              `⏸ <b>Up-Down Strategy Auto-Paused</b>\n\n` +
-              `${coinEmoji(strat.coin)} ${strat.label || strat.coin}\n` +
-              `Reason: Insufficient balance (${failCount} consecutive failures)\n\n` +
-              `Deposit funds and resume the strategy manually.`,
-          });
-        }
-        // Keep dedup key so it doesn't fire again this round
-        return;
+      // 4. Entry window check (new: entryWindowSecs)
+      if (strat.entryWindowSecs != null) {
+        const remaining = getRemainingSeconds(market);
+        if (remaining > strat.entryWindowSecs) continue;
+      } else {
+        // Legacy: use timeRangeStart/End
+        const elapsed = elapsedSeconds(market.startDate);
+        if (elapsed < 0) continue;
+        const startSec = parseTimeToSeconds(strat.timeRangeStart);
+        const endSec = parseTimeToSeconds(strat.timeRangeEnd);
+        if (elapsed < startSec || elapsed > endSec) continue;
       }
 
-      // Keep dedup key — don't retry this round (prevents 5s spam)
-      logger.warn(`[updown] Strategy ${strat.id} balance failure ${failCount}/3, skipping rest of round`);
-    } else {
-      // Transient error (network, API timeout, etc.) — allow retry
-      await redisCache.del(dedupKey);
-    }
-  } else {
-    // Success — reset failure counter
-    const failCountKey = `updown:balance_fail:${strat.id}`;
-    await redisCache.del(failCountKey);
-  }
+      // 5. UP price check
+      const upPrice = market.upPrice;
+      if (upPrice < strat.upPriceMin || upPrice > strat.upPriceMax) continue;
 
-  // Send notification
-  if (strat.notificationsEnabled) {
-    if (result.success) {
-      const dir = strat.direction === 'up' ? '🟢 UP' : '🔴 DOWN';
-      const orderStr = strat.orderType === 'limit'
-        ? `Limit @ ${strat.limitPrice}`
-        : 'Market';
-      sendNotification({
-        chatId: strat.user.telegramId,
-        text:
-          `✅ <b>Up-Down Trade Executed</b>\n\n` +
-          `${coinEmoji(strat.coin)} ${strat.coin} ${strat.timeframe}\n` +
-          `Direction: ${dir} · ${orderStr}\n` +
-          `Amount: $${result.actualAmount?.toFixed(2) ?? strat.amount.toFixed(2)}\n` +
-          `Round: ${strat.roundsExecuted + 1}/${strat.maxRounds}`,
-      });
-    } else {
-      sendNotification({
-        chatId: strat.user.telegramId,
-        text:
-          `❌ <b>Up-Down Trade Failed</b>\n\n` +
-          `${coinEmoji(strat.coin)} ${strat.coin} ${strat.timeframe}\n` +
-          `Error: ${result.errorMsg?.slice(0, 100) ?? 'unknown'}`,
-      });
+      // 6. Spot price change check (legacy filters)
+      if (strat.priceChangeMin > -9999 || strat.priceChangeMax < 9999) {
+        try {
+          const currentSpot = await fetchSpotPrice(coin);
+          const openSpot = await getRoundOpenPrice(coin, market.conditionId, market.startDate);
+          const delta = currentSpot - openSpot;
+          if (delta < strat.priceChangeMin || delta > strat.priceChangeMax) continue;
+        } catch {
+          continue;
+        }
+      }
+
+      // All triggers passed — determine directions
+      const directions = getDirections(strat.direction, upPrice, strat.upPriceMin, strat.upPriceMax);
+
+      for (const dir of directions) {
+        const dirDedupKey = `updown:dedup:${strat.id}:${market.conditionId}:${dir}`;
+        const alreadyDir = await redisCache.get<number>(dirDedupKey);
+        if (alreadyDir) continue;
+
+        logger.info(`[updown] Strategy ${strat.id} triggered on ${market.conditionId} [${coin}/${tf}/${dir}]`);
+
+        // Set dedup BEFORE execution
+        await redisCache.set(dedupKey, 1, 1200); // 20min
+        await redisCache.set(dirDedupKey, 1, 1200);
+
+        // Build a strategy-like object with the current direction for execution
+        const execStrat = { ...strat, coin, direction: dir };
+
+        const result = await executeUpDownOrder(
+          strat.user,
+          market,
+          execStrat,
+          sendNotification,
+        );
+
+        // Handle failure
+        if (!result.success) {
+          const msg = (result.errorMsg ?? '').toLowerCase();
+          const isFatalForRound =
+            msg.includes('not enough balance') ||
+            msg.includes('insufficient') ||
+            msg.includes('balance too low') ||
+            msg.includes('no proxy address') ||
+            msg.includes('trade amount too small');
+
+          if (isFatalForRound) {
+            const failCountKey = `updown:balance_fail:${strat.id}`;
+            const prevFails = (await redisCache.get<number>(failCountKey)) ?? 0;
+            const failCount = prevFails + 1;
+            await redisCache.set(failCountKey, failCount, 3600);
+
+            if (failCount >= 3) {
+              await prisma.upDownStrategy.update({
+                where: { id: strat.id },
+                data: { isPaused: true },
+              });
+              await redisCache.del(failCountKey);
+              logger.warn(`[updown] Strategy ${strat.id} auto-paused after ${failCount} consecutive balance failures`);
+              if (strat.notificationsEnabled) {
+                sendNotification({
+                  chatId: strat.user.telegramId,
+                  text:
+                    `⏸ <b>AutoPilot Strategy Auto-Paused</b>\n\n` +
+                    `${coinEmoji(coin)} ${strat.label || coin}\n` +
+                    `Reason: Insufficient balance (${failCount} consecutive failures)\n\n` +
+                    `Deposit funds and resume the strategy manually.`,
+                });
+              }
+              return; // Stop processing this strategy entirely
+            }
+            logger.warn(`[updown] Strategy ${strat.id} balance failure ${failCount}/3, skipping rest of round`);
+          } else {
+            await redisCache.del(dedupKey);
+            await redisCache.del(dirDedupKey);
+          }
+        } else {
+          // Success — reset failure counter
+          const failCountKey = `updown:balance_fail:${strat.id}`;
+          await redisCache.del(failCountKey);
+        }
+
+        // Send notification
+        if (strat.notificationsEnabled) {
+          if (result.success) {
+            const dirLabel = dir === 'up' ? '🟢 UP' : '🔴 DOWN';
+            const orderStr = strat.orderType === 'limit'
+              ? `Limit @ ${strat.limitPrice}`
+              : 'Market';
+            sendNotification({
+              chatId: strat.user.telegramId,
+              text:
+                `✅ <b>AutoPilot Trade Executed</b>\n\n` +
+                `${coinEmoji(coin)} ${coin} ${tf}\n` +
+                `Direction: ${dirLabel} · ${orderStr}\n` +
+                `Amount: $${result.actualAmount?.toFixed(2) ?? strat.amount.toFixed(2)}\n` +
+                `Round: ${strat.roundsExecuted + 1}/${strat.maxRounds}`,
+            });
+          } else {
+            sendNotification({
+              chatId: strat.user.telegramId,
+              text:
+                `❌ <b>AutoPilot Trade Failed</b>\n\n` +
+                `${coinEmoji(coin)} ${coin} ${tf}\n` +
+                `Error: ${result.errorMsg?.slice(0, 100) ?? 'unknown'}`,
+            });
+          }
+        }
+      }
     }
   }
 }

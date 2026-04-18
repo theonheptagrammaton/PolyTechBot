@@ -204,27 +204,6 @@ import {
   handleRemoveExecute as handleUpDownRemoveExecute,
   handleHistory as handleUpDownHistory,
   handleClose as handleUpDownClose,
-  handleConfirmAdd as handleUpDownConfirmAdd,
-  handleAddCoin as handleUpDownAddCoin,
-  handleAddTimeframe as handleUpDownAddTimeframe,
-  handleAddDirection as handleUpDownAddDirection,
-  handleAddAmountPreset as handleUpDownAddAmountPreset,
-  handleAddTimeRangePreset as handleUpDownAddTimeRangePreset,
-  handleAddUpPricePreset as handleUpDownAddUpPricePreset,
-  handleAddPriceChangePreset as handleUpDownAddPriceChangePreset,
-  handleAddRoundsPreset as handleUpDownAddRoundsPreset,
-  handleAddAdvanced as handleUpDownAddAdvanced,
-  handleAdvOrderType as handleUpDownAdvOrderType,
-  handleAdvMaxRounds as handleUpDownAdvMaxRounds,
-  handleAdvSlippage as handleUpDownAdvSlippage,
-  handleAdvTpType as handleUpDownAdvTpType,
-  handleAdvSlType as handleUpDownAdvSlType,
-  handleAdvSkip as handleUpDownAdvSkip,
-  handleAdvTtlPreset as handleUpDownAdvTtlPreset,
-  handleAdvBackReview as handleUpDownAdvBackReview,
-  handleAdvEditField as handleUpDownAdvEditField,
-  handleAdvTpClear as handleUpDownAdvTpClear,
-  handleAdvSlClear as handleUpDownAdvSlClear,
   handleAddInput as handleUpDownAddInput,
   handleEditInput as handleUpDownEditInput,
   handleManage as handleUpDownManage,
@@ -245,8 +224,29 @@ import {
   handleManageSlTypeFix as handleUpDownManageSlTypeFix,
   handleManageTpClear as handleUpDownManageTpClear,
   handleManageSlClear as handleUpDownManageSlClear,
-  handleTemplateList as handleUpDownTemplateList,
-  handleTemplateUse as handleUpDownTemplateUse,
+  handleManageWindow as handleUpDownManageWindow,
+  handleManageCoins as handleUpDownManageCoins,
+  handleManageTimeframes as handleUpDownManageTimeframes,
+  // AutoPilot 8-step add flow
+  handleCategorySelect as handleApCategorySelect,
+  handleCoinToggle as handleApCoinToggle,
+  handleCoinNext as handleApCoinNext,
+  handleTfToggle as handleApTfToggle,
+  handleTfNext as handleApTfNext,
+  handleDirectionSelect as handleApDirectionSelect,
+  handleAmountPreset as handleApAmountPreset,
+  handleAmountCustom as handleApAmountCustom,
+  handleWindowPreset as handleApWindowPreset,
+  handleWindowAnytime as handleApWindowAnytime,
+  handleWindowCustom as handleApWindowCustom,
+  handleRangePreset as handleApRangePreset,
+  handleRangeCustom as handleApRangeCustom,
+  handleTpSet as handleApTpSet,
+  handleSlSet as handleApSlSet,
+  handleTpSlClear as handleApTpSlClear,
+  handleTpSlBack as handleApTpSlBack,
+  handleSave as handleApSave,
+  handleBack as handleApBack,
   updownAddState,
   updownEditState,
 } from './handlers/updown';
@@ -651,8 +651,9 @@ export class TelegramBot {
     // Bond trading command
     this.bot.command('bond', handleBondCommand);
 
-    // Up-Down auto trade command
+    // AutoPilot (Up-Down) auto trade command
     this.bot.command('afk', handleUpDownCommand);
+    this.bot.command('autopilot', handleUpDownCommand);
 
     // Backtest command
     this.bot.command('backtest', handleBacktestCommand);
@@ -1337,7 +1338,7 @@ export class TelegramBot {
     this.bot.action(/^bpm_deldo_(.+)$/, async (ctx) => handleBondManageDeleteExec(ctx, ctx.match[1]));
     this.bot.action(/^bpm_del_(.+)$/, async (ctx) => handleBondManageDelete(ctx, ctx.match[1]));
 
-    // ── Up-Down Auto Trade ──────────────────────────────────────────────────
+    // ── AutoPilot (Up-Down) ──────────────────────────────────────────────────
     this.bot.action('updown_list', handleUpDownList);
     this.bot.action('ud_start_add', handleUpDownStartAdd);
     this.bot.action('ud_start_all', handleUpDownStartAll);
@@ -1346,107 +1347,77 @@ export class TelegramBot {
     this.bot.action('ud_del_all_do', handleUpDownDeleteAllExecute);
     this.bot.action('ud_remove_prompt', handleUpDownRemovePrompt);
     this.bot.action('ud_close', handleUpDownClose);
-    this.bot.action('ud_add_confirm', handleUpDownConfirmAdd);
-    this.bot.action('ud_add_advanced', handleUpDownAddAdvanced);
-    this.bot.action('ud_adv_skip', handleUpDownAdvSkip);
-    this.bot.action('ud_adv_back_review', handleUpDownAdvBackReview);
-    this.bot.action(/^ud_adv_edit_(.+)$/, async (ctx) => handleUpDownAdvEditField(ctx, ctx.match[1]));
-    this.bot.action('ud_adv_tp_clear', handleUpDownAdvTpClear);
-    this.bot.action('ud_adv_sl_clear', handleUpDownAdvSlClear);
 
-    // Up-Down: remove single
+    // AutoPilot: remove single
     this.bot.action(/^ud_rm_(.+)$/, async (ctx) => {
       await handleUpDownRemoveExecute(ctx, ctx.match[1]);
     });
 
-    // Up-Down: history
+    // AutoPilot: history
     this.bot.action(/^ud_history_(\d+)$/, async (ctx) => {
       await handleUpDownHistory(ctx, parseInt(ctx.match[1], 10));
     });
 
-    // Up-Down: task manage
+    // AutoPilot: task manage
     this.bot.action(/^ud_task_(.+)$/, async (ctx) => {
       await handleUpDownManage(ctx, ctx.match[1]);
     });
 
-    // Up-Down: add flow — coin
-    this.bot.action(/^ud_add_coin_(.+)$/, async (ctx) => {
-      await handleUpDownAddCoin(ctx, ctx.match[1]);
-    });
+    // ── AutoPilot 8-Step Add Flow ─────────────────────────────────────────
+    this.bot.action('ap_cat_crypto', async (ctx) => handleApCategorySelect(ctx, 'crypto'));
+    this.bot.action('ap_cat_sport', async (ctx) => handleApCategorySelect(ctx, 'sport'));
+    this.bot.action('ap_back', handleApBack);
 
-    // Up-Down: add flow — timeframe
-    this.bot.action(/^ud_add_tf_(.+)$/, async (ctx) => {
-      await handleUpDownAddTimeframe(ctx, ctx.match[1]);
-    });
+    // Step 2: Coins multi-select
+    this.bot.action(/^ap_coin_(?!next)(.+)$/, async (ctx) => handleApCoinToggle(ctx, ctx.match[1]));
+    this.bot.action('ap_coin_next', handleApCoinNext);
 
-    // Up-Down: add flow — direction
-    this.bot.action('ud_add_dir_up', async (ctx) => handleUpDownAddDirection(ctx, 'up'));
-    this.bot.action('ud_add_dir_dn', async (ctx) => handleUpDownAddDirection(ctx, 'down'));
+    // Step 3: Timeframes multi-select
+    this.bot.action(/^ap_tf_(?!next)(.+)$/, async (ctx) => handleApTfToggle(ctx, ctx.match[1]));
+    this.bot.action('ap_tf_next', handleApTfNext);
 
-    // Up-Down: add flow — amount presets
-    this.bot.action('ud_add_amt_10', async (ctx) => handleUpDownAddAmountPreset(ctx, 10));
-    this.bot.action('ud_add_amt_25', async (ctx) => handleUpDownAddAmountPreset(ctx, 25));
-    this.bot.action('ud_add_amt_50', async (ctx) => handleUpDownAddAmountPreset(ctx, 50));
-    this.bot.action('ud_add_amt_100', async (ctx) => handleUpDownAddAmountPreset(ctx, 100));
+    // Step 4: Direction
+    this.bot.action('ap_dir_up', async (ctx) => handleApDirectionSelect(ctx, 'up'));
+    this.bot.action('ap_dir_down', async (ctx) => handleApDirectionSelect(ctx, 'down'));
+    this.bot.action('ap_dir_both', async (ctx) => handleApDirectionSelect(ctx, 'both'));
+    this.bot.action('ap_dir_either', async (ctx) => handleApDirectionSelect(ctx, 'either'));
 
-    // Up-Down: add flow — time range presets
-    this.bot.action('ud_add_tr_full', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'full'));
-    this.bot.action('ud_add_tr_late', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'late'));
-    this.bot.action('ud_add_tr_early', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'early'));
-    this.bot.action('ud_add_tr_mid', async (ctx) => handleUpDownAddTimeRangePreset(ctx, 'mid'));
+    // Step 5: Amount
+    this.bot.action('ap_amt_5', async (ctx) => handleApAmountPreset(ctx, 5));
+    this.bot.action('ap_amt_20', async (ctx) => handleApAmountPreset(ctx, 20));
+    this.bot.action('ap_amt_50', async (ctx) => handleApAmountPreset(ctx, 50));
+    this.bot.action('ap_amt_custom', handleApAmountCustom);
 
-    // Up-Down: add flow — UP price presets
-    this.bot.action('ud_add_up_any', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'any'));
-    this.bot.action('ud_add_up_hi', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'hi'));
-    this.bot.action('ud_add_up_lo', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'lo'));
-    this.bot.action('ud_add_up_mid', async (ctx) => handleUpDownAddUpPricePreset(ctx, 'mid'));
+    // Step 6: Entry Window
+    this.bot.action('ap_win_60', async (ctx) => handleApWindowPreset(ctx, 60));
+    this.bot.action('ap_win_150', async (ctx) => handleApWindowPreset(ctx, 150));
+    this.bot.action('ap_win_any', handleApWindowAnytime);
+    this.bot.action('ap_win_custom', handleApWindowCustom);
 
-    // Up-Down: add flow — price change presets
-    this.bot.action('ud_add_pc_any', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'any'));
-    this.bot.action('ud_add_pc_pump', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'pump'));
-    this.bot.action('ud_add_pc_dump', async (ctx) => handleUpDownAddPriceChangePreset(ctx, 'dump'));
+    // Step 7: Price Range (in cents)
+    this.bot.action('ap_rng_40_45', async (ctx) => handleApRangePreset(ctx, 40, 45));
+    this.bot.action('ap_rng_46_48', async (ctx) => handleApRangePreset(ctx, 46, 48));
+    this.bot.action('ap_rng_90_98', async (ctx) => handleApRangePreset(ctx, 90, 98));
+    this.bot.action('ap_rng_95_98', async (ctx) => handleApRangePreset(ctx, 95, 98));
+    this.bot.action('ap_rng_custom', handleApRangeCustom);
+    this.bot.action('ap_rng_scalp', async (ctx) => handleApRangePreset(ctx, 40, 60));
+    this.bot.action('ap_rng_arb', async (ctx) => handleApRangePreset(ctx, 90, 99));
 
-    // Up-Down: add flow — total rounds presets
-    this.bot.action('ud_add_rnd_5', async (ctx) => handleUpDownAddRoundsPreset(ctx, 5));
-    this.bot.action('ud_add_rnd_10', async (ctx) => handleUpDownAddRoundsPreset(ctx, 10));
-    this.bot.action('ud_add_rnd_25', async (ctx) => handleUpDownAddRoundsPreset(ctx, 25));
-    this.bot.action('ud_add_rnd_50', async (ctx) => handleUpDownAddRoundsPreset(ctx, 50));
-    this.bot.action('ud_add_rnd_100', async (ctx) => handleUpDownAddRoundsPreset(ctx, 100));
+    // Step 8: TP/SL
+    this.bot.action('ap_tp_set', handleApTpSet);
+    this.bot.action('ap_sl_set', handleApSlSet);
+    this.bot.action('ap_tpsl_clear', handleApTpSlClear);
+    this.bot.action('ap_tpsl_back', handleApTpSlBack);
+    this.bot.action('ap_save', handleApSave);
 
-    // Up-Down: advanced — order type
-    this.bot.action('ud_adv_ot_market', async (ctx) => handleUpDownAdvOrderType(ctx, 'market'));
-    this.bot.action('ud_adv_ot_limit', async (ctx) => handleUpDownAdvOrderType(ctx, 'limit'));
-
-    // Up-Down: advanced — max rounds presets
-    this.bot.action('ud_adv_mr_5', async (ctx) => handleUpDownAdvMaxRounds(ctx, 5));
-    this.bot.action('ud_adv_mr_10', async (ctx) => handleUpDownAdvMaxRounds(ctx, 10));
-    this.bot.action('ud_adv_mr_25', async (ctx) => handleUpDownAdvMaxRounds(ctx, 25));
-    this.bot.action('ud_adv_mr_50', async (ctx) => handleUpDownAdvMaxRounds(ctx, 50));
-
-    // Up-Down: advanced — slippage presets
-    this.bot.action('ud_adv_sl_2', async (ctx) => handleUpDownAdvSlippage(ctx, 2));
-    this.bot.action('ud_adv_sl_5', async (ctx) => handleUpDownAdvSlippage(ctx, 5));
-    this.bot.action('ud_adv_sl_10', async (ctx) => handleUpDownAdvSlippage(ctx, 10));
-
-    // Up-Down: advanced — TP/SL type
-    this.bot.action('ud_adv_tp_pct', async (ctx) => handleUpDownAdvTpType(ctx, 'pct'));
-    this.bot.action('ud_adv_tp_price', async (ctx) => handleUpDownAdvTpType(ctx, 'price'));
-    this.bot.action('ud_adv_sl_pct', async (ctx) => handleUpDownAdvSlType(ctx, 'pct'));
-    this.bot.action('ud_adv_sl_price', async (ctx) => handleUpDownAdvSlType(ctx, 'price'));
-
-    // Up-Down: advanced — TTL presets
-    this.bot.action('ud_adv_ttl_30', async (ctx) => handleUpDownAdvTtlPreset(ctx, 30));
-    this.bot.action('ud_adv_ttl_60', async (ctx) => handleUpDownAdvTtlPreset(ctx, 60));
-    this.bot.action('ud_adv_ttl_120', async (ctx) => handleUpDownAdvTtlPreset(ctx, 120));
-
-    // Up-Down: manage page actions
+    // ── AutoPilot Manage Page Actions ─────────────────────────────────────
     this.bot.action(/^udm_start_(.+)$/, async (ctx) => handleUpDownManageStart(ctx, ctx.match[1]));
     this.bot.action(/^udm_pause_(.+)$/, async (ctx) => handleUpDownManagePause(ctx, ctx.match[1]));
     this.bot.action(/^udm_dir_(.+)$/, async (ctx) => handleUpDownManageDirection(ctx, ctx.match[1]));
     this.bot.action(/^udm_notify_(.+)$/, async (ctx) => handleUpDownManageNotify(ctx, ctx.match[1]));
     this.bot.action(/^udm_ot_(.+)$/, async (ctx) => handleUpDownManageOT(ctx, ctx.match[1]));
 
-    // Up-Down: manage page — edit field prompts
+    // Manage page — edit field prompts
     this.bot.action(/^udm_amt_(.+)$/, async (ctx) => {
       await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_amount',
         `💰 <b>Edit Amount</b>\n\nEnter new amount in USD:`);
@@ -1455,36 +1426,36 @@ export class TelegramBot {
       await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_slippage',
         `⚡ <b>Edit Slippage</b>\n\nEnter slippage % (0.1–50):`);
     });
-    this.bot.action(/^udm_time_(.+)$/, async (ctx) => {
-      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_time_range',
-        `⏱ <b>Edit Time Range</b>\n\nEnter as mm:ss, mm:ss (e.g. 00:00, 14:55):`);
+    this.bot.action(/^udm_win_(.+)$/, async (ctx) => {
+      await handleUpDownManageWindow(ctx, ctx.match[1]);
+    });
+    this.bot.action(/^udm_coins_(.+)$/, async (ctx) => {
+      await handleUpDownManageCoins(ctx, ctx.match[1]);
+    });
+    this.bot.action(/^udm_tfs_(.+)$/, async (ctx) => {
+      await handleUpDownManageTimeframes(ctx, ctx.match[1]);
     });
     this.bot.action(/^udm_up_(.+)$/, async (ctx) => {
       await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_up_price',
-        `📈 <b>Edit UP Price Range</b>\n\nEnter as min, max (e.g. 0.70, 0.90):`);
-    });
-    this.bot.action(/^udm_pc_(.+)$/, async (ctx) => {
-      await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_price_change',
-        `🪙 <b>Edit Spot Price Change</b>\n\nEnter as min, max in USD (e.g. -100, 9999):`);
+        `🎯 <b>Edit Price Range</b>\n\nEnter as min, max in cents (e.g. 40, 60):`);
     });
     this.bot.action(/^udm_rnd_(.+)$/, async (ctx) => {
       await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_rounds',
-        `🔁 <b>Edit Max Rounds</b>\n\nEnter number (1–100):`);
+        `🔁 <b>Edit Max Rounds</b>\n\nEnter number (1–99999):`);
     });
     this.bot.action(/^udm_ttl_(.+)$/, async (ctx) => {
       await handleUpDownManageEditPrompt(ctx, ctx.match[1], 'awaiting_limit_ttl',
         `⏳ <b>Edit Limit TTL</b>\n\nEnter seconds before auto-cancel (10–300):`);
     });
 
-    // Up-Down: manage page — rename / delete
+    // Manage page — rename / delete
     // IMPORTANT: Register deldo BEFORE del — /^udm_del_(.+)$/ would greedily match "udm_deldo_..."
     this.bot.action(/^udm_rename_(.+)$/, async (ctx) => handleUpDownManageRename(ctx, ctx.match[1]));
     this.bot.action(/^udm_deldo_(.+)$/, async (ctx) => handleUpDownManageDeleteExec(ctx, ctx.match[1]));
     this.bot.action(/^udm_del_(.+)$/, async (ctx) => handleUpDownManageDelete(ctx, ctx.match[1]));
 
-    // Up-Down: manage page — TP/SL
+    // Manage page — TP/SL
     this.bot.action(/^udm_tp_(.+)$/, async (ctx) => {
-      // Distinguish type selection vs prompt
       const id = ctx.match[1];
       if (id.startsWith('pct_')) {
         await handleUpDownManageTpTypePct(ctx, id.slice(4));
@@ -1507,12 +1478,6 @@ export class TelegramBot {
       } else {
         await handleUpDownManageSlPrompt(ctx, id);
       }
-    });
-
-    // Up-Down: templates
-    this.bot.action('udt_list', handleUpDownTemplateList);
-    this.bot.action(/^udt_use_(.+)$/, async (ctx) => {
-      await handleUpDownTemplateUse(ctx, ctx.match[1]);
     });
 
     // Withdraw handlers
