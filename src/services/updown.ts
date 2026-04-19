@@ -476,16 +476,16 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
           const mid404Key = `updown:tpsl_mid404:${trade.id}`;
           const mid404Count = ((await redisCache.get<number>(mid404Key)) ?? 0) + 1;
           await redisCache.set(mid404Key, mid404Count, 3600);
-          if (mid404Count >= 20) {
-            // 20 consecutive failures (~100s) — mark trade as failed, stop retrying
+          if (mid404Count >= 5) {
+            // 5 consecutive failures (~75s) — market likely resolved, hand off to resolution check
             await prisma.upDownTrade.update({
               where: { id: trade.id },
-              data: { tpSlStatus: 'tp_triggered_failed' },
+              data: { tpSlStatus: 'awaiting_resolution' },
             });
             await redisCache.del(mid404Key);
-            logger.warn(`[updown] TP/SL: midpoint 404 x${mid404Count} for trade ${trade.id}, market likely resolved — marking failed`);
+            logger.info(`[updown] TP/SL: midpoint 404 x${mid404Count} for trade ${trade.id}, market likely resolved — awaiting resolution`);
           } else {
-            logger.warn(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id} (${mid404Count}/20)`);
+            logger.debug(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id} (${mid404Count}/5)`);
           }
           continue;
         }
@@ -706,17 +706,27 @@ async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Pr
       }
 
       if (order.status === 'cancelled' || order.status === 'expired') {
-        // Sell was cancelled/expired — reset for retry
+        // Sell was cancelled/expired — reset for retry (max 5)
         const retryKey = `updown:tpsl_retry:${trade.id}`;
         const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
-        await redisCache.set(retryKey, retryCount + 1, 3600);
 
-        await prisma.upDownTrade.update({
-          where: { id: trade.id },
-          data: { tpSlStatus: null, tpSlOrderId: null },
-        });
-        await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
-        logger.info(`[updown] TP/SL sell cancelled/expired for trade ${trade.id}, reset for retry (attempt ${retryCount + 1})`);
+        if (retryCount >= 5) {
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'awaiting_resolution', tpSlOrderId: null },
+          });
+          await redisCache.del(retryKey);
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+          logger.info(`[updown] TP/SL sell cancelled/expired max retries for trade ${trade.id}, awaiting resolution`);
+        } else {
+          await redisCache.set(retryKey, retryCount + 1, 3600);
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: null, tpSlOrderId: null },
+          });
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+          logger.info(`[updown] TP/SL sell cancelled/expired for trade ${trade.id}, reset for retry (attempt ${retryCount + 1}/5)`);
+        }
         continue;
       }
 
@@ -732,14 +742,24 @@ async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Pr
 
         const retryKey = `updown:tpsl_retry:${trade.id}`;
         const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
-        await redisCache.set(retryKey, retryCount + 1, 3600);
 
-        await prisma.upDownTrade.update({
-          where: { id: trade.id },
-          data: { tpSlStatus: null, tpSlOrderId: null },
-        });
-        await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
-        logger.info(`[updown] TP/SL sell stale (${Math.round(age / 1000)}s), cancelled for retry (attempt ${retryCount + 1}) trade ${trade.id}`);
+        if (retryCount >= 5) {
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'awaiting_resolution', tpSlOrderId: null },
+          });
+          await redisCache.del(retryKey);
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+          logger.info(`[updown] TP/SL sell stale max retries for trade ${trade.id}, awaiting resolution`);
+        } else {
+          await redisCache.set(retryKey, retryCount + 1, 3600);
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: null, tpSlOrderId: null },
+          });
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+          logger.info(`[updown] TP/SL sell stale (${Math.round(age / 1000)}s), cancelled for retry (attempt ${retryCount + 1}/5) trade ${trade.id}`);
+        }
       }
     } catch (err: any) {
       // 404 = order no longer exists on Predexon — treat like cancelled/expired
@@ -748,14 +768,14 @@ async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Pr
         const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
 
         if (retryCount >= 5) {
-          const failStatus = trade.tpSlStatus === 'tp_triggered' ? 'tp_triggered_failed' : 'sl_triggered_failed';
+          // Max retries exhausted — hand off to resolution check for claiming
           await prisma.upDownTrade.update({
             where: { id: trade.id },
-            data: { tpSlStatus: failStatus, tpSlOrderId: null },
+            data: { tpSlStatus: 'awaiting_resolution', tpSlOrderId: null },
           });
           await redisCache.del(retryKey);
           await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
-          logger.warn(`[updown] TP/SL sell order 404: max retries reached for trade ${trade.id}, marking as failed`);
+          logger.info(`[updown] TP/SL sell order 404: max retries for trade ${trade.id}, awaiting resolution`);
         } else {
           await redisCache.set(retryKey, retryCount + 1, 3600);
           await prisma.upDownTrade.update({
@@ -787,11 +807,15 @@ async function checkUpDownResolutions(sendNotification: SendNotificationFn): Pro
 }
 
 async function checkUpDownResolutionsInner(sendNotification: SendNotificationFn): Promise<void> {
-  // Find filled trades with no tpSlStatus (haven't been exited or redeemed yet)
+  // Find ALL filled trades that haven't been redeemed yet — covers null, awaiting_resolution,
+  // tp/sl triggered/failed states so users can always claim resolved positions
   const trades = await prisma.upDownTrade.findMany({
     where: {
       status: 'filled',
-      tpSlStatus: null,
+      OR: [
+        { tpSlStatus: null },
+        { tpSlStatus: { not: 'redeemed' } },
+      ],
     },
     include: {
       user: {
@@ -834,6 +858,14 @@ async function checkUpDownResolutionsInner(sendNotification: SendNotificationFn)
         if (locked) continue;
         await redisCache.set(lockKey, 1, 120);
 
+        // Cancel any pending TP/SL sell order — market resolved, sell won't fill
+        if (trade.tpSlOrderId && trade.user.predexonUserId) {
+          try {
+            await cancelOrder(trade.user.predexonUserId, trade.tpSlOrderId);
+            logger.info(`[updown] Cancelled pending TP/SL sell order for trade ${trade.id} before redeem`);
+          } catch { /* order may already be gone */ }
+        }
+
         try {
           const result = await manualRedeem(
             trade.user.encryptedPrivateKey,
@@ -845,8 +877,13 @@ async function checkUpDownResolutionsInner(sendNotification: SendNotificationFn)
           if (result.success) {
             await prisma.upDownTrade.update({
               where: { id: trade.id },
-              data: { tpSlStatus: 'redeemed' },
+              data: { tpSlStatus: 'redeemed', tpSlOrderId: null },
             });
+            // Clean up any leftover Redis keys from TP/SL processing
+            await redisCache.del(`updown:tpsl_mid404:${trade.id}`);
+            await redisCache.del(`updown:tpsl_retry:${trade.id}`);
+            await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+            await redisCache.del(`updown:tpsl_lock:${trade.id}`);
             logger.info(`[updown] Auto-claimed resolved trade ${trade.id}: ${trade.question.slice(0, 50)}`);
 
             const notify = trade.strategy?.notificationsEnabled ?? true;
