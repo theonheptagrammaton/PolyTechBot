@@ -383,16 +383,19 @@ async function executeCopyOrder(
       const traderShares = parseFloat((trade.sizeUsd / trade.price).toFixed(2));
       size = parseFloat(Math.min(traderShares, pos.size).toFixed(2));
 
-      if (size < 1) {
+      if (size < 0.01) {
         return { status: 'skipped', errorMsg: 'sell size too small' };
       }
 
-      // SELL via Predexon — market order
+      // SELL via Predexon — slippage-protected limit order
+      // (Polymarket CLOB only supports limit orders; 'market' type may be rejected)
+      const minSellPrice = Math.max(parseFloat((trade.price * (1 - slippageMult)).toFixed(4)), 0.01);
       const orderResp = await predexonPlaceOrder(predexonUserId, {
         venue: 'polymarket',
         tokenId,
         side: 'sell',
-        type: 'market',
+        type: 'limit',
+        price: String(minSellPrice),
         size: String(size),
       });
 
@@ -1292,15 +1295,17 @@ async function checkTpSlPositions(
       `entry=${pos.price.toFixed(4)} current=${currentPrice.toFixed(4)}`
     );
 
-    // Build synthetic SELL trade
+    // Build synthetic SELL trade — use MAX_SAFE_INTEGER for sizeUsd so
+    // executeCopyOrder sells the user's FULL position (traderShares will
+    // always exceed pos.size, so min(traderShares, pos.size) = pos.size).
     const syntheticTrade: DetectedTrade = {
       traderAddress: sub.traderAddress,
       marketId: pos.marketId,
       assetId: pos.assetId!,
       outcome: pos.outcome,
       side: 'SELL',
-      size: currentPrice > 0 ? pos.copiedSize / currentPrice : 0,
-      sizeUsd: pos.copiedSize,
+      size: 0,
+      sizeUsd: Number.MAX_SAFE_INTEGER,
       price: currentPrice,
       timestamp: Date.now(),
     };

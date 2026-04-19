@@ -575,8 +575,11 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
           continue;
         }
 
-        // Auto-cancel sell if not filled within 60s (don't let it sit forever)
-        scheduleLimitTtl(trade.user.predexonUserId, sellResp.orderId, 60, strat.id);
+        // Track when the TP/SL sell was placed for stale order detection.
+        // Do NOT use scheduleLimitTtl — it queries by the orderId column (the original BUY
+        // order) and cannot detect fill/cancel of the TP/SL sell stored in tpSlOrderId.
+        // monitorPendingTpSlSells() handles fill/cancel/stale detection instead.
+        await redisCache.set(`updown:tpsl_sell_at:${trade.id}`, Date.now(), 600);
 
         await prisma.upDownTrade.update({
           where: { id: trade.id },
@@ -585,7 +588,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
             tpSlOrderId: sellResp.orderId || null,
           },
         });
-        await redisCache.del(retryKey); // Clean up retry counter on success
+        // Don't clear retry counter yet — monitorPendingTpSlSells clears it on confirmed fill
       } catch (err: any) {
         logger.warn(`[updown] TP/SL sell failed for trade ${trade.id} (attempt ${retryCount + 1}/${MAX_TPSL_RETRIES}): ${err?.message}`);
         await redisCache.del(tpSlLockKey); // Release lock so next tick can retry
@@ -622,6 +625,80 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
       logger.warn(`[updown] TP/SL check error for trade ${trade.id}: ${err?.message}`);
       // Release the lock if it was acquired so the next tick can retry
       if (tpSlLockKey) await redisCache.del(tpSlLockKey).catch(() => {});
+    }
+  }
+}
+
+// ─── TP/SL Sell Order Monitor ──────────────────────────────────────────────
+// Watches TP/SL sell orders that were placed but may not have filled.
+// - Filled    → clean up (success)
+// - Cancelled → reset tpSlStatus to null so checkUpDownTpSl retries
+// - Stale >90s → cancel stale order and reset for retry at fresh price
+
+async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Promise<void> {
+  const pendingTrades = await prisma.upDownTrade.findMany({
+    where: {
+      tpSlStatus: { in: ['tp_triggered', 'sl_triggered'] },
+      tpSlOrderId: { not: null },
+    },
+    include: {
+      strategy: true,
+      user: { select: { telegramId: true, predexonUserId: true } },
+    },
+  });
+
+  for (const trade of pendingTrades) {
+    if (!trade.tpSlOrderId || !trade.user.predexonUserId) continue;
+
+    try {
+      const order = await getOrder(trade.user.predexonUserId, trade.tpSlOrderId);
+
+      if (order.status === 'filled') {
+        // Sell filled — clean up
+        await redisCache.del(`updown:tpsl_retry:${trade.id}`);
+        await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+        logger.info(`[updown] TP/SL sell confirmed filled for trade ${trade.id}`);
+        continue;
+      }
+
+      if (order.status === 'cancelled' || order.status === 'expired') {
+        // Sell was cancelled/expired — reset for retry
+        const retryKey = `updown:tpsl_retry:${trade.id}`;
+        const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
+        await redisCache.set(retryKey, retryCount + 1, 3600);
+
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { tpSlStatus: null, tpSlOrderId: null },
+        });
+        await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+        logger.info(`[updown] TP/SL sell cancelled/expired for trade ${trade.id}, reset for retry (attempt ${retryCount + 1})`);
+        continue;
+      }
+
+      // Order still open — check age and cancel if stale
+      const sellTime = await redisCache.get<number>(`updown:tpsl_sell_at:${trade.id}`);
+      const age = sellTime ? Date.now() - sellTime : 120_000; // default 2min if timestamp unknown
+
+      if (age > 90_000) {
+        // Stale sell order (>90s) — cancel and retry at fresh price
+        try {
+          await cancelOrder(trade.user.predexonUserId, trade.tpSlOrderId);
+        } catch { /* order may already be gone */ }
+
+        const retryKey = `updown:tpsl_retry:${trade.id}`;
+        const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
+        await redisCache.set(retryKey, retryCount + 1, 3600);
+
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { tpSlStatus: null, tpSlOrderId: null },
+        });
+        await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+        logger.info(`[updown] TP/SL sell stale (${Math.round(age / 1000)}s), cancelled for retry (attempt ${retryCount + 1}) trade ${trade.id}`);
+      }
+    } catch (err: any) {
+      logger.warn(`[updown] TP/SL sell monitor error for trade ${trade.id}: ${err?.message}`);
     }
   }
 }
@@ -751,10 +828,13 @@ export function startUpDownMonitor(sendNotification: SendNotificationFn): void {
     updownTick().catch(err => logger.error(`[updown] Tick error: ${err?.message}`));
   }, 5_000);
 
-  // TP/SL check every 15s
+  // TP/SL check every 15s (also monitors pending sell orders)
   tpSlInterval = setInterval(() => {
     checkUpDownTpSl(sendNotification).catch(err =>
       logger.error(`[updown] TP/SL check error: ${err?.message}`)
+    );
+    monitorPendingTpSlSells(sendNotification).catch(err =>
+      logger.error(`[updown] TP/SL sell monitor error: ${err?.message}`)
     );
   }, 15_000);
 
