@@ -542,13 +542,16 @@ export async function handleCategorySelect(ctx: Context, cat: string): Promise<v
   const state = await updownAddState.get(telegramId);
   if (!state) return;
 
-  state.step = 'coins';
+  state.step = 'timeframes';
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showCoinsStep(ctx, state);
+  await showTimeframesStep(ctx, state);
 }
 
-// Step 2: Assets (multi-select)
+// Step 2: Timeframes (multi-select) — moved before coins
+// (showTimeframesStep is defined below)
+
+// Step 3: Assets (multi-select)
 async function showCoinsStep(ctx: Context, state: AutoPilotAddState): Promise<void> {
   const selectedStr = state.coins.length === 0 ? 'none' : state.coins.join(', ');
   const coinButtons = COIN_LIST.map(c => {
@@ -557,7 +560,7 @@ async function showCoinsStep(ctx: Context, state: AutoPilotAddState): Promise<vo
   });
 
   await sendHtml(ctx,
-    `🤖 <b>AutoPilot · Step 2 / 8</b>\n\n` +
+    `🤖 <b>AutoPilot · Step 3 / 8</b>\n\n` +
     `Which assets should the bot autonomously trade? Pick one or more.\n\n` +
     `Selected: <b>${selectedStr}</b>`,
     Markup.inlineKeyboard([
@@ -597,13 +600,13 @@ export async function handleCoinNext(ctx: Context): Promise<void> {
   }
   await ctx.answerCbQuery().catch(() => {});
 
-  state.step = 'timeframes';
+  state.step = 'direction';
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showTimeframesStep(ctx, state);
+  await showDirectionStep(ctx);
 }
 
-// Step 3: Timeframes (multi-select)
+// Step 2: Timeframes (multi-select)
 async function showTimeframesStep(ctx: Context, state: AutoPilotAddState): Promise<void> {
   const selectedStr = state.timeframes.length === 0 ? 'none' : state.timeframes.map(tf => tfShort(tf)).join(', ');
   const tfButtons = TF_LIST.map(tf => {
@@ -612,7 +615,7 @@ async function showTimeframesStep(ctx: Context, state: AutoPilotAddState): Promi
   });
 
   await sendHtml(ctx,
-    `🤖 <b>AutoPilot · Step 3 / 8</b>\n\n` +
+    `🤖 <b>AutoPilot · Step 2 / 8</b>\n\n` +
     `Which timeframes should the bot scan? Pick one or more.\n\n` +
     `Selected: <b>${selectedStr}</b>`,
     Markup.inlineKeyboard([
@@ -652,10 +655,10 @@ export async function handleTfNext(ctx: Context): Promise<void> {
   }
   await ctx.answerCbQuery().catch(() => {});
 
-  state.step = 'direction';
+  state.step = 'coins';
   state.timestamp = Date.now();
   updownAddState.set(telegramId, state);
-  await showDirectionStep(ctx);
+  await showCoinsStep(ctx, state);
 }
 
 // Step 4: Direction
@@ -1049,20 +1052,20 @@ export async function handleBack(ctx: Context): Promise<void> {
       updownAddState.delete(telegramId);
       await handleUpDownList(ctx);
       return;
-    case 'coins':
+    case 'timeframes':
       state.step = 'category';
       updownAddState.set(telegramId, state);
       await showCategoryStep(ctx);
       return;
-    case 'timeframes':
-      state.step = 'coins';
-      updownAddState.set(telegramId, state);
-      await showCoinsStep(ctx, state);
-      return;
-    case 'direction':
+    case 'coins':
       state.step = 'timeframes';
       updownAddState.set(telegramId, state);
       await showTimeframesStep(ctx, state);
+      return;
+    case 'direction':
+      state.step = 'coins';
+      updownAddState.set(telegramId, state);
+      await showCoinsStep(ctx, state);
       return;
     case 'amount':
       state.step = 'direction';
