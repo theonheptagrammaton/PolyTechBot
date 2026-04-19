@@ -6,6 +6,8 @@ import { config } from '../config';
 import { transferCommission, COMMISSION_RATE } from './commission';
 import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder } from './predexon';
 import { ensurePredexonUser } from './user';
+import { getActivePositions } from './portfolio';
+import { manualRedeem } from './redeem';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const CLOB_BASE = 'https://clob.polymarket.com';
@@ -568,9 +570,115 @@ export async function checkDailyLoss(
   return false;
 }
 
+// ─── Auto-Claim Resolved Positions ──────────────────────────────────────────
+
+let _redeemRunning = false;
+
+async function checkBondResolutions(sendNotification: SendNotificationFn): Promise<void> {
+  if (_redeemRunning) return;
+  _redeemRunning = true;
+  try {
+    await checkBondResolutionsInner(sendNotification);
+  } finally {
+    _redeemRunning = false;
+  }
+}
+
+async function checkBondResolutionsInner(sendNotification: SendNotificationFn): Promise<void> {
+  // Find all filled bond trades (open positions that may have resolved)
+  const filledTrades = await prisma.bondTrade.findMany({
+    where: { status: 'filled' },
+    include: {
+      user: {
+        select: {
+          id: true,
+          telegramId: true,
+          encryptedPrivateKey: true,
+          polymarketProxyAddress: true,
+          predexonUserId: true,
+        },
+      },
+      strategy: { select: { notificationsEnabled: true, label: true } },
+    },
+  });
+
+  if (filledTrades.length === 0) return;
+
+  // Group by proxy address (1 Data API call per user)
+  const byProxy = new Map<string, typeof filledTrades>();
+  for (const trade of filledTrades) {
+    if (!trade.user.polymarketProxyAddress) continue;
+    const key = trade.user.polymarketProxyAddress.toLowerCase();
+    if (!byProxy.has(key)) byProxy.set(key, []);
+    byProxy.get(key)!.push(trade);
+  }
+
+  for (const [proxyAddress, trades] of byProxy) {
+    try {
+      const positions = await getActivePositions(proxyAddress);
+
+      for (const trade of trades) {
+        const pos = positions.find(p =>
+          p.conditionId === trade.conditionId && p.redeemable
+        );
+        if (!pos) continue;
+
+        // Prevent double-processing
+        const lockKey = `bond:redeem_lock:${trade.id}`;
+        const locked = await redisCache.get<number>(lockKey);
+        if (locked) continue;
+        await redisCache.set(lockKey, 1, 120);
+
+        try {
+          const result = await manualRedeem(
+            trade.user.encryptedPrivateKey,
+            trade.user.polymarketProxyAddress!,
+            pos,
+            trade.user.predexonUserId ?? undefined,
+          );
+
+          if (result.success) {
+            await prisma.bondTrade.update({
+              where: { id: trade.id },
+              data: { status: 'redeemed' },
+            });
+            logger.info(`[bond] Auto-claimed resolved trade ${trade.id}: ${trade.question.slice(0, 50)}`);
+
+            const notify = trade.strategy?.notificationsEnabled ?? true;
+            if (notify) {
+              const label = trade.strategy?.label || trade.conditionId.slice(0, 8);
+              sendNotification({
+                chatId: trade.user.telegramId,
+                text:
+                  `✅ <b>Bond Position Claimed</b>\n\n` +
+                  `📊 ${trade.question.slice(0, 100)}\n` +
+                  `🎯 ${trade.outcome} @ ${(trade.price * 100).toFixed(1)}%\n` +
+                  `💵 $${trade.amount.toFixed(2)} → USDC returned to wallet\n` +
+                  `📋 Strategy: ${label}`,
+              });
+            }
+          } else {
+            logger.warn(`[bond] Auto-redeem failed for trade ${trade.id}: ${result.error}`);
+            await redisCache.del(lockKey);
+          }
+        } catch (err: any) {
+          logger.warn(`[bond] Auto-redeem error for trade ${trade.id}: ${err?.message}`);
+          await redisCache.del(lockKey);
+        }
+
+        // Delay between redemptions to avoid rate limiting
+        await new Promise(r => setTimeout(r, 3_000));
+      }
+    } catch (err: any) {
+      logger.warn(`[bond] Resolution check error for proxy ${proxyAddress.slice(0, 10)}: ${err?.message}`);
+    }
+  }
+}
+
 // ─── Monitor ────────────────────────────────────────────────────────────────
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+let redeemInterval: ReturnType<typeof setInterval> | null = null;
 let _initialTimeout: ReturnType<typeof setTimeout> | null = null;
 let _sendNotification: SendNotificationFn | null = null;
 let _tickRunning = false;
@@ -584,6 +692,13 @@ export function startBondMonitor(sendNotification: SendNotificationFn): void {
     if (_tickRunning) { logger.warn('[bond] Tick still running, skipping'); return; }
     bondTick().catch(err => logger.error(`[bond] Tick error: ${err?.message}`));
   }, 60_000);
+
+  // Auto-claim resolved positions every 5 minutes
+  redeemInterval = setInterval(() => {
+    checkBondResolutions(sendNotification).catch(err =>
+      logger.error(`[bond] Resolution check error: ${err?.message}`)
+    );
+  }, 300_000);
 
   // First tick after 10s
   _initialTimeout = setTimeout(() => {
@@ -600,8 +715,12 @@ export function stopBondMonitor(): void {
   if (monitorInterval) {
     clearInterval(monitorInterval);
     monitorInterval = null;
-    logger.info('[bond] Bond monitor stopped');
   }
+  if (redeemInterval) {
+    clearInterval(redeemInterval);
+    redeemInterval = null;
+  }
+  logger.info('[bond] Bond monitor stopped');
 }
 
 async function bondTick(): Promise<void> {

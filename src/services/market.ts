@@ -257,7 +257,7 @@ export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
       return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
     });
 
-    await redisCache.set(cacheKey, markets, 60); // 60 s — prices change frequently
+    await redisCache.set(cacheKey, markets, 15); // 15 s — short cache for fresh prices during auto-trading
     logger.info(`Fetched ${markets.length} crypto up/down markets`);
     return markets;
   } catch (error) {

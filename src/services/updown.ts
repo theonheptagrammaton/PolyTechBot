@@ -7,6 +7,8 @@ import { placeOrder as predexonPlaceOrder, cancelOrder, getOrder, getPositions }
 import { ensurePredexonUser } from './user';
 import { getUpDownMarkets, UpDownMarket, UPDOWN_COIN_MAP } from './market';
 import { fetchSpotPrice, getRoundOpenPrice } from './cryptoPrice';
+import { getActivePositions } from './portfolio';
+import { manualRedeem } from './redeem';
 
 // ─── Fill-price polling ────────────────────────────────────────────────────
 // After placing a market order, poll getOrder() to retrieve the actual fill price
@@ -140,7 +142,25 @@ export async function executeUpDownOrder(
     }
 
     const tokenId = strategy.direction === 'up' ? market.upTokenId : market.downTokenId;
-    const triggerPrice = strategy.direction === 'up' ? market.upPrice : market.downPrice;
+
+    // Fetch LIVE midpoint from CLOB instead of using stale Gamma API price
+    let liveMidpoint: number | null = null;
+    try {
+      const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${tokenId}`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (midResp.ok) {
+        const midData: any = await midResp.json();
+        const mid = parseFloat(midData?.mid ?? '0');
+        if (!isNaN(mid) && mid > 0 && mid < 1) {
+          liveMidpoint = mid;
+        }
+      }
+    } catch (midErr: any) {
+      logger.warn(`[updown] Failed to fetch live midpoint for ${tokenId}: ${midErr?.message}`);
+    }
+
+    const triggerPrice = liveMidpoint ?? (strategy.direction === 'up' ? market.upPrice : market.downPrice);
 
     let orderResp: any;
 
@@ -171,19 +191,34 @@ export async function executeUpDownOrder(
       // Schedule TTL cancel
       scheduleLimitTtl(predexonUserId, orderResp.orderId, strategy.limitTtlSeconds, strategy.id);
     } else {
-      // Market order
+      // "Market" order → actually place a limit order at midpoint + slippage
+      // This prevents filling at terrible prices in thin orderbooks
+      const slippageFactor = 1 + (strategy.slippage / 100);
+      const maxPrice = Math.min(parseFloat((triggerPrice * slippageFactor).toFixed(4)), 0.99);
+      const rawSize = Math.floor((tradeAmount / maxPrice) * 100) / 100;
+
+      if (rawSize <= 0) {
+        return { success: false, errorMsg: 'Trade amount too small for current price' };
+      }
+
+      logger.info(`[updown] Placing slippage-protected order: mid=${triggerPrice} maxPrice=${maxPrice} slippage=${strategy.slippage}% size=${rawSize}`);
+
       orderResp = await predexonPlaceOrder(predexonUserId, {
         venue: 'polymarket',
         tokenId,
         side: 'buy',
-        type: 'market',
-        amount: String(tradeAmount),
+        type: 'limit',
+        price: String(maxPrice),
+        size: String(rawSize),
       });
 
       if (!orderResp.orderId) {
         const errMsg = orderResp.error || orderResp.message || 'order rejected';
         return { success: false, errorMsg: errMsg };
       }
+
+      // Auto-cancel after 30s if not filled (don't let it sit forever)
+      scheduleLimitTtl(predexonUserId, orderResp.orderId, 30, strategy.id);
     }
 
     // Get round open price for context
@@ -192,21 +227,23 @@ export async function executeUpDownOrder(
       roundStartPrice = await getRoundOpenPrice(strategy.coin, market.conditionId, market.startDate);
     } catch { /* non-critical */ }
 
-    // For market orders, poll the actual fill price from the API instead of using mid-market price
+    // Poll the actual fill price from the API
+    // All orders are now limit orders (market orders converted to slippage-protected limits)
     let actualFillPrice: number | null = null;
     let actualSizeMatched: string | null = null;
-    if (strategy.orderType === 'market') {
-      const fillResult = await pollActualFillPrice(predexonUserId, orderResp.orderId);
-      actualFillPrice = fillResult.price;
-      actualSizeMatched = fillResult.sizeMatched;
-      if (actualFillPrice) {
-        logger.info(`[updown] Market order ${orderResp.orderId} actual fill: price=${actualFillPrice} size=${actualSizeMatched} (mid was ${triggerPrice})`);
-      } else {
-        // Fallback to triggerPrice if polling fails, but log the issue
-        logger.warn(`[updown] Could not get actual fill price for ${orderResp.orderId}, falling back to mid-market ${triggerPrice}`);
-        actualFillPrice = triggerPrice;
-      }
+    const fillResult = await pollActualFillPrice(predexonUserId, orderResp.orderId);
+    actualFillPrice = fillResult.price;
+    actualSizeMatched = fillResult.sizeMatched;
+    if (actualFillPrice) {
+      logger.info(`[updown] Order ${orderResp.orderId} fill: price=${actualFillPrice} size=${actualSizeMatched} (mid was ${triggerPrice})`);
+    } else {
+      // DO NOT fall back to triggerPrice — it can be stale and corrupts TP/SL calculations.
+      // Leave fillPrice null; the scheduleLimitTtl check interval will update it when filled.
+      logger.warn(`[updown] Order ${orderResp.orderId} not yet filled after polling (may still fill via limit TTL check)`);
     }
+
+    // Determine initial status: filled if we got a fill price, otherwise open (limit pending)
+    const initialStatus = actualFillPrice ? 'filled' : 'open';
 
     // Record trade in DB
     await prisma.upDownTrade.create({
@@ -221,9 +258,9 @@ export async function executeUpDownOrder(
         roundStartPrice,
         triggerPrice,
         amount: tradeAmount,
-        fillPrice: strategy.orderType === 'market' ? actualFillPrice : null,
+        fillPrice: actualFillPrice,
         orderId: orderResp.orderId,
-        status: strategy.orderType === 'market' ? 'filled' : 'open',
+        status: initialStatus,
       },
     });
 
@@ -589,10 +626,117 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
   }
 }
 
+// ─── Auto-Claim Resolved Positions ──────────────────────────────────────────
+
+let _redeemRunning = false;
+
+async function checkUpDownResolutions(sendNotification: SendNotificationFn): Promise<void> {
+  if (_redeemRunning) return;
+  _redeemRunning = true;
+  try {
+    await checkUpDownResolutionsInner(sendNotification);
+  } finally {
+    _redeemRunning = false;
+  }
+}
+
+async function checkUpDownResolutionsInner(sendNotification: SendNotificationFn): Promise<void> {
+  // Find filled trades with no tpSlStatus (haven't been exited or redeemed yet)
+  const trades = await prisma.upDownTrade.findMany({
+    where: {
+      status: 'filled',
+      tpSlStatus: null,
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          telegramId: true,
+          encryptedPrivateKey: true,
+          polymarketProxyAddress: true,
+          predexonUserId: true,
+        },
+      },
+      strategy: { select: { notificationsEnabled: true, label: true } },
+    },
+  });
+
+  if (trades.length === 0) return;
+
+  // Group by proxy address (1 Data API call per user)
+  const byProxy = new Map<string, typeof trades>();
+  for (const trade of trades) {
+    if (!trade.user.polymarketProxyAddress) continue;
+    const key = trade.user.polymarketProxyAddress.toLowerCase();
+    if (!byProxy.has(key)) byProxy.set(key, []);
+    byProxy.get(key)!.push(trade);
+  }
+
+  for (const [proxyAddress, userTrades] of byProxy) {
+    try {
+      const positions = await getActivePositions(proxyAddress);
+
+      for (const trade of userTrades) {
+        const pos = positions.find(p =>
+          p.conditionId === trade.conditionId && p.redeemable
+        );
+        if (!pos) continue;
+
+        // Prevent double-processing
+        const lockKey = `updown:redeem_lock:${trade.id}`;
+        const locked = await redisCache.get<number>(lockKey);
+        if (locked) continue;
+        await redisCache.set(lockKey, 1, 120);
+
+        try {
+          const result = await manualRedeem(
+            trade.user.encryptedPrivateKey,
+            trade.user.polymarketProxyAddress!,
+            pos,
+            trade.user.predexonUserId ?? undefined,
+          );
+
+          if (result.success) {
+            await prisma.upDownTrade.update({
+              where: { id: trade.id },
+              data: { tpSlStatus: 'redeemed' },
+            });
+            logger.info(`[updown] Auto-claimed resolved trade ${trade.id}: ${trade.question.slice(0, 50)}`);
+
+            const notify = trade.strategy?.notificationsEnabled ?? true;
+            if (notify) {
+              sendNotification({
+                chatId: trade.user.telegramId,
+                text:
+                  `✅ <b>AutoPilot Position Claimed</b>\n\n` +
+                  `${coinEmoji(trade.coin)} ${trade.coin} ${trade.direction.toUpperCase()}\n` +
+                  `📊 ${trade.question.slice(0, 100)}\n` +
+                  `💵 $${trade.amount.toFixed(2)} → USDC returned to wallet`,
+              });
+            }
+          } else {
+            logger.warn(`[updown] Auto-redeem failed for trade ${trade.id}: ${result.error}`);
+            await redisCache.del(lockKey);
+          }
+        } catch (err: any) {
+          logger.warn(`[updown] Auto-redeem error for trade ${trade.id}: ${err?.message}`);
+          await redisCache.del(lockKey);
+        }
+
+        // Delay between redemptions to avoid rate limiting
+        await new Promise(r => setTimeout(r, 3_000));
+      }
+    } catch (err: any) {
+      logger.warn(`[updown] Resolution check error for proxy ${proxyAddress.slice(0, 10)}: ${err?.message}`);
+    }
+  }
+}
+
 // ─── Main Monitor ───────────────────────────────────────────────────────────
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let tpSlInterval: ReturnType<typeof setInterval> | null = null;
+let redeemInterval: ReturnType<typeof setInterval> | null = null;
 let limitSweepInterval: ReturnType<typeof setInterval> | null = null;
 let _sendNotification: SendNotificationFn | null = null;
 let _tickRunning = false;
@@ -613,6 +757,13 @@ export function startUpDownMonitor(sendNotification: SendNotificationFn): void {
       logger.error(`[updown] TP/SL check error: ${err?.message}`)
     );
   }, 15_000);
+
+  // Auto-claim resolved positions every 2 minutes
+  redeemInterval = setInterval(() => {
+    checkUpDownResolutions(sendNotification).catch(err =>
+      logger.error(`[updown] Resolution check error: ${err?.message}`)
+    );
+  }, 120_000);
 
   // Periodic sweep of _limitTimers to clean up leaked entries (every 5 min)
   limitSweepInterval = setInterval(() => {
@@ -713,6 +864,10 @@ export function stopUpDownMonitor(): void {
     clearInterval(tpSlInterval);
     tpSlInterval = null;
   }
+  if (redeemInterval) {
+    clearInterval(redeemInterval);
+    redeemInterval = null;
+  }
   if (limitSweepInterval) {
     clearInterval(limitSweepInterval);
     limitSweepInterval = null;
@@ -782,18 +937,26 @@ function getRemainingSeconds(market: UpDownMarket): number {
   return Math.max(0, Math.floor((endMs - Date.now()) / 1000));
 }
 
-/** Resolve directions to execute based on strategy direction mode */
-function getDirections(direction: string, upPrice: number, upPriceMin: number, upPriceMax: number): string[] {
+/** Resolve directions to execute based on strategy direction mode.
+ *  priceMin/priceMax represent the "chosen side" price range the user configured.
+ */
+function getDirections(direction: string, upPrice: number, priceMin: number, priceMax: number): string[] {
+  const downPrice = 1 - upPrice;
   switch (direction) {
     case 'up': return ['up'];
     case 'down': return ['down'];
-    case 'both': return ['up', 'down'];
+    case 'both': {
+      // Only include sides whose price is in range
+      const dirs: string[] = [];
+      if (upPrice >= priceMin && upPrice <= priceMax) dirs.push('up');
+      if (downPrice >= priceMin && downPrice <= priceMax) dirs.push('down');
+      return dirs;
+    }
     case 'either': {
-      // Pick whichever side is in range; default to 'up'
-      if (upPrice >= upPriceMin && upPrice <= upPriceMax) return ['up'];
-      const downPrice = 1 - upPrice;
-      if (downPrice >= upPriceMin && downPrice <= upPriceMax) return ['down'];
-      return ['up']; // fallback
+      // Pick whichever side is in range; return empty if neither qualifies
+      if (upPrice >= priceMin && upPrice <= priceMax) return ['up'];
+      if (downPrice >= priceMin && downPrice <= priceMax) return ['down'];
+      return [];
     }
     default: return ['up'];
   }
@@ -850,9 +1013,23 @@ async function processStrategy(
         if (elapsed < startSec || elapsed > endSec) continue;
       }
 
-      // 5. UP price check
+      // 5. Price range check — compare the CHOSEN SIDE's price against the range.
+      //    upPriceMin/upPriceMax stores the user's range for their chosen side, not always UP.
       const upPrice = market.upPrice;
-      if (upPrice < strat.upPriceMin || upPrice > strat.upPriceMax) continue;
+      const downPrice = market.downPrice;
+
+      if (strat.direction === 'down') {
+        // User configured range for DOWN side
+        if (downPrice < strat.upPriceMin || downPrice > strat.upPriceMax) continue;
+      } else if (strat.direction === 'both' || strat.direction === 'either') {
+        // Pass if EITHER side is in range (getDirections will pick the right one)
+        const upInRange = upPrice >= strat.upPriceMin && upPrice <= strat.upPriceMax;
+        const downInRange = downPrice >= strat.upPriceMin && downPrice <= strat.upPriceMax;
+        if (!upInRange && !downInRange) continue;
+      } else {
+        // 'up' or default — check UP price
+        if (upPrice < strat.upPriceMin || upPrice > strat.upPriceMax) continue;
+      }
 
       // 6. Spot price change check (legacy filters)
       if (strat.priceChangeMin > -9999 || strat.priceChangeMax < 9999) {

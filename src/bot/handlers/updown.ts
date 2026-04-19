@@ -193,11 +193,19 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
       const fires = filledTrades.length;
 
       const estPnl = filledTrades.reduce((sum, t) => {
-        if (t.tpSlStatus === 'tp_triggered' && t.fillPrice && t.fillPrice > 0) {
-          return sum + (t.amount / t.fillPrice - t.amount);
-        } else if (t.tpSlStatus === 'sl_triggered') {
-          return sum - t.amount;
+        if (!t.fillPrice || t.fillPrice <= 0) return sum;
+        const shares = t.amount / t.fillPrice;
+        if (t.tpSlStatus === 'redeemed') {
+          // Market resolved in user's favor: shares worth $1 each
+          return sum + (shares - t.amount);
+        } else if (t.tpSlStatus === 'tp_triggered' && s.takeProfitPct != null) {
+          // TP sell: estimate profit based on TP%
+          return sum + (t.amount * s.takeProfitPct / 100);
+        } else if (t.tpSlStatus === 'sl_triggered' && s.stopLossPct != null) {
+          // SL sell: estimate loss based on SL%
+          return sum - (t.amount * s.stopLossPct / 100);
         }
+        // Open positions or unknown — don't count
         return sum;
       }, 0);
       const pnlSign = estPnl >= 0 ? '+' : '';
@@ -378,6 +386,8 @@ export async function handleHistory(ctx: Context, limit: number): Promise<void> 
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
+  const totalCount = await prisma.upDownTrade.count({ where: { userId: user.id } });
+
   const trades = await prisma.upDownTrade.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: 'desc' },
@@ -386,23 +396,95 @@ export async function handleHistory(ctx: Context, limit: number): Promise<void> 
 
   if (trades.length === 0) {
     await sendHtml(ctx,
-      `📜 <b>AutoPilot Activity</b>\n\nNo trades yet.`,
+      `📊 <b>AutoPilot Activity</b>\n\nNo trades yet.`,
       Markup.inlineKeyboard([[Markup.button.callback(`← Back`, 'updown_list')]]),
     );
     return;
   }
 
-  const lines = [`📜 <b>AutoPilot Activity</b> (last ${trades.length})\n`];
-  for (const tr of trades) {
-    const icon = tr.status === 'filled' ? '✅' : tr.status === 'failed' ? '❌' : tr.status === 'cancelled' ? '⏹' : '⏳';
-    const dir = tr.direction === 'up' ? '🟢UP' : '🔴DN';
-    lines.push(`${icon} ${coinEmoji(tr.coin)} ${tr.coin} ${dir} · $${tr.amount.toFixed(2)} @ ${tr.triggerPrice.toFixed(2)}`);
+  const lines = [`📊 <b>AutoPilot Activity</b>  ·  ${totalCount} total\n`];
+
+  for (let i = 0; i < trades.length; i++) {
+    const tr = trades[i];
+
+    // Status icon & label
+    let icon: string;
+    let statusLabel: string;
+    if (tr.status === 'filled') {
+      if (tr.tpSlStatus === 'tp_triggered') { icon = '🏆'; statusLabel = 'TP Triggered'; }
+      else if (tr.tpSlStatus === 'sl_triggered') { icon = '🛑'; statusLabel = 'SL Triggered'; }
+      else if (tr.tpSlStatus === 'redeemed') { icon = '💰'; statusLabel = 'Redeemed'; }
+      else { icon = '✅'; statusLabel = 'Filled'; }
+    } else if (tr.status === 'failed' || tr.status === 'skipped') {
+      icon = '⚠️'; statusLabel = 'Skipped';
+    } else if (tr.status === 'cancelled') {
+      icon = '⏹'; statusLabel = 'Cancelled';
+    } else {
+      icon = '⏳'; statusLabel = 'Pending';
+    }
+
+    // Direction
+    const dirEmoji = tr.direction === 'up' ? '📈' : '📉';
+    const dirLabel = tr.direction === 'up' ? 'Up (YES)' : 'Down (NO)';
+
+    // Parse timeframe from question field (format: "BTC 5-Minute up")
+    const qParts = tr.question.split(' ');
+    const tfRaw = qParts.length >= 2 ? qParts[1] : '';
+    const tfLabel = TF_SHORT[tfRaw] ? tfShort(tfRaw) : tfRaw.replace('-', ' ');
+
+    // Trigger price in cents
+    const triggerCents = Math.round(tr.triggerPrice * 100);
+
+    // Timestamp
+    const ts = tr.createdAt.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
+    // Header line
+    lines.push(`${i + 1}. ${icon} ${tr.coin} · ${tfLabel} · ${dirEmoji} ${dirLabel}`);
+    lines.push(`├ 📊 Status: ${statusLabel}`);
+    lines.push(`├ 🎯 Trigger: ${triggerCents}¢`);
+
+    if (tr.status === 'filled' && tr.fillPrice != null) {
+      const fillCents = Math.round(tr.fillPrice * 100);
+      const slipCents = fillCents - triggerCents;
+      const slipStr = slipCents >= 0 ? `+${slipCents}¢ slip` : `${slipCents}¢ slip`;
+      const shares = tr.fillPrice > 0 ? (tr.amount / tr.fillPrice).toFixed(2) : '—';
+
+      lines.push(`├ 💰 Spent: $${tr.amount.toFixed(2)}`);
+      lines.push(`├ 📦 Shares: ${shares}`);
+      lines.push(`├ 💵 Fill: ${fillCents}¢  (${slipStr})`);
+    } else if (tr.status === 'filled') {
+      lines.push(`├ 💰 Spent: $${tr.amount.toFixed(2)}`);
+    }
+
+    if (tr.errorMsg) {
+      lines.push(`├ ⚠️ Error: ${tr.errorMsg.slice(0, 80)}`);
+    }
+
+    lines.push(`├ 🕐 ${ts}`);
+
+    // Order ID link (shortened)
+    if (tr.orderId) {
+      const shortId = tr.orderId.length > 10
+        ? tr.orderId.slice(0, 10) + '…' + tr.orderId.slice(-6)
+        : tr.orderId;
+      lines.push(`└ 🔗 Order: <code>${shortId}</code>`);
+    } else {
+      lines.push(`└ 🔗 (no order)`);
+    }
+
+    lines.push('');
   }
 
-  await sendHtml(ctx,
-    lines.join('\n'),
-    Markup.inlineKeyboard([[Markup.button.callback(`← Back`, 'updown_list')]]),
-  );
+  const buttons = [];
+  if (limit <= 10 && totalCount > 10) {
+    buttons.push([Markup.button.callback(`Show 50`, 'ud_history_50')]);
+  }
+  if (limit <= 50 && totalCount > 50) {
+    buttons.push([Markup.button.callback(`Show 200`, 'ud_history_200')]);
+  }
+  buttons.push([Markup.button.callback(`← Back`, 'updown_list')]);
+
+  await sendHtml(ctx, lines.join('\n'), Markup.inlineKeyboard(buttons));
 }
 
 // ─── Close ──────────────────────────────────────────────────────────────────
