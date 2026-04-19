@@ -286,7 +286,7 @@ export async function executeUpDownOrder(
     return {
       success: true,
       orderId: orderResp.orderId,
-      fillPrice: actualFillPrice ?? triggerPrice,
+      fillPrice: actualFillPrice ?? undefined,
       actualAmount: tradeAmount,
     };
   } catch (err: any) {
@@ -415,15 +415,6 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
 
   if (trades.length === 0) return;
 
-  // Fetch markets once for all trades
-  let markets: Awaited<ReturnType<typeof getUpDownMarkets>>;
-  try {
-    markets = await getUpDownMarkets();
-  } catch (err: any) {
-    logger.warn(`[updown] TP/SL failed to fetch markets: ${err?.message}`);
-    return;
-  }
-
   for (const trade of trades) {
     if (!trade.strategy || trade.fillPrice == null) continue;
     const strat = trade.strategy;
@@ -438,41 +429,32 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
     const hasSl = strat.stopLossPct != null || strat.stopLossPrice != null;
     if (!hasTp && !hasSl) continue;
 
-    // Get current midpoint price from the market
+    // Get current LIVE price from CLOB midpoint (never use stale Gamma API prices for TP/SL)
     try {
-      const market = markets.find(m => m.conditionId === trade.conditionId);
-      let currentPrice: number;
+      if (!trade.tokenId) {
+        logger.warn(`[updown] TP/SL: no tokenId for trade ${trade.id}, cannot fetch midpoint`);
+        continue;
+      }
 
-      if (market) {
-        currentPrice = trade.direction === 'up' ? market.upPrice : market.downPrice;
-      } else {
-        // Market expired or not found in Gamma API — fall back to CLOB midpoint
-        // This is critical for short-timeframe rounds (5m/15m/1h) where the market
-        // disappears from Gamma after the round ends but positions still need TP/SL.
-        if (!trade.tokenId) {
-          logger.warn(`[updown] TP/SL: no tokenId for trade ${trade.id}, cannot fetch midpoint`);
+      let currentPrice: number;
+      try {
+        const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${trade.tokenId}`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!midResp.ok) {
+          logger.warn(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id}`);
           continue;
         }
-        try {
-          const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${trade.tokenId}`, {
-            signal: AbortSignal.timeout(5_000),
-          });
-          if (!midResp.ok) {
-            logger.warn(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id}`);
-            continue;
-          }
-          const midData: any = await midResp.json();
-          const mid = parseFloat(midData?.mid ?? '0');
-          if (isNaN(mid) || mid <= 0) {
-            logger.warn(`[updown] TP/SL: invalid midpoint for trade ${trade.id}: ${midData?.mid}`);
-            continue;
-          }
-          currentPrice = mid;
-          logger.debug(`[updown] TP/SL: using CLOB midpoint fallback for trade ${trade.id}: ${mid}`);
-        } catch (midErr: any) {
-          logger.warn(`[updown] TP/SL: failed to fetch midpoint for trade ${trade.id}: ${midErr?.message}`);
+        const midData: any = await midResp.json();
+        const mid = parseFloat(midData?.mid ?? '0');
+        if (isNaN(mid) || mid <= 0) {
+          logger.warn(`[updown] TP/SL: invalid midpoint for trade ${trade.id}: ${midData?.mid}`);
           continue;
         }
+        currentPrice = mid;
+      } catch (midErr: any) {
+        logger.warn(`[updown] TP/SL: failed to fetch CLOB midpoint for trade ${trade.id}: ${midErr?.message}`);
+        continue;
       }
 
       // TP check
@@ -570,13 +552,31 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
           continue;
         }
 
+        // Use slippage-protected limit sell (same pattern as buy orders).
+        // Sell at currentPrice minus slippage — prevents filling at terrible bids.
+        const sellSlippage = strat.slippage ?? 5;
+        const slippageFactor = 1 - (sellSlippage / 100);
+        const minSellPrice = Math.max(parseFloat((currentPrice * slippageFactor).toFixed(4)), 0.01);
+        logger.info(`[updown] TP/SL sell: mid=${currentPrice} minPrice=${minSellPrice} slippage=${sellSlippage}% size=${sellSize}`);
+
         const sellResp = await predexonPlaceOrder(trade.user.predexonUserId, {
           venue: 'polymarket',
           tokenId: trade.tokenId,
           side: 'sell',
-          type: 'market',
+          type: 'limit',
+          price: String(minSellPrice),
           size: sellSize,
         });
+
+        if (!sellResp.orderId) {
+          logger.warn(`[updown] TP/SL sell order rejected for trade ${trade.id}: ${sellResp.error || sellResp.message || 'no orderId'}`);
+          await redisCache.del(tpSlLockKey);
+          await redisCache.set(retryKey, retryCount + 1, 3600);
+          continue;
+        }
+
+        // Auto-cancel sell if not filled within 60s (don't let it sit forever)
+        scheduleLimitTtl(trade.user.predexonUserId, sellResp.orderId, 60, strat.id);
 
         await prisma.upDownTrade.update({
           where: { id: trade.id },
@@ -612,7 +612,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
         sendNotification({
           chatId: trade.user.telegramId,
           text:
-            `${emoji} <b>Up-Down ${label} Triggered</b>\n\n` +
+            `${emoji} <b>AutoPilot ${label} Triggered</b>\n\n` +
             `${coinEmoji(trade.coin)} ${trade.coin} ${trade.direction.toUpperCase()}\n` +
             `Entry: ${trade.fillPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)}\n` +
             `Amount: $${trade.amount.toFixed(2)}`,
