@@ -464,6 +464,32 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
 
       const tpSlStatus = tpTriggered ? 'tp_triggered' : 'sl_triggered';
 
+      // Retry counter — give up after 5 failed attempts
+      const retryKey = `updown:tpsl_retry:${trade.id}`;
+      const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
+      const MAX_TPSL_RETRIES = 5;
+
+      if (retryCount >= MAX_TPSL_RETRIES) {
+        logger.warn(`[updown] TP/SL: max retries (${MAX_TPSL_RETRIES}) reached for trade ${trade.id}, giving up`);
+        await prisma.upDownTrade.update({
+          where: { id: trade.id },
+          data: { tpSlStatus: `${tpSlStatus}_failed` },
+        });
+        await redisCache.del(retryKey);
+        if (strat.notificationsEnabled) {
+          const label = tpTriggered ? 'Take Profit' : 'Stop Loss';
+          sendNotification({
+            chatId: trade.user.telegramId,
+            text:
+              `⚠️ <b>AutoPilot ${label} Failed</b>\n\n` +
+              `${coinEmoji(trade.coin)} ${trade.coin} ${trade.direction.toUpperCase()}\n` +
+              `Could not execute sell after ${MAX_TPSL_RETRIES} attempts.\n` +
+              `The position remains open — please sell manually.`,
+          });
+        }
+        continue;
+      }
+
       // Claim lock to prevent double-processing (60s TTL as safety net)
       await redisCache.set(tpSlLockKey, 1, 60);
 
@@ -503,6 +529,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
         if (sellSize === '0') {
           logger.warn(`[updown] TP/SL: invalid sell size for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
           await redisCache.del(tpSlLockKey); // Release lock so next tick can retry
+          await redisCache.set(retryKey, retryCount + 1, 3600);
           continue;
         }
 
@@ -521,9 +548,23 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
             tpSlOrderId: sellResp.orderId || null,
           },
         });
+        await redisCache.del(retryKey); // Clean up retry counter on success
       } catch (err: any) {
-        logger.warn(`[updown] TP/SL sell failed for trade ${trade.id}: ${err?.message}`);
+        logger.warn(`[updown] TP/SL sell failed for trade ${trade.id} (attempt ${retryCount + 1}/${MAX_TPSL_RETRIES}): ${err?.message}`);
         await redisCache.del(tpSlLockKey); // Release lock so next tick can retry
+        await redisCache.set(retryKey, retryCount + 1, 3600);
+
+        // Notify user on first failure so they're aware
+        if (retryCount === 0 && strat.notificationsEnabled) {
+          const label = tpTriggered ? 'Take Profit' : 'Stop Loss';
+          sendNotification({
+            chatId: trade.user.telegramId,
+            text:
+              `⚠️ <b>AutoPilot ${label} Sell Retry</b>\n\n` +
+              `${coinEmoji(trade.coin)} ${trade.coin} ${trade.direction.toUpperCase()}\n` +
+              `Sell order failed, retrying... (${err?.message?.slice(0, 80) ?? 'unknown'})`,
+          });
+        }
         continue;
       }
 
