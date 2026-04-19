@@ -775,7 +775,7 @@ async function executeTrade(
       }
       if (errMsg.includes('lower than the minimum') || (errMsg.includes('Size') && errMsg.includes('minimum'))) {
         const minMatch = errMsg.match(/minimum[:\s]+(\d+(?:\.\d+)?)/i);
-        const minShares = minMatch ? parseFloat(minMatch[1]) : 5;
+        const minShares = minMatch ? parseFloat(minMatch[1]) : 1;
         const minUsd = (minShares * worstPrice).toFixed(2);
         logger.warn(`[trade] CLOB minimum size not met for user ${telegramId}: ${errMsg}`);
         await ctx.telegram.editMessageText(

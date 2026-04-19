@@ -10,7 +10,6 @@ import {
   canCallRelayer,
   isRateLimitError,
   setRelayerBackoff,
-  incrementRelayerCount,
 } from '../utils/relayerRateLimit';
 
 // USDC Contract Addresses
@@ -611,8 +610,6 @@ export async function approveAndDepositWithRelayer(
     const result = await response.wait();
 
     logger.info(`[Relayer] Transactions confirmed!`, result);
-
-    await incrementRelayerCount();
 
     // Return transaction info
     return result?.transactionHash || 'relayer_submitted';

@@ -14,8 +14,6 @@ import {
   isRelayerBackedOff,
   setRelayerBackoff,
   isRateLimitError,
-  incrementRelayerCount,
-  getThrottleDelay,
   canCallRelayer,
   getRelayerBackoffRemaining,
 } from '../utils/relayerRateLimit';
@@ -143,12 +141,16 @@ async function redeemPosition(params: {
   encryptedPrivateKey: string;
   proxyAddress: string;
   position: ActivePosition;
+  skipThrottle?: boolean;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
   // Pre-flight: check if relayer is available
-  const preflight = await canCallRelayer();
-  if (!preflight.ok) {
-    logger.info(`[redeem] Relayer unavailable (${preflight.reason}), skipping — retry in ${preflight.waitSec}s`);
-    return { success: false, error: `Relayer unavailable (${preflight.reason}), retry in ${preflight.waitSec}s` };
+  // Manual claims (skipThrottle) bypass proactive throttle — they always get at least one attempt
+  if (!params.skipThrottle) {
+    const preflight = await canCallRelayer();
+    if (!preflight.ok) {
+      logger.warn(`[redeem] Relayer unavailable (${preflight.reason}), skipping — retry in ${preflight.waitSec}s`);
+      return { success: false, error: `Relayer unavailable (${preflight.reason}), retry in ${preflight.waitSec}s` };
+    }
   }
 
   // Check on-chain balance before wasting a relayer tx
@@ -180,11 +182,11 @@ async function redeemPosition(params: {
 
   // If Data API says negativeRisk, go straight to NegRiskAdapter
   if (params.position.negativeRisk) {
-    return redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance);
+    return redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
   }
 
   // Try standard CTF path first (USDC.e, then native USDC)
-  const stdResult = await redeemStandard(privateKey, params.proxyAddress, params.position, onChainBalance);
+  const stdResult = await redeemStandard(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
   if (stdResult.success) return stdResult;
 
   // Standard path failed — Data API negativeRisk flag can be unreliable,
@@ -194,7 +196,7 @@ async function redeemPosition(params: {
     return stdResult;
   }
   logger.info(`[redeem] Standard CTF redeem failed, trying NegRiskAdapter as fallback (balance still ${balanceNow.toString()})`);
-  return redeemNegRisk(privateKey, params.proxyAddress, params.position, balanceNow);
+  return redeemNegRisk(privateKey, params.proxyAddress, params.position, balanceNow, params.skipThrottle);
 }
 
 /**
@@ -206,15 +208,16 @@ async function redeemNegRisk(
   proxyAddress: string,
   position: ActivePosition,
   onChainBalance: ethers.BigNumber,
+  skipThrottle?: boolean,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
   const negIface = new ethers.utils.Interface(NEG_RISK_ADAPTER_ABI);
   const ctfIface = new ethers.utils.Interface(CTF_ABI);
   const conditionId = position.conditionId;
 
-  // Abort early if relayer is rate-limited
-  if (await isRelayerBackedOff()) {
+  // Abort early if relayer is rate-limited (manual claims skip this to guarantee at least one attempt)
+  if (!skipThrottle && await isRelayerBackedOff()) {
     const waitSec = await getRelayerBackoffRemaining();
-    logger.info(`[redeem] Skipping NegRiskAdapter — relayer rate-limited for ${waitSec}s more`);
+    logger.warn(`[redeem] Skipping NegRiskAdapter — relayer rate-limited for ${waitSec}s more`);
     return { success: false, error: `Relayer rate-limited, retry in ${waitSec}s` };
   }
 
@@ -310,7 +313,6 @@ async function redeemNegRisk(
         continue;
       }
 
-      await incrementRelayerCount();
       logger.info(`[redeem] Confirmed via ${txType}/NegRiskAdapter: ${txHash} (balance: ${currentBalance.toString()} → ${balanceAfter.toString()})`);
       return { success: true, txHash };
     } catch (error: any) {
@@ -357,11 +359,12 @@ async function redeemStandard(
   proxyAddress: string,
   position: ActivePosition,
   onChainBalance: ethers.BigNumber,
+  skipThrottle?: boolean,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  // Abort early if relayer is rate-limited
-  if (await isRelayerBackedOff()) {
+  // Abort early if relayer is rate-limited (manual claims skip this to guarantee at least one attempt)
+  if (!skipThrottle && await isRelayerBackedOff()) {
     const waitSec = await getRelayerBackoffRemaining();
-    logger.info(`[redeem] Skipping standard redeem — relayer rate-limited for ${waitSec}s more`);
+    logger.warn(`[redeem] Skipping standard redeem — relayer rate-limited for ${waitSec}s more`);
     return { success: false, error: `Relayer rate-limited, retry in ${waitSec}s` };
   }
 
@@ -443,7 +446,6 @@ async function redeemStandard(
           break; // break inner loop (txType), continue outer loop (collateralToken)
         }
 
-        await incrementRelayerCount();
         logger.info(`[redeem] Confirmed via ${txType}/${tokenLabel} Relayer: ${txHash} (balance: ${onChainBalance.toString()} → ${balanceAfter.toString()})`);
         return { success: true, txHash };
       } catch (error: any) {
@@ -498,6 +500,7 @@ async function redeemSingle(params: {
   proxyAddress: string;
   position: ActivePosition;
   predexonUserId?: string;
+  skipThrottle?: boolean;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
   if (params.predexonUserId) {
     try {
@@ -615,7 +618,7 @@ export async function manualRedeem(
   position: ActivePosition,
   predexonUserId?: string,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position, predexonUserId });
+  const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position, predexonUserId, skipThrottle: true });
   if (result.success) {
     const key = claimedKey(proxyAddress, position.conditionId);
     await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
@@ -649,20 +652,10 @@ async function _doRedeem(
   let claimed = 0;
   for (let i = 0; i < pending.length; i++) {
     const pos = pending[i];
-    // Abort auto-redeem loop if relayer is rate-limited
+    // Abort auto-redeem loop if relayer returned a real 429
     if (await isRelayerBackedOff()) {
       logger.warn(`[redeem] Relayer rate-limited, stopping auto-redeem loop (${pending.length - i} remaining)`);
       break;
-    }
-    // Proactive throttle: add delay when approaching hourly quota
-    const throttleMs = await getThrottleDelay();
-    if (throttleMs < 0) {
-      logger.warn(`[redeem] Hourly relayer limit reached, stopping auto-redeem loop (${pending.length - i} remaining)`);
-      break;
-    }
-    if (throttleMs > 0) {
-      logger.info(`[redeem] Throttling ${throttleMs}ms before next relayer call (approaching quota)`);
-      await new Promise(r => setTimeout(r, throttleMs));
     }
     try {
       const key = claimedKey(proxyAddress, pos.conditionId);

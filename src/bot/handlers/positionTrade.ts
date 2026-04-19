@@ -32,8 +32,6 @@ async function fetchImageBuffer(url?: string): Promise<Buffer | undefined> {
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-/** Polymarket CLOB minimum order size in shares/tokens */
-const MIN_ORDER_SIZE = 1;
 
 // ─── Caches ────────────────────────────────────────────────────────────────
 
@@ -762,6 +760,7 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
         }
       );
     } else {
+      logger.warn(`[claim] Manual claim failed for "${pos.outcome}": ${result.error ?? 'unknown'}`);
       const isRateLimited = result.error && /rate.?limit|unavailable|quota/i.test(result.error);
       const userError = isRateLimited
         ? t(lang, 'The claiming service is temporarily busy. Your position is safe — please try again later.')
@@ -1051,15 +1050,6 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     // Floor to 2 decimals — never sell more shares than the user owns
     const shares = Math.floor((pos.size * pct) / 100 * 100) / 100;
 
-    if (shares < MIN_ORDER_SIZE) {
-      const minPct = Math.ceil((MIN_ORDER_SIZE / pos.size) * 100);
-      await ctx.answerCbQuery(
-        `❌ Min order: ${MIN_ORDER_SIZE} shares. ${pct}% = ${shares.toFixed(2)} shares. Try ${minPct}%+.`,
-        { show_alert: true }
-      );
-      return;
-    }
-
     await ctx.answerCbQuery();
 
     // F2: Apply slippage floor to SELL
@@ -1138,14 +1128,6 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
       await ctx.reply(`❌ ${t(lang, 'You only have')} ${state.currentSize.toFixed(4)} ${t(lang, 'shares')}. ${t(lang, 'Cannot sell')} ${shares}.`);
       return;
     }
-    if (shares < MIN_ORDER_SIZE) {
-      await ctx.reply(
-        `❌ ${t(lang, 'Minimum order size is')} *${MIN_ORDER_SIZE} ${t(lang, 'shares')}*. ${t(lang, 'You entered')} ${shares.toFixed(4)} ${t(lang, 'shares')}.\n\n` +
-        `${t(lang, 'Your position')}: ${state.currentSize.toFixed(4)} ${t(lang, 'shares')} — ${t(lang, 'enter at least')} ${MIN_ORDER_SIZE}.`,
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
     // F2: Apply slippage floor to SELL (mirrors BUY path above)
     const { getUserByTelegramId: getUser } = await import('../../services/user');
     const sellUser = await getUser(telegramId);
@@ -1160,15 +1142,6 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
     const slippagePct  = buyUser?.slippageTolerance ?? 1.0;
     const slippageMult = 1 + slippagePct / 100;
     const price = Math.min(state.curPrice * slippageMult, 0.99);
-    const estimatedShares = usdAmount / price;
-    if (estimatedShares < MIN_ORDER_SIZE) {
-      const minUsd = (MIN_ORDER_SIZE * price).toFixed(2);
-      await ctx.reply(
-        `❌ ${t(lang, 'Minimum order size is')} *${MIN_ORDER_SIZE} ${t(lang, 'shares')}*. ${t(lang, 'At')} ${(state.curPrice * 100).toFixed(1)}¢, ${t(lang, 'you need at least')} *$${minUsd}*.`,
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
     await showBuyConfirmation(ctx, telegramId, state, price, usdAmount, slippagePct);
   }
 }
@@ -1545,10 +1518,6 @@ async function executePositionOrder(
   const cleanPrice = parseFloat(price.toFixed(4));
 
   if (action === 'sell') {
-    if (cleanSize < MIN_ORDER_SIZE) {
-      throw new Error(`Position too small to sell (${cleanSize} shares, min ${MIN_ORDER_SIZE})`);
-    }
-
     logger.info(
       `[positionTrade] Predexon market SELL: ${cleanSize} shares (raw=${size}) assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
     );
@@ -1652,12 +1621,6 @@ export async function executeCloseAllPositions(
 
   // 1) Sell open positions sequentially (avoid rate-limit / nonce collisions on Predexon)
   for (const pos of sellable) {
-    if (pos.size < MIN_ORDER_SIZE) {
-      failed++;
-      errors.push(`${pos.outcome}: too small (${pos.size.toFixed(2)} sh, min ${MIN_ORDER_SIZE})`);
-      continue;
-    }
-
     // First attempt with user's slippage, retry with 5x slippage on failure
     const attempts = [slippagePct, Math.min(slippagePct * 5, 50)];
     let success = false;
