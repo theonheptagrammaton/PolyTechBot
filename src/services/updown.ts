@@ -124,6 +124,8 @@ export async function executeUpDownOrder(
     limitPrice: number | null;
     limitTtlSeconds: number;
     coin: string;
+    upPriceMin?: number;
+    upPriceMax?: number;
   },
   sendNotification?: SendNotificationFn,
 ): Promise<ExecuteResult> {
@@ -161,6 +163,20 @@ export async function executeUpDownOrder(
     }
 
     const triggerPrice = liveMidpoint ?? (strategy.direction === 'up' ? market.upPrice : market.downPrice);
+
+    // ── CRITICAL: Verify live CLOB price is within configured range ──
+    // The Gamma API price that passed the initial range check can be stale.
+    // Re-check against the LIVE midpoint to prevent trades at wrong prices.
+    if (strategy.upPriceMin != null && strategy.upPriceMax != null) {
+      if (triggerPrice < strategy.upPriceMin || triggerPrice > strategy.upPriceMax) {
+        logger.warn(
+          `[updown] BLOCKED: live price ${triggerPrice.toFixed(4)} outside range ` +
+          `[${strategy.upPriceMin.toFixed(2)}–${strategy.upPriceMax.toFixed(2)}] ` +
+          `for strategy ${strategy.id} (${strategy.coin} ${strategy.direction})`
+        );
+        return { success: false, errorMsg: `live price ${(triggerPrice * 100).toFixed(1)}¢ outside range` };
+      }
+    }
 
     let orderResp: any;
 
@@ -346,13 +362,20 @@ function scheduleLimitTtl(
         if (!isNaN(rawPrice) && rawPrice > 0) {
           fillPrice = rawPrice;
         } else {
-          // Fallback: fetch strategy's limitPrice from the trade record
-          const trade = await prisma.upDownTrade.findFirst({ where: { orderId }, select: { strategy: { select: { limitPrice: true } } } });
+          // Fallback 1: strategy's limitPrice (for explicit limit orders)
+          // Fallback 2: trade's triggerPrice (for market orders that have no limitPrice)
+          const trade = await prisma.upDownTrade.findFirst({
+            where: { orderId },
+            select: { triggerPrice: true, strategy: { select: { limitPrice: true } } },
+          });
           if (trade?.strategy?.limitPrice != null && trade.strategy.limitPrice > 0) {
             fillPrice = trade.strategy.limitPrice;
-            logger.warn(`[updown] Limit order ${orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
+            logger.warn(`[updown] Order ${orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
+          } else if (trade?.triggerPrice != null && trade.triggerPrice > 0) {
+            fillPrice = trade.triggerPrice;
+            logger.warn(`[updown] Order ${orderId} filled with invalid price (${order.price}), using triggerPrice=${fillPrice}`);
           } else {
-            logger.warn(`[updown] Limit order ${orderId} filled with invalid price: ${order.price}, no fallback available`);
+            logger.warn(`[updown] Order ${orderId} filled with invalid price: ${order.price}, no fallback available`);
           }
         }
         await prisma.upDownTrade.updateMany({
@@ -416,18 +439,25 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
   if (trades.length === 0) return;
 
   for (const trade of trades) {
-    if (!trade.strategy || trade.fillPrice == null) continue;
+    if (!trade.strategy) continue;
     const strat = trade.strategy;
+
+    // For percentage-based TP/SL we need fillPrice; for fixed-price TP/SL we don't.
+    const hasFixedTp = strat.takeProfitPrice != null;
+    const hasFixedSl = strat.stopLossPrice != null;
+    const hasPctTp = strat.takeProfitPct != null;
+    const hasPctSl = strat.stopLossPct != null;
+    const hasTp = hasFixedTp || hasPctTp;
+    const hasSl = hasFixedSl || hasPctSl;
+    if (!hasTp && !hasSl) continue;
+
+    // If ONLY percentage-based TP/SL is configured and fillPrice is missing, skip
+    if (trade.fillPrice == null && !hasFixedTp && !hasFixedSl) continue;
 
     // Prevent race condition: if another tick is already processing this trade's TP/SL, skip it
     const tpSlLockKey = `updown:tpsl_lock:${trade.id}`;
     const alreadyProcessing = await redisCache.get<number>(tpSlLockKey);
     if (alreadyProcessing) continue;
-
-    // Check if any TP/SL is configured
-    const hasTp = strat.takeProfitPct != null || strat.takeProfitPrice != null;
-    const hasSl = strat.stopLossPct != null || strat.stopLossPrice != null;
-    if (!hasTp && !hasSl) continue;
 
     // Get current LIVE price from CLOB midpoint (never use stale Gamma API prices for TP/SL)
     try {
@@ -457,21 +487,21 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
         continue;
       }
 
-      // TP check
+      // TP check — fixed price first, then percentage (percentage requires fillPrice)
       let tpTriggered = false;
-      if (strat.takeProfitPrice != null && currentPrice >= strat.takeProfitPrice) {
+      if (hasFixedTp && currentPrice >= strat.takeProfitPrice!) {
         tpTriggered = true;
-      } else if (strat.takeProfitPct != null) {
-        const target = trade.fillPrice + (trade.fillPrice * strat.takeProfitPct / 100);
+      } else if (hasPctTp && trade.fillPrice != null) {
+        const target = trade.fillPrice + (trade.fillPrice * strat.takeProfitPct! / 100);
         if (currentPrice >= target) tpTriggered = true;
       }
 
-      // SL check (independent of TP — both can trigger, TP takes priority)
+      // SL check — fixed price first, then percentage (percentage requires fillPrice)
       let slTriggered = false;
-      if (strat.stopLossPrice != null && currentPrice <= strat.stopLossPrice) {
+      if (hasFixedSl && currentPrice <= strat.stopLossPrice!) {
         slTriggered = true;
-      } else if (strat.stopLossPct != null) {
-        const target = trade.fillPrice - (trade.fillPrice * strat.stopLossPct / 100);
+      } else if (hasPctSl && trade.fillPrice != null) {
+        const target = trade.fillPrice - (trade.fillPrice * strat.stopLossPct! / 100);
         if (currentPrice <= target) slTriggered = true;
       }
 
@@ -539,7 +569,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
         }
 
         // Fallback: if positions API fails, compute from fillPrice with 5% safety buffer
-        if (sellSize === '0' && trade.fillPrice > 0) {
+        if (sellSize === '0' && trade.fillPrice != null && trade.fillPrice > 0) {
           const safetyBuffer = 0.95;
           sellSize = String(Math.floor((trade.amount / trade.fillPrice) * safetyBuffer * 100) / 100);
           logger.warn(`[updown] TP/SL: using fallback sell size=${sellSize} for trade ${trade.id} (fillPrice=${trade.fillPrice})`);
@@ -617,7 +647,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
           text:
             `${emoji} <b>AutoPilot ${label} Triggered</b>\n\n` +
             `${coinEmoji(trade.coin)} ${trade.coin} ${trade.direction.toUpperCase()}\n` +
-            `Entry: ${trade.fillPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)}\n` +
+            `Entry: ${trade.fillPrice?.toFixed(2) ?? '?'} → Exit: ${currentPrice.toFixed(2)}\n` +
             `Amount: $${trade.amount.toFixed(2)}`,
         });
       }
@@ -898,11 +928,14 @@ async function recoverOrphanedLimitOrders(): Promise<void> {
         if (!isNaN(rawPrice) && rawPrice > 0) {
           fillPrice = rawPrice;
         } else {
-          // Fallback: fetch strategy's limitPrice from the trade record
+          // Fallback 1: strategy's limitPrice; Fallback 2: trade's triggerPrice
           const strat = trade.strategyId ? await prisma.upDownStrategy.findUnique({ where: { id: trade.strategyId }, select: { limitPrice: true } }) : null;
           if (strat?.limitPrice != null && strat.limitPrice > 0) {
             fillPrice = strat.limitPrice;
             logger.warn(`[updown] Orphaned order ${trade.orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
+          } else if (trade.triggerPrice != null && trade.triggerPrice > 0) {
+            fillPrice = trade.triggerPrice;
+            logger.warn(`[updown] Orphaned order ${trade.orderId} filled with invalid price (${order.price}), using triggerPrice=${fillPrice}`);
           }
         }
         await prisma.upDownTrade.update({
@@ -1093,22 +1126,38 @@ async function processStrategy(
         if (elapsed < startSec || elapsed > endSec) continue;
       }
 
-      // 5. Price range check — compare the CHOSEN SIDE's price against the range.
-      //    upPriceMin/upPriceMax stores the user's range for their chosen side, not always UP.
-      const upPrice = market.upPrice;
-      const downPrice = market.downPrice;
+      // 5. Price range check — fetch LIVE CLOB midpoints instead of stale Gamma API prices.
+      //    Gamma API prices can be significantly outdated, causing trades outside the user's range.
+      let liveUpPrice = market.upPrice;
+      let liveDownPrice = market.downPrice;
+      try {
+        const upMidResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${market.upTokenId}`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (upMidResp.ok) {
+          const upMidData: any = await upMidResp.json();
+          const mid = parseFloat(upMidData?.mid ?? '0');
+          if (!isNaN(mid) && mid > 0 && mid < 1) {
+            liveUpPrice = mid;
+            liveDownPrice = 1 - mid;
+          }
+        }
+      } catch (midErr: any) {
+        logger.debug(`[updown] Failed to fetch live midpoint for range check (${coin}/${tf}): ${midErr?.message}`);
+        // Fall back to Gamma API prices — still better than skipping the trade
+      }
 
       if (strat.direction === 'down') {
         // User configured range for DOWN side
-        if (downPrice < strat.upPriceMin || downPrice > strat.upPriceMax) continue;
+        if (liveDownPrice < strat.upPriceMin || liveDownPrice > strat.upPriceMax) continue;
       } else if (strat.direction === 'both' || strat.direction === 'either') {
         // Pass if EITHER side is in range (getDirections will pick the right one)
-        const upInRange = upPrice >= strat.upPriceMin && upPrice <= strat.upPriceMax;
-        const downInRange = downPrice >= strat.upPriceMin && downPrice <= strat.upPriceMax;
+        const upInRange = liveUpPrice >= strat.upPriceMin && liveUpPrice <= strat.upPriceMax;
+        const downInRange = liveDownPrice >= strat.upPriceMin && liveDownPrice <= strat.upPriceMax;
         if (!upInRange && !downInRange) continue;
       } else {
         // 'up' or default — check UP price
-        if (upPrice < strat.upPriceMin || upPrice > strat.upPriceMax) continue;
+        if (liveUpPrice < strat.upPriceMin || liveUpPrice > strat.upPriceMax) continue;
       }
 
       // 6. Spot price change check (legacy filters)
@@ -1124,7 +1173,7 @@ async function processStrategy(
       }
 
       // All triggers passed — determine directions
-      const directions = getDirections(strat.direction, upPrice, strat.upPriceMin, strat.upPriceMax);
+      const directions = getDirections(strat.direction, liveUpPrice, strat.upPriceMin, strat.upPriceMax);
 
       for (const dir of directions) {
         const dirDedupKey = `updown:dedup:${strat.id}:${market.conditionId}:${dir}`;

@@ -5,6 +5,7 @@ import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
 import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
 import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
+import { prisma } from '../../database/prisma';
 
 const IMG_WALLET      = path.join(__dirname, '../img/wallet.PNG');
 const IMG_PORTFOLIO   = path.join(__dirname, '../img/portfolio.PNG');
@@ -737,22 +738,42 @@ export async function handleAllTransactions(ctx: Context, page: number = 1): Pro
 
     const lang = getLang(user);
 
-    const portfolioData = await getPortfolioData(
-      user.encryptedPrivateKey,
-      user.encryptedApiKey,
-      user.encryptedApiSecret,
-      user.encryptedPassphrase,
-      user.polymarketProxyAddress || '',
-      user.predexonUserId ?? undefined
-    );
+    const [portfolioData, bondTrades, updownTrades, copiedTrades] = await Promise.all([
+      getPortfolioData(
+        user.encryptedPrivateKey,
+        user.encryptedApiKey,
+        user.encryptedApiSecret,
+        user.encryptedPassphrase,
+        user.polymarketProxyAddress || '',
+        user.predexonUserId ?? undefined
+      ),
+      prisma.bondTrade.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+        include: { strategy: { select: { label: true } } },
+      }),
+      prisma.upDownTrade.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+        include: { strategy: { select: { label: true } } },
+      }),
+      prisma.copiedTrade.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+        include: { subscription: { select: { label: true } } },
+      }),
+    ]);
 
     const openOrders = portfolioData.openOrders;
     const trades = portfolioData.trades;
 
     // Combine and sort all transactions
     interface Transaction {
-      type: 'order' | 'trade';
-      data: OpenOrder | Trade;
+      type: 'order' | 'trade' | 'bond' | 'autopilot' | 'copy';
+      data: any;
       timestamp: number;
     }
 
@@ -766,6 +787,21 @@ export async function handleAllTransactions(ctx: Context, page: number = 1): Pro
         type: 'trade' as const,
         data: trade,
         timestamp: new Date(trade.match_time).getTime(),
+      })),
+      ...bondTrades.map((bt) => ({
+        type: 'bond' as const,
+        data: bt,
+        timestamp: bt.createdAt.getTime(),
+      })),
+      ...updownTrades.map((ut) => ({
+        type: 'autopilot' as const,
+        data: ut,
+        timestamp: ut.createdAt.getTime(),
+      })),
+      ...copiedTrades.map((ct) => ({
+        type: 'copy' as const,
+        data: ct,
+        timestamp: ct.createdAt.getTime(),
       })),
     ].sort((a, b) => b.timestamp - a.timestamp);
 
@@ -817,7 +853,7 @@ export async function handleAllTransactions(ctx: Context, page: number = 1): Pro
         message += `   ├ ${sizeTotal.toFixed(2)} ${t(lang, 'sh')} @ ${price} = $${value}\n`;
         message += `   ├ ${pctFilled}% ${t(lang, 'filled')} (${sizeMatched.toFixed(2)} / ${sizeTotal.toFixed(2)} ${t(lang, 'sh')})\n`;
         message += `   └ 📅 ${created}\n\n`;
-      } else {
+      } else if (tx.type === 'trade') {
         const trade      = tx.data as Trade;
         const side       = trade.side === 'BUY' ? `🟢 ${t(lang, 'BUY')}` : `🔴 ${t(lang, 'SELL')}`;
         const price      = formatOrderPrice(trade.price);
@@ -834,6 +870,49 @@ export async function handleAllTransactions(ctx: Context, page: number = 1): Pro
         message += `   ├ ${size.toFixed(2)} ${t(lang, 'sh')} @ ${price} = $${value}\n`;
         message += `   ├ 📅 ${matchTime}\n`;
         message += `   └ 🔗 Tx: \`${txHash}\`\n\n`;
+      } else if (tx.type === 'bond') {
+        const bt = tx.data;
+        const statusIcon = bt.status === 'filled' ? '✅' : bt.status === 'failed' ? '❌' : '⏳';
+        const outcome = esc(bt.outcome || '—');
+        const question = esc(bt.question.length > 40 ? bt.question.slice(0, 40) + '…' : bt.question);
+        const label = bt.strategy?.label ? esc(bt.strategy.label) : 'Bond';
+        const time = formatTimestamp(bt.createdAt);
+
+        message += `*${number}. ${statusIcon} BOND*\n`;
+        message += `   ├ 🟢 BUY · ${outcome}\n`;
+        message += `   ├ $${bt.amount.toFixed(2)} @ ${(bt.price * 100).toFixed(1)}¢\n`;
+        message += `   ├ 📌 ${question}\n`;
+        message += `   ├ 🏷 ${label}\n`;
+        message += `   └ 📅 ${time}\n\n`;
+      } else if (tx.type === 'autopilot') {
+        const ut = tx.data;
+        const statusIcon = ut.status === 'filled' ? '✅' : ut.status === 'failed' ? '❌' : '⏳';
+        const dir = ut.direction === 'up' ? '🟢 UP' : '🔴 DOWN';
+        const label = ut.strategy?.label ? esc(ut.strategy.label) : 'AutoPilot';
+        const question = esc(ut.question.length > 40 ? ut.question.slice(0, 40) + '…' : ut.question);
+        const time = formatTimestamp(ut.createdAt);
+        const tpsl = ut.tpSlStatus ? ` · ${ut.tpSlStatus === 'tp_triggered' ? '🎯 TP' : '🛑 SL'}` : '';
+
+        message += `*${number}. ${statusIcon} AUTOPILOT*\n`;
+        message += `   ├ ${dir} · ${esc(ut.coin)}${tpsl}\n`;
+        message += `   ├ $${ut.amount.toFixed(2)}${ut.fillPrice ? ` @ ${(ut.fillPrice * 100).toFixed(1)}¢` : ''}\n`;
+        message += `   ├ 📌 ${question}\n`;
+        message += `   ├ 🏷 ${label}\n`;
+        message += `   └ 📅 ${time}\n\n`;
+      } else if (tx.type === 'copy') {
+        const ct = tx.data;
+        const statusIcon = ct.status === 'filled' ? '✅' : ct.status === 'failed' ? '❌' : ct.status === 'skipped' ? '⏭' : '⏳';
+        const side = ct.side === 'BUY' ? `🟢 ${t(lang, 'BUY')}` : `🔴 ${t(lang, 'SELL')}`;
+        const outcome = esc(ct.outcome || '—');
+        const label = ct.subscription?.label ? esc(ct.subscription.label) : esc(ct.traderAddress.slice(0, 8) + '…');
+        const time = formatTimestamp(ct.createdAt);
+        const tpsl = ct.tpSlStatus ? ` · ${ct.tpSlStatus === 'tp_triggered' ? '🎯 TP' : '🛑 SL'}` : '';
+
+        message += `*${number}. ${statusIcon} COPY*\n`;
+        message += `   ├ ${side} · ${outcome}${tpsl}\n`;
+        message += `   ├ $${ct.copiedSize.toFixed(2)} @ ${(ct.price * 100).toFixed(1)}¢\n`;
+        message += `   ├ 👤 ${label}\n`;
+        message += `   └ 📅 ${time}\n\n`;
       }
     });
 
