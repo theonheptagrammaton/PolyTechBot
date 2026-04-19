@@ -115,7 +115,7 @@ export async function claimCashback(userId: string, proxyAddress: string): Promi
     logger.warn(`[cashback] REFERRAL_TREASURY_KEY not set. Payout blocked for user ${userId}: $${claimable.toFixed(2)}`);
     return {
       success: false,
-      error: 'Ödeme sistemi henüz yapılandırılmadı. Lütfen destek ile iletişime geçin.',
+      error: 'Payment system is not configured yet. Please contact support.',
     };
   }
 
@@ -151,7 +151,7 @@ export async function claimCashback(userId: string, proxyAddress: string): Promi
         success: false,
         insufficientTreasury: true,
         amount: claimable,
-        error: 'Şu anda ödeme yapılamıyor. Lütfen daha sonra tekrar deneyin.',
+        error: 'Unable to process payment at this time. Please try again later.',
       };
     }
 

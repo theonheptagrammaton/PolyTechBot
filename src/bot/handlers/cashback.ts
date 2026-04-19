@@ -106,7 +106,7 @@ export async function handleCashbackClaim(ctx: Context): Promise<void> {
         ]),
       });
     } else if (result.insufficientTreasury) {
-      await notifyAdmins(ctx.telegram, `⚠️ <b>Treasury Yetersiz — Cashback Claim</b>\nKullanıcı: ${telegramId}\nTutar: $${result.amount?.toFixed(2)}`);
+      await notifyAdmins(ctx.telegram, `⚠️ <b>Treasury Insufficient — Cashback Claim</b>\nUser: ${telegramId}\nAmount: $${result.amount?.toFixed(2)}`);
       await sendPage(ctx, `❌ ${esc(result.error ?? '')}`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([

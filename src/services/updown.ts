@@ -472,7 +472,21 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
           signal: AbortSignal.timeout(5_000),
         });
         if (!midResp.ok) {
-          logger.warn(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id}`);
+          // Track consecutive midpoint failures — market may no longer exist
+          const mid404Key = `updown:tpsl_mid404:${trade.id}`;
+          const mid404Count = ((await redisCache.get<number>(mid404Key)) ?? 0) + 1;
+          await redisCache.set(mid404Key, mid404Count, 3600);
+          if (mid404Count >= 20) {
+            // 20 consecutive failures (~100s) — mark trade as failed, stop retrying
+            await prisma.upDownTrade.update({
+              where: { id: trade.id },
+              data: { tpSlStatus: 'tp_triggered_failed' },
+            });
+            await redisCache.del(mid404Key);
+            logger.warn(`[updown] TP/SL: midpoint 404 x${mid404Count} for trade ${trade.id}, market likely resolved — marking failed`);
+          } else {
+            logger.warn(`[updown] TP/SL: midpoint API returned ${midResp.status} for trade ${trade.id} (${mid404Count}/20)`);
+          }
           continue;
         }
         const midData: any = await midResp.json();
@@ -728,7 +742,32 @@ async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Pr
         logger.info(`[updown] TP/SL sell stale (${Math.round(age / 1000)}s), cancelled for retry (attempt ${retryCount + 1}) trade ${trade.id}`);
       }
     } catch (err: any) {
-      logger.warn(`[updown] TP/SL sell monitor error for trade ${trade.id}: ${err?.message}`);
+      // 404 = order no longer exists on Predexon — treat like cancelled/expired
+      if (err?.message?.includes('404')) {
+        const retryKey = `updown:tpsl_retry:${trade.id}`;
+        const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
+
+        if (retryCount >= 5) {
+          const failStatus = trade.tpSlStatus === 'tp_triggered' ? 'tp_triggered_failed' : 'sl_triggered_failed';
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: failStatus, tpSlOrderId: null },
+          });
+          await redisCache.del(retryKey);
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+          logger.warn(`[updown] TP/SL sell order 404: max retries reached for trade ${trade.id}, marking as failed`);
+        } else {
+          await redisCache.set(retryKey, retryCount + 1, 3600);
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: null, tpSlOrderId: null },
+          });
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+          logger.info(`[updown] TP/SL sell order 404: reset for retry (attempt ${retryCount + 1}/5) trade ${trade.id}`);
+        }
+      } else {
+        logger.warn(`[updown] TP/SL sell monitor error for trade ${trade.id}: ${err?.message}`);
+      }
     }
   }
 }
