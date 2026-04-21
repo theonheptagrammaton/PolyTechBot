@@ -1,9 +1,10 @@
 import http from 'http';
 import { config } from './config';
 import { logger } from './utils/logger';
-import { connectDatabase, disconnectDatabase } from './database/prisma';
+import { connectDatabase, disconnectDatabase, prisma } from './database/prisma';
 import { getRedisClient, disconnectRedis } from './database/redis';
 import { TelegramBot } from './bot';
+import { runStartupMigrations } from './migrations/startup';
 
 let healthServer: http.Server;
 
@@ -21,6 +22,9 @@ async function main(): Promise<void> {
     const redis = getRedisClient();
     await redis.ping();
     logger.info('Redis connected successfully');
+
+    // Run one-time data migrations
+    await runStartupMigrations();
 
     // Initialize Telegram bot
     logger.info('Initializing Telegram bot...');
