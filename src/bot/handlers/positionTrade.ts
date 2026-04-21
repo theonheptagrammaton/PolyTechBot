@@ -760,7 +760,7 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
         }
       );
     } else {
-      const needsManualSupport = !!result.error && /only redeemable via Predexon/i.test(result.error);
+      const needsManualSupport = !!result.error && /subtraction overflow/i.test(result.error);
       // Fire an admin alert only on the first (non-cached) overflow — caching
       // suppresses spam for the same position within the 6h dedup window.
       const isFreshOverflow = needsManualSupport && !/\(cached\)/i.test(result.error!);
@@ -772,7 +772,7 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
           `Proxy: <code>${user.polymarketProxyAddress}</code>\n` +
           `Position: ${esc(pos.outcome)} — ${esc(truncate(pos.title, 40))}\n` +
           `ConditionId: <code>${pos.conditionId.slice(0, 24)}…</code>\n` +
-          `Reason: NegRiskAdapter SafeMath overflow (Builder path). Position not in Predexon ledger — legacy user or incomplete migration.`
+          `Reason: NegRiskAdapter SafeMath overflow persisted after outcome-flip retry — check on-chain condition state, position may need manual intervention.`
         ).catch((err) => logger.warn('[redeem] notifyAdmins failed:', err));
       }
       const bodyText = needsManualSupport
@@ -1686,7 +1686,7 @@ export async function executeCloseAllPositions(
         } else {
           logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
           failed++;
-          const isOverflow = !!result.error && /only redeemable via Predexon/i.test(result.error);
+          const isOverflow = !!result.error && /subtraction overflow/i.test(result.error);
           // Only track "fresh" overflows (not cached) so we don't spam admin on repeat attempts
           if (isOverflow && !/\(cached\)/i.test(result.error!)) {
             overflowPositions.push({ outcome: pos.outcome, title: pos.title, conditionId: pos.conditionId });

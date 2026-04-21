@@ -1330,7 +1330,7 @@ export async function handleCloseAllExecute(ctx: Context): Promise<void> {
             `Proxy: <code>${user.polymarketProxyAddress}</code>\n` +
             `${result.overflowPositions.length} position(s) stuck on Builder overflow:\n` +
             overflowLines.join('\n') + overflowMore + `\n` +
-            `Reason: NegRiskAdapter SafeMath overflow; not in Predexon ledger.`
+            `Reason: NegRiskAdapter SafeMath overflow persisted after outcome-flip retry — manual intervention may be needed.`
           ).catch((err) => logger.warn('[walletPage] notifyAdmins (overflow) failed:', err));
         }
 
