@@ -760,21 +760,24 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
         }
       );
     } else {
-      logger.warn(`[claim] Manual claim failed for "${pos.outcome}": ${result.error ?? 'unknown'}`);
-      const isRateLimited = result.error && /rate.?limit|unavailable|quota/i.test(result.error);
-      const userError = isRateLimited
-        ? t(lang, 'The claiming service is temporarily busy. Your position is safe — please try again later.')
-        : (result.error || t(lang, 'Unknown error'));
+      const needsManualSupport = !!result.error && /only redeemable via Predexon/i.test(result.error);
+      const bodyText = needsManualSupport
+        ? t(lang, 'This position can\'t be claimed automatically right now. Our team has been notified — please contact support to finish the claim.')
+        : `${result.error || t(lang, 'Unknown error')}\n\n_${t(lang, 'Please try again.')}_`;
       await ctx.reply(
         `❌ *${t(lang, 'Claim Failed')}*\n\n` +
         `*${pos.outcome}* — ${truncate(pos.title, 50)}\n\n` +
-        `${userError}\n\n_${isRateLimited ? '' : t(lang, 'Please try again.')}_`,
+        bodyText,
         {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback(t(lang, 'btn.tryAgain'), `pos_redeem_${idx}`)],
-            [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
-          ]),
+          ...Markup.inlineKeyboard(
+            needsManualSupport
+              ? [[Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')]]
+              : [
+                  [Markup.button.callback(t(lang, 'btn.tryAgain'), `pos_redeem_${idx}`)],
+                  [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
+                ]
+          ),
         }
       );
     }
@@ -1662,7 +1665,10 @@ export async function executeCloseAllPositions(
         } else {
           logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
           failed++;
-          errors.push(`${pos.outcome}: redeem failed — ${result.error || 'unknown error'}`);
+          const friendlyErr = result.error && /only redeemable via Predexon/i.test(result.error)
+            ? 'needs manual support — please contact the team'
+            : (result.error || 'unknown error');
+          errors.push(`${pos.outcome}: redeem failed — ${friendlyErr}`);
           // If rate-limited, stop trying more redeems
           if (result.error && /rate.?limit/i.test(result.error)) {
             logger.warn(`[positionTrade] closeAll: relayer rate-limited, stopping redeem loop`);
