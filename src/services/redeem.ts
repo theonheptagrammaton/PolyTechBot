@@ -277,6 +277,27 @@ async function redeemNegRisk(
 
       const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
       const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+
+      // Pre-simulate the redeemPositions call to catch unrecoverable errors
+      // BEFORE the relayer submits (and wastes gas on a doomed transaction).
+      try {
+        await polygonProvider.call({
+          from: proxyAddress,
+          to: NEG_RISK_ADAPTER,
+          data: redeemData,
+        });
+      } catch (simErr: any) {
+        const simMsg = simErr?.message ?? '';
+        if (/subtraction overflow/i.test(simMsg)) {
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-simulation reverted with subtraction overflow — aborting to save gas`);
+          await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+          return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
+        }
+        // Other simulation errors (e.g., approval not yet set) are fine —
+        // the multicall sets approval first, so let the relayer proceed.
+        logger.debug?.(`[redeem] ${txType}/NegRiskAdapter: pre-simulation non-fatal error: ${simMsg.slice(0, 120)}`);
+      }
+
       const txPayload = [
         { to: CTF_ADDRESS, data: approveData, value: '0' },
         { to: NEG_RISK_ADAPTER, data: redeemData, value: '0' },
@@ -400,6 +421,24 @@ async function redeemStandard(
     ]);
     const txPayload = [{ to: CTF_ADDRESS, data: callData, value: '0' }];
     const tokenLabel = collateralToken === USDC_E_POLYGON ? 'USDC.e' : 'native USDC';
+
+    // Pre-simulate the CTF.redeemPositions call to catch subtraction overflow
+    // before the relayer wastes gas on a doomed transaction.
+    try {
+      await polygonProvider.call({
+        from: proxyAddress,
+        to: CTF_ADDRESS,
+        data: callData,
+      });
+    } catch (simErr: any) {
+      const simMsg = simErr?.message ?? '';
+      if (/subtraction overflow/i.test(simMsg)) {
+        logger.warn(`[redeem] ${tokenLabel}: pre-simulation reverted with subtraction overflow — skipping this collateral`);
+        await redisCache.set(overflowKey(proxyAddress, conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+        return { success: false, error: 'SafeMath subtraction overflow — only redeemable via Predexon API' };
+      }
+      // Other errors (e.g., wrong collateral) are expected — continue to next collateral
+    }
 
     for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
       // Re-check backoff before each tx type attempt

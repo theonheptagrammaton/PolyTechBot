@@ -9,8 +9,9 @@ import {
 
 const DATA_API = 'https://data-api.polymarket.com';
 
-const ACTIVE_POSITIONS_TTL  = 20;   // seconds
-const CLOSED_POSITIONS_TTL  = 60;   // seconds
+const ACTIVE_POSITIONS_TTL       = 20;   // seconds
+const ACTIVE_POSITIONS_EMPTY_TTL = 300;  // 5 min — addresses with 0 positions don't need frequent polling
+const CLOSED_POSITIONS_TTL       = 60;   // seconds
 const FETCH_TIMEOUT_MS      = 8_000; // abort Data API / CLOB fetches after 8s
 
 export interface OpenOrder {
@@ -154,7 +155,8 @@ export async function getActivePositions(proxyAddress: string, forceRefresh = fa
     // Keep positions with shares OR redeemable (resolved markets may have size=0 but still need claiming)
     const active = positions.filter((p) => p.size > 0 || p.redeemable);
 
-    await redisCache.set(cacheKey, active, ACTIVE_POSITIONS_TTL).catch(() => {});
+    const ttl = active.length === 0 ? ACTIVE_POSITIONS_EMPTY_TTL : ACTIVE_POSITIONS_TTL;
+    await redisCache.set(cacheKey, active, ttl).catch(() => {});
     logger.info(`Fetched ${active.length} active positions`);
     return active;
   } catch (error) {

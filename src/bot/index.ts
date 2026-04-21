@@ -1794,7 +1794,7 @@ export class TelegramBot {
         }).catch((err: any) => logger.error('Bot webhook error:', err));
         logger.info(`[bot] Webhook mode: ${webhookDomain}${webhookPath}`);
       } else {
-        this.bot.launch().catch((err: any) => logger.error('Bot launch error (polling):', err));
+        this.bot.launch({ dropPendingUpdates: true }).catch((err: any) => logger.error('Bot launch error (polling):', err));
         logger.info('[bot] Long polling mode (set WEBHOOK_DOMAIN for webhook)');
       }
 

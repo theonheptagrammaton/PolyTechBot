@@ -6,6 +6,18 @@ const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const CACHE_TTL = 120; // 2 minutes — short enough to feel real-time
 const SEARCH_CACHE_TTL = 120; // 2 minutes for search results
 
+// Promise coalescing: when multiple callers request the same data before the
+// first fetch completes, they all await the same in-flight Promise instead of
+// each making a duplicate API call. The entry is removed once the Promise settles.
+const _inflight = new Map<string, Promise<any>>();
+function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = _inflight.get(key);
+  if (existing) return existing as Promise<T>;
+  const p = fn().finally(() => _inflight.delete(key));
+  _inflight.set(key, p);
+  return p;
+}
+
 /** Gamma API tag slugs for main categories (matches Polymarket website) */
 export const CATEGORY_TAG_SLUGS: Record<string, string> = {
   'politics':    'politics',
@@ -126,6 +138,11 @@ export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
     const cacheKey = 'markets:updown:v9';
     const cached = await redisCache.get<UpDownMarket[]>(cacheKey);
     if (cached) return cached;
+
+    return coalesce(cacheKey, async () => {
+    // Re-check cache inside coalesce — another caller may have just populated it
+    const cached2 = await redisCache.get<UpDownMarket[]>(cacheKey);
+    if (cached2) return cached2;
 
     logger.info('Fetching crypto up/down markets');
 
@@ -257,9 +274,10 @@ export async function getUpDownMarkets(): Promise<UpDownMarket[]> {
       return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
     });
 
-    await redisCache.set(cacheKey, markets, 15); // 15 s — short cache for fresh prices during auto-trading
+    await redisCache.set(cacheKey, markets, 60); // 60s — market metadata (token IDs, outcomes) rarely changes
     logger.info(`Fetched ${markets.length} crypto up/down markets`);
     return markets;
+    }); // end coalesce
   } catch (error) {
     logger.error('Error fetching crypto up/down markets:', error);
     return [];
@@ -379,6 +397,10 @@ export async function getTrendingEvents(limit: number = 30): Promise<Event[]> {
       return cached;
     }
 
+    return coalesce(cacheKey, async () => {
+    const cached2 = await redisCache.get<Event[]>(cacheKey);
+    if (cached2) return cached2;
+
     logger.info(`Fetching top ${limit} trending events from Gamma API...`);
 
     const response = await axios.get(`${GAMMA_API_BASE}/events`, {
@@ -386,7 +408,7 @@ export async function getTrendingEvents(limit: number = 30): Promise<Event[]> {
         active: true,
         closed: false,
         featured: true,
-        end_date_min: new Date().toISOString(), // exclude expired-but-unresolved events
+        end_date_min: new Date().toISOString(),
         order: 'volume24hr',
         ascending: false,
         limit: 50,
@@ -400,9 +422,9 @@ export async function getTrendingEvents(limit: number = 30): Promise<Event[]> {
 
     logger.info(`Fetched ${result.length} trending events`);
     return result;
+    }); // end coalesce
   } catch (error) {
     logger.error('Error fetching trending events:', error);
-    // Fall back to getTopEvents on error
     return getTopEvents(limit);
   }
 }
@@ -460,9 +482,12 @@ export async function getBreakingEvents(limit: number = 30): Promise<Event[]> {
       return cached;
     }
 
+    return coalesce(cacheKey, async () => {
+    const cached2 = await redisCache.get<Event[]>(cacheKey);
+    if (cached2) return cached2;
+
     logger.info(`Fetching ${limit} breaking events from Gamma API...`);
 
-    // Fetch recent events sorted by 24h volume — "breaking" = new + high activity
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const response = await axios.get(`${GAMMA_API_BASE}/events`, {
       params: {
@@ -483,6 +508,7 @@ export async function getBreakingEvents(limit: number = 30): Promise<Event[]> {
 
     logger.info(`Fetched ${result.length} breaking events`);
     return result;
+    }); // end coalesce
   } catch (error) {
     logger.error('Error fetching breaking events:', error);
     return getTopEvents(limit);
@@ -501,6 +527,10 @@ export async function getNewestEvents(limit: number = 30): Promise<Event[]> {
       return cached;
     }
 
+    return coalesce(cacheKey, async () => {
+    const cached2 = await redisCache.get<Event[]>(cacheKey);
+    if (cached2) return cached2;
+
     logger.info(`Fetching ${limit} newest events from Gamma API...`);
 
     const response = await axios.get(`${GAMMA_API_BASE}/events`, {
@@ -516,14 +546,12 @@ export async function getNewestEvents(limit: number = 30): Promise<Event[]> {
     });
 
     const events: Event[] = Array.isArray(response.data) ? response.data : [];
-    // For newest: keep the date sort instead of re-sorting by volume
     const now = Date.now();
     const filtered = events
       .filter(e => {
         if (!Array.isArray(e.markets) || e.markets.length === 0) return false;
         const endMs = (e as any).endDate ? new Date((e as any).endDate).getTime() : 0;
         if (endMs > 0 && endMs < now) return false;
-        // Skip established markets with $50K+ liquidity — newest should show fresh markets
         if ((e.liquidity ?? 0) >= 50_000) return false;
         return true;
       })
@@ -532,6 +560,7 @@ export async function getNewestEvents(limit: number = 30): Promise<Event[]> {
     await redisCache.set(cacheKey, filtered, CACHE_TTL);
     logger.info(`Fetched ${filtered.length} newest events`);
     return filtered;
+    }); // end coalesce
   } catch (error) {
     logger.error('Error fetching newest events:', error);
     return getTopEvents(limit);
@@ -699,6 +728,10 @@ export async function getEventsByCategory(category: string, limit: number = 30):
       return cached;
     }
 
+    return coalesce(cacheKey, async () => {
+    const cached2 = await redisCache.get<Event[]>(cacheKey);
+    if (cached2) return cached2;
+
     const tagSlug = CATEGORY_TAG_SLUGS[category];
     logger.info(`Fetching events for category: ${category} (tag_slug=${tagSlug ?? 'keyword'})`);
 
@@ -723,7 +756,6 @@ export async function getEventsByCategory(category: string, limit: number = 30):
 
     let events: Event[] = Array.isArray(response.data) ? response.data : [];
 
-    // Keyword fallback for unknown categories
     if (!tagSlug) {
       const keywords = getCategoryKeywords(category);
       events = events.filter(event => {
@@ -737,6 +769,7 @@ export async function getEventsByCategory(category: string, limit: number = 30):
 
     logger.info(`Fetched ${sortedEvents.length} events for category ${category}`);
     return sortedEvents;
+    }); // end coalesce
   } catch (error) {
     logger.error(`Error fetching events for category ${category}:`, error);
     throw new Error(`Failed to fetch events for category ${category}`);

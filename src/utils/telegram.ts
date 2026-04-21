@@ -7,6 +7,19 @@ import sharp from 'sharp';
 
 const TG_MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
 
+// Per-message edit lock: prevents concurrent editMessageMedia/editMessageCaption
+// calls on the same message. If a second sendPage arrives while the first is
+// still in-flight, the second is silently dropped (the first one already delivers
+// the latest state). Entries auto-clean when the Promise settles.
+const _editLocks = new Map<string, Promise<void>>();
+function getEditLockKey(ctx: Context): string | null {
+  const chatId = ctx.chat?.id;
+  const msgId = ctx.callbackQuery && 'message' in ctx.callbackQuery
+    ? (ctx.callbackQuery.message as any)?.message_id : null;
+  if (!chatId || !msgId) return null;
+  return `${chatId}:${msgId}`;
+}
+
 /**
  * Returns a Buffer ready for Telegram. If the file exceeds the 10 MB limit,
  * @public exported for use outside sendPage (e.g. notification senders)
@@ -67,6 +80,33 @@ export function cacheMenuPhotoFileId(result: any): void {
  * Captions are capped at 1024 chars (Telegram limit).
  */
 export async function sendPage(
+  ctx: Context,
+  caption: string,
+  extra?: Record<string, any>
+): Promise<void> {
+  // Per-message edit lock: drop concurrent edits on the same message
+  const lockKey = getEditLockKey(ctx);
+  if (lockKey) {
+    if (_editLocks.has(lockKey)) {
+      logger.debug?.(`[sendPage] Dropping concurrent edit for ${lockKey}`);
+      return;
+    }
+    // Reserve the lock, release when this invocation finishes
+    let releaseLock: () => void;
+    const lockPromise = new Promise<void>(resolve => { releaseLock = resolve; });
+    _editLocks.set(lockKey, lockPromise);
+    lockPromise.finally(() => _editLocks.delete(lockKey));
+    try {
+      await sendPageInner(ctx, caption, extra);
+    } finally {
+      releaseLock!();
+    }
+    return;
+  }
+  return sendPageInner(ctx, caption, extra);
+}
+
+async function sendPageInner(
   ctx: Context,
   caption: string,
   extra?: Record<string, any>
