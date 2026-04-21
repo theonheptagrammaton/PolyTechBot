@@ -21,8 +21,17 @@ import {
 // TTL for the "already claimed" dedup key — 30 days so the Data API lag never re-triggers
 const CLAIMED_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
+// TTL for the "overflow" dedup key — 6 hours so we don't spam unrecoverable redeems
+// NegRiskAdapter subtraction overflow means the on-chain contract can't process this redeem
+// via Builder path. Only Predexon API can handle these. Retry after 6h in case market state changes.
+const OVERFLOW_TTL_SECONDS = 6 * 60 * 60; // 6 hours
+
 function claimedKey(proxyAddress: string, conditionId: string): string {
   return `redeem:claimed:${proxyAddress.toLowerCase()}:${conditionId}`;
+}
+
+function overflowKey(proxyAddress: string, conditionId: string): string {
+  return `redeem:overflow:${proxyAddress.toLowerCase()}:${conditionId}`;
 }
 
 // Polymarket contract addresses (from official docs)
@@ -181,7 +190,14 @@ async function redeemPosition(params: {
   const privateKey  = decrypt(params.encryptedPrivateKey);
 
   // If Data API says negativeRisk, go straight to NegRiskAdapter
+  // BUT skip if we already know Builder path fails with subtraction overflow for this position
   if (params.position.negativeRisk) {
+    const oKey = overflowKey(params.proxyAddress, params.position.conditionId);
+    const overflowBlocked = await redisCache.get<boolean>(oKey).catch(() => null);
+    if (overflowBlocked) {
+      logger.info(`[redeem] Skipping NegRiskAdapter — overflow dedup key active for ${params.position.conditionId.slice(0, 18)}... (only Predexon can redeem)`);
+      return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API (cached)' };
+    }
     return redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
   }
 
@@ -190,7 +206,13 @@ async function redeemPosition(params: {
   if (stdResult.success) return stdResult;
 
   // Standard path failed — Data API negativeRisk flag can be unreliable,
-  // so try NegRiskAdapter as fallback
+  // so try NegRiskAdapter as fallback (unless overflow-blocked)
+  const oKey = overflowKey(params.proxyAddress, params.position.conditionId);
+  const overflowBlocked = await redisCache.get<boolean>(oKey).catch(() => null);
+  if (overflowBlocked) {
+    logger.info(`[redeem] Standard CTF failed & NegRiskAdapter overflow-blocked — skipping`);
+    return stdResult;
+  }
   const balanceNow = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
   if (balanceNow.isZero()) {
     return stdResult;
@@ -321,24 +343,19 @@ async function redeemNegRisk(
         await setRelayerBackoff(errMsg);
         break; // Stop trying — relayer is exhausted
       }
-      // Detect "subtraction overflow" — amounts don't match on-chain token→slot mapping.
-      // Most likely cause: Data API outcomeIndex doesn't match NegRiskAdapter's internal slot order.
-      // Fix: flip the outcomeIndex and restart the tx type loop from SAFE.
+      // Detect "subtraction overflow" — this is UNRECOVERABLE via Builder path.
+      // NegRiskAdapter requires complementary token amounts but user only holds one side.
+      // Only Predexon API can handle these redeems. Stop immediately, don't waste more relayer quota.
       if (/subtraction overflow/i.test(errMsg)) {
         const freshBalance = await getOnChainTokenBalance(proxyAddress, position.asset);
         if (freshBalance.isZero()) {
           logger.info(`[redeem] Position already fully redeemed (balance now 0)`);
           return { success: true, txHash: undefined };
         }
-        if (!outcomeFlipped) {
-          effectiveOutcomeIndex = 1 - effectiveOutcomeIndex;
-          outcomeFlipped = true;
-          logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow — flipping outcomeIndex to ${effectiveOutcomeIndex} and restarting`);
-          ti = -1; // will become 0 after loop increment → restart from SAFE
-          continue;
-        }
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow persists after flip — skipping`);
-        continue;
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: SafeMath subtraction overflow — UNRECOVERABLE via Builder path (balance=${freshBalance.toString()}). Marking overflow dedup key.`);
+        // Set overflow dedup key so we don't retry this position for 6 hours
+        await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+        return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
       }
       logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed: ${errMsg.slice(0, 200)}`);
       // Short delay between tx type attempts to avoid hammering
@@ -454,6 +471,12 @@ async function redeemStandard(
           await setRelayerBackoff(errMsg);
           break; // Stop trying — relayer is exhausted
         }
+        // Detect subtraction overflow in standard path too — mark and bail
+        if (/subtraction overflow/i.test(errMsg)) {
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: SafeMath subtraction overflow — likely negRisk market, marking overflow dedup key`);
+          await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+          return { success: false, error: 'SafeMath subtraction overflow — only redeemable via Predexon API' };
+        }
         logger.warn(`[redeem] ${txType}/${tokenLabel} attempt failed: ${errMsg.slice(0, 200)}`);
         // Short delay between tx type attempts to avoid hammering
         await new Promise(r => setTimeout(r, 2_000));
@@ -555,6 +578,15 @@ async function redeemSingle(params: {
       logger.warn(`[redeem] Predexon redeem failed, falling back to relayer: ${err?.message}`);
     }
   }
+
+  // Before falling back to Builder Relayer, check if this position is overflow-blocked
+  const oKey = overflowKey(params.proxyAddress, params.position.conditionId);
+  const overflowBlocked = await redisCache.get<boolean>(oKey).catch(() => null);
+  if (overflowBlocked) {
+    logger.info(`[redeem] Skipping Builder fallback — overflow dedup key active for ${params.position.conditionId.slice(0, 18)}... (only Predexon can redeem)`);
+    return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API (cached)' };
+  }
+
   return redeemPosition(params);
 }
 
