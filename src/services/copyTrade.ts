@@ -135,7 +135,7 @@ export function computeCopySize(
   }
 
   // Safety caps
-  target = Math.min(target, userBalance * 0.5); // max 50% of balance
+  target = Math.min(target, userBalance); // never exceed actual balance
   if (target < 1.0) return 0;
 
   return parseFloat(target.toFixed(2));
