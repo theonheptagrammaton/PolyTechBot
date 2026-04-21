@@ -346,7 +346,8 @@ async function executeCopyOrder(
 
     if (isSell) {
       // For SELL: find user's position for this token and determine sell size proportionally
-      const positions = await getActivePositions(user.polymarketProxyAddress);
+      // Force-refresh to avoid stale cache causing "no matching position" false negatives
+      const positions = await getActivePositions(user.polymarketProxyAddress, true);
       const pos = positions.find((p) => p.asset === tokenId);
 
       // Market resolved → no orderbook exists. Auto-redeem instead of selling.

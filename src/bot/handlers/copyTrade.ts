@@ -469,14 +469,14 @@ async function sendAddStepTradeBehavior(ctx: Context): Promise<void> {
   await sendPage(ctx,
     `📋 <b>${t(lang, 'Step 9/9 — Trade Behavior')}</b>\n\n` +
     t(lang, "How should the bot handle the leader's trades?") + `\n\n` +
-    `🟢 <b>${t(lang, 'Buys Only')}</b> — ${t(lang, 'Only copy BUY trades')}\n` +
     `🔄 <b>${t(lang, 'Buys + Sells')}</b> — ${t(lang, 'Copy both BUYs and SELLs')}\n` +
+    `🟢 <b>${t(lang, 'Buys Only')}</b> — ${t(lang, 'Only copy BUY trades')}\n` +
     `🔀 <b>${t(lang, 'Counter Trade')}</b> — ${t(lang, 'Take the opposite side of every trade')}`,
     {
       parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback(`🟢 ${t(lang, 'Buys Only')}`, 'copy_add_behavior_buys')],
         [Markup.button.callback(`🔄 ${t(lang, 'Buys + Sells')}`, 'copy_add_behavior_both')],
+        [Markup.button.callback(`🟢 ${t(lang, 'Buys Only')}`, 'copy_add_behavior_buys')],
         [Markup.button.callback(`🔀 ${t(lang, 'Counter Trade')}`, 'copy_add_behavior_counter')],
         backCancelRow(),
       ]),
@@ -539,7 +539,7 @@ async function sendAddReview(ctx: Context, state: CopyAddState): Promise<void> {
     `🎯 <b>${t(lang, 'Price Range')}:</b> ${priceRange}`,
     `🔻 <b>${t(lang, 'Stop Loss')}:</b> ${slLine}`,
     `🔺 <b>${t(lang, 'Take Profit')}:</b> ${tpLine}`,
-    `📊 <b>${t(lang, 'Behavior')}:</b> ${behaviorLabels[state.tradeBehavior || 'buys_only']}`,
+    `📊 <b>${t(lang, 'Behavior')}:</b> ${behaviorLabels[state.tradeBehavior || 'buys_sells']}`,
     `━━━━━━━━━━━━━━━━━━━`,
     ``,
     `⏸ <i>${t(lang, 'Paused — start it from the task settings after creation.')}</i>`,
