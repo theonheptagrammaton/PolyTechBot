@@ -3,7 +3,7 @@ import { Context } from 'telegraf';
 import { Markup } from 'telegraf';
 import { getUserByTelegramId } from '../../services/user';
 import { logger } from '../../utils/logger';
-import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
+import { isBenignTelegramError, sendPage, sendImageBufferPage, fetchProfilePhoto, notifyAdmins } from '../../utils/telegram';
 import { generateAllTimePnlImage, generatePortfolioPnlImage } from '../../services/pnlImage';
 import { prisma } from '../../database/prisma';
 
@@ -1314,6 +1314,25 @@ export async function handleCloseAllExecute(ctx: Context): Promise<void> {
         const result = await executeCloseAllPositions(user, user.slippageTolerance ?? 1.0);
 
         await invalidatePortfolioCache(user.polymarketProxyAddress ?? '');
+
+        // If any redeem hit the NegRiskAdapter overflow path, alert admins with a single summary
+        // so they can manually help the (likely legacy) user unstick those positions.
+        if (result.overflowPositions.length > 0) {
+          const overflowLines = result.overflowPositions.slice(0, 10).map(p =>
+            `• ${esc(p.outcome)} — ${esc(p.title.slice(0, 40))} (cid: <code>${p.conditionId.slice(0, 20)}…</code>)`
+          );
+          const overflowMore = result.overflowPositions.length > 10
+            ? `\n…and ${result.overflowPositions.length - 10} more`
+            : '';
+          notifyAdmins(bot,
+            `⚠️ <b>Manual Redeem Needed (Close All)</b>\n` +
+            `User: <code>${user.telegramId}</code>` + (user.username ? ` (@${user.username})` : '') + `\n` +
+            `Proxy: <code>${user.polymarketProxyAddress}</code>\n` +
+            `${result.overflowPositions.length} position(s) stuck on Builder overflow:\n` +
+            overflowLines.join('\n') + overflowMore + `\n` +
+            `Reason: NegRiskAdapter SafeMath overflow; not in Predexon ledger.`
+          ).catch((err) => logger.warn('[walletPage] notifyAdmins (overflow) failed:', err));
+        }
 
         const lines: string[] = [];
         if (result.closed > 0)   lines.push(`✅ <b>${result.closed} ${t(lang, 'position')}${result.closed > 1 ? 's' : ''} ${t(lang, 'sold')}</b> ${t(lang, 'at market price')}.`);

@@ -5,7 +5,7 @@ import { config } from '../../config';
 import { getActivePositions, getClosedPositions, getBalance, ActivePosition, ClosedPosition, fetchTxHashForOrder } from '../../services/portfolio';
 import { logger } from '../../utils/logger';
 import { transferCommission, COMMISSION_RATE } from '../../services/commission';
-import { sendPage, sendImageBufferPage, fetchProfilePhoto } from '../../utils/telegram';
+import { sendPage, sendImageBufferPage, fetchProfilePhoto, notifyAdmins } from '../../utils/telegram';
 import { ce, esc, EMOJI } from '../../utils/customEmoji';
 import { generatePositionPnlImage } from '../../services/pnlImage';
 import { RedisBackedState } from '../../utils/redisState';
@@ -761,6 +761,20 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
       );
     } else {
       const needsManualSupport = !!result.error && /only redeemable via Predexon/i.test(result.error);
+      // Fire an admin alert only on the first (non-cached) overflow — caching
+      // suppresses spam for the same position within the 6h dedup window.
+      const isFreshOverflow = needsManualSupport && !/\(cached\)/i.test(result.error!);
+      if (isFreshOverflow) {
+        notifyAdmins(
+          ctx.telegram,
+          `⚠️ <b>Manual Redeem Needed</b>\n` +
+          `User: <code>${user.telegramId}</code>` + (user.username ? ` (@${user.username})` : '') + `\n` +
+          `Proxy: <code>${user.polymarketProxyAddress}</code>\n` +
+          `Position: ${esc(pos.outcome)} — ${esc(truncate(pos.title, 40))}\n` +
+          `ConditionId: <code>${pos.conditionId.slice(0, 24)}…</code>\n` +
+          `Reason: NegRiskAdapter SafeMath overflow (Builder path). Position not in Predexon ledger — legacy user or incomplete migration.`
+        ).catch((err) => logger.warn('[redeem] notifyAdmins failed:', err));
+      }
       const bodyText = needsManualSupport
         ? t(lang, 'This position can\'t be claimed automatically right now. Our team has been notified — please contact support to finish the claim.')
         : `${result.error || t(lang, 'Unknown error')}\n\n_${t(lang, 'Please try again.')}_`;
@@ -1610,10 +1624,16 @@ function classifyOrderError(err: any, side: 'buy' | 'sell'): Error {
  * redeems any resolved (redeemable) positions in a single bulk action.
  * Called from the "Close All Positions" bulk action.
  */
+export interface CloseAllOverflowPosition {
+  outcome: string;
+  title: string;
+  conditionId: string;
+}
+
 export async function executeCloseAllPositions(
   user: any,
   slippagePct: number = 1.0,
-): Promise<{ closed: number; redeemed: number; failed: number; errors: string[] }> {
+): Promise<{ closed: number; redeemed: number; failed: number; errors: string[]; overflowPositions: CloseAllOverflowPosition[] }> {
   const allPositions = await getActivePositions(user.polymarketProxyAddress);
   const sellable   = allPositions.filter(pos => pos.size > 0 && !pos.redeemable);
   const redeemable = allPositions.filter(pos => pos.size > 0 &&  pos.redeemable);
@@ -1621,6 +1641,7 @@ export async function executeCloseAllPositions(
   let redeemed = 0;
   let failed = 0;
   const errors: string[] = [];
+  const overflowPositions: CloseAllOverflowPosition[] = [];
 
   // 1) Sell open positions sequentially (avoid rate-limit / nonce collisions on Predexon)
   for (const pos of sellable) {
@@ -1665,7 +1686,12 @@ export async function executeCloseAllPositions(
         } else {
           logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
           failed++;
-          const friendlyErr = result.error && /only redeemable via Predexon/i.test(result.error)
+          const isOverflow = !!result.error && /only redeemable via Predexon/i.test(result.error);
+          // Only track "fresh" overflows (not cached) so we don't spam admin on repeat attempts
+          if (isOverflow && !/\(cached\)/i.test(result.error!)) {
+            overflowPositions.push({ outcome: pos.outcome, title: pos.title, conditionId: pos.conditionId });
+          }
+          const friendlyErr = isOverflow
             ? 'needs manual support — please contact the team'
             : (result.error || 'unknown error');
           errors.push(`${pos.outcome}: redeem failed — ${friendlyErr}`);
@@ -1692,5 +1718,5 @@ export async function executeCloseAllPositions(
     }
   }
 
-  return { closed, redeemed, failed, errors };
+  return { closed, redeemed, failed, errors, overflowPositions };
 }
