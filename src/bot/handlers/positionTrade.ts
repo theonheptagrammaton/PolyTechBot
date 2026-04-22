@@ -202,12 +202,25 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
     msg += `├ ${pnlEmoji} ${t(lang, 'Unrealized')}: ${pnlSign}$${pos.cashPnl.toFixed(2)}\n`;
     msg += `├ ROI: ${pnlSign}${pos.percentPnl.toFixed(1)}%\n`;
     msg += `└ ${t(lang, 'Realized')}: $${pos.realizedPnl.toFixed(2)}\n\n`;
+
+    // Check for active stop loss
+    const { getStopLoss } = await import('../../services/stopLoss');
+    const activeSl = await getStopLoss(telegramId, pos.asset);
+    if (activeSl) {
+      msg += `🛑 *Stop Loss*: ${(activeSl.triggerPrice * 100).toFixed(1)}¢\n\n`;
+    }
+
     msg += `⏰ ${t(lang, 'Market ends')}: ${endDate}\n`;
     if (pos.redeemable) msg += `${t(lang, 'position.marketResolved')}\n`;
 
     const viewMarketUrl = (pos.eventSlug || pos.slug)
       ? `https://polymarket.com/event/${pos.eventSlug || pos.slug}`
       : '';
+
+    // Build SL button: cancel if active, set if not
+    const slButton = activeSl
+      ? Markup.button.callback(`🚫 Cancel SL (${(activeSl.triggerPrice * 100).toFixed(0)}¢)`, `pos_cancel_sl_idx_${idx}`)
+      : Markup.button.callback(t(lang, 'btn.stopLoss'), `pos_sl_${idx}`);
 
     const detailButtons = pos.redeemable
       ? [
@@ -221,6 +234,7 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
             Markup.button.callback(t(lang, 'btn.buyMore'), `pos_buy_${idx}`),
             Markup.button.callback(t(lang, 'btn.sell'), `pos_sell_${idx}`),
           ],
+          [slButton],
           [Markup.button.callback(`📊 P&L`, `pos_pnl_${idx}`)],
           ...(viewMarketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), viewMarketUrl)]] : []),
           [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
@@ -283,6 +297,10 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
       ? `https://polymarket.com/event/${pos.eventSlug || pos.slug}`
       : '';
 
+    // Check for active stop loss on this position
+    const { getStopLoss: getSlForPnl } = await import('../../services/stopLoss');
+    const activeSl = await getSlForPnl(telegramId, pos.asset);
+
     const pnlKeyboard = Markup.inlineKeyboard([
       [
         Markup.button.callback(`📈 ${t(lang, 'Buy')}`, `pos_buy_${idx}`),
@@ -293,7 +311,9 @@ export async function handlePositionPnl(ctx: Context, idx: number): Promise<void
         ...(shareUrl ? [Markup.button.url(t(lang, 'btn.share'), shareUrl)] : []),
       ],
       ...(marketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), marketUrl)]] : []),
-      [Markup.button.callback(t(lang, 'btn.stopLoss'), `pos_sl_${idx}`)],
+      [activeSl
+        ? Markup.button.callback(`🚫 Cancel SL (${(activeSl.triggerPrice * 100).toFixed(0)}¢)`, `pos_cancel_sl_idx_${idx}`)
+        : Markup.button.callback(t(lang, 'btn.stopLoss'), `pos_sl_${idx}`)],
       [Markup.button.callback(t(lang, 'btn.back'), `pos_view_${idx}`)],
     ]);
 
@@ -952,7 +972,7 @@ async function showStopLossConfirmation(
 export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
-  await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'Placing stop loss...')).catch(() => {});
+  await ctx.answerCbQuery(t(((ctx as any).userLanguage as Locale) || 'en', 'Setting stop loss...')).catch(() => {});
 
   const state = await positionTradeState.get(telegramId);
   if (!state || state.action !== 'stop_loss' || !state.price) {
@@ -971,47 +991,49 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
     }
 
     const lang = getLang(user);
-
-    const { ensurePredexonUser } = await import('../../services/user');
-    const { placeOrder: predexonPlaceOrder } = await import('../../services/predexon');
-
-    const predexonUserId = await ensurePredexonUser(user);
+    const { addStopLoss, getStopLoss } = await import('../../services/stopLoss');
 
     // Snap price to 0.01 tick
     const tick       = 0.01;
     const snappedPrice = parseFloat(Math.max(Math.round(state.price / tick) * tick, 0.01).toFixed(2));
     const shares     = Math.floor(state.currentSize * 10000) / 10000;
 
-    logger.info(
-      `[stopLoss] Placing GTC SELL: ${shares} shares of ${state.outcome} ` +
-      `assetId=${state.assetId.substring(0, 16)}... price=${snappedPrice}`
-    );
+    // Check if there's already an active SL on this position
+    const existing = await getStopLoss(telegramId, state.assetId);
 
-    const orderResp = await predexonPlaceOrder(predexonUserId, {
-      venue: 'polymarket',
-      tokenId: state.assetId,
-      side: 'sell',
-      type: 'limit',
-      size: String(shares),
-      price: String(snappedPrice),
+    await addStopLoss({
+      telegramId,
+      assetId: state.assetId,
+      conditionId: state.conditionId,
+      negRisk: state.negRisk,
+      outcome: state.outcome,
+      title: state.title,
+      triggerPrice: snappedPrice,
+      shares,
+      createdAt: Date.now(),
+      retries: 0,
     });
 
-    if (!orderResp.orderId) {
-      const errMsg = (orderResp as any).error || (orderResp as any).message || 'Order rejected by exchange';
-      throw new Error(errMsg);
-    }
+    // Store cancel target so the cancel button can resolve it
+    const { redisCache } = await import('../../database/redis');
+    await redisCache.set(`pos:sl:cancel_target:${telegramId}`, state.assetId, 3600);
 
     const slCents = (snappedPrice * 100).toFixed(1);
+    const overrideNote = existing
+      ? `\n\n⚠️ _Previous stop loss on this position has been replaced._`
+      : '';
+
     await ctx.reply(
-      `✅ *${t(lang, 'Stop Loss Placed')}*\n\n` +
+      `✅ *${t(lang, 'Stop Loss Set')}*\n\n` +
       `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
       `🛑 ${t(lang, 'Trigger price')}: *${slCents}¢*\n` +
       `📦 ${t(lang, 'Shares')}: *${shares}*\n\n` +
-      `_${t(lang, 'GTC limit sell order resting on the book. Cancel it from Open Orders if needed.')}_`,
+      `_When the market price drops to ${slCents}¢ or below, a market sell will be executed automatically._` +
+      overrideNote,
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback(t(lang, 'btn.openOrders'), 'portfolio_orders_1')],
+          [Markup.button.callback(`🚫 Cancel Stop Loss`, 'pos_cancel_sl')],
           [Markup.button.callback(`📊 ${t(lang, 'My Positions')}`, 'portfolio_open_1')],
           [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
         ]),
@@ -1019,15 +1041,102 @@ export async function handlePositionExecuteStopLoss(ctx: Context): Promise<void>
     ).catch(() => {});
 
     logger.info(
-      `[stopLoss] Placed: user=${telegramId} outcome=${state.outcome} price=${snappedPrice} shares=${shares} orderId=${orderResp.orderId}`
+      `[stopLoss] Set: user=${telegramId} outcome=${state.outcome} triggerPrice=${snappedPrice} shares=${shares}`
     );
   } catch (error: any) {
-    logger.error('[stopLoss] Error executing stop loss:', error);
+    logger.error('[stopLoss] Error setting stop loss:', error);
     const lang = ((ctx as any).userLanguage as Locale) || 'en';
     await ctx.reply(
       `❌ *${t(lang, 'Stop Loss Failed')}*\n\n${error?.message || t(lang, 'Unknown error')}\n\n${t(lang, 'Please try again.')}`,
       { parse_mode: 'Markdown' },
     ).catch(() => {});
+  }
+}
+
+export async function handleCancelStopLoss(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  await ctx.answerCbQuery().catch(() => {});
+
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+
+  try {
+    const { redisCache } = await import('../../database/redis');
+    const { removeStopLoss, getStopLoss } = await import('../../services/stopLoss');
+
+    const assetId = await redisCache.get<string>(`pos:sl:cancel_target:${telegramId}`);
+    if (!assetId) {
+      await ctx.reply(`❌ ${t(lang, 'No active stop loss found or session expired.')}`).catch(() => {});
+      return;
+    }
+
+    const sl = await getStopLoss(telegramId, assetId);
+    if (!sl) {
+      await ctx.reply(`❌ ${t(lang, 'Stop loss already cancelled or triggered.')}`).catch(() => {});
+      return;
+    }
+
+    await removeStopLoss(telegramId, assetId);
+    await redisCache.del(`pos:sl:cancel_target:${telegramId}`);
+
+    const triggerCents = (sl.triggerPrice * 100).toFixed(1);
+    await ctx.reply(
+      `✅ *Stop Loss Cancelled*\n\n` +
+      `*${sl.outcome}* — ${truncate(sl.title, 50)}\n` +
+      `Trigger ${triggerCents}¢ removed.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(`📊 ${t(lang, 'My Positions')}`, 'portfolio_open_1')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
+        ]),
+      },
+    ).catch(() => {});
+  } catch (error: any) {
+    logger.error('[stopLoss] Error cancelling:', error);
+    await ctx.reply(`❌ ${t(lang, 'Failed to cancel stop loss.')}`).catch(() => {});
+  }
+}
+
+export async function handleCancelStopLossByIdx(ctx: Context, idx: number): Promise<void> {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+  await ctx.answerCbQuery().catch(() => {});
+
+  const lang = ((ctx as any).userLanguage as Locale) || 'en';
+
+  try {
+    const pos = await getPosOrFetch(telegramId, idx);
+    if (!pos) {
+      await ctx.reply(t(lang, 'position.notFound')).catch(() => {});
+      return;
+    }
+
+    const { removeStopLoss, getStopLoss } = await import('../../services/stopLoss');
+    const sl = await getStopLoss(telegramId, pos.asset);
+    if (!sl) {
+      await ctx.reply(`❌ No active stop loss on this position.`).catch(() => {});
+      return;
+    }
+
+    await removeStopLoss(telegramId, pos.asset);
+
+    const triggerCents = (sl.triggerPrice * 100).toFixed(1);
+    await ctx.reply(
+      `✅ *Stop Loss Cancelled*\n\n` +
+      `*${sl.outcome}* — ${truncate(sl.title, 50)}\n` +
+      `Trigger ${triggerCents}¢ removed.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(`📊 ${t(lang, 'My Positions')}`, 'portfolio_open_1')],
+          [Markup.button.callback(t(lang, 'btn.mainMenu'), 'back_to_menu')],
+        ]),
+      },
+    ).catch(() => {});
+  } catch (error: any) {
+    logger.error('[stopLoss] Error cancelling by idx:', error);
+    await ctx.reply(`❌ Failed to cancel stop loss.`).catch(() => {});
   }
 }
 

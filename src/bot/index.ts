@@ -131,6 +131,8 @@ import {
   handlePositionExecuteBuy,
   handlePositionStopLoss,
   handlePositionExecuteStopLoss,
+  handleCancelStopLoss,
+  handleCancelStopLossByIdx,
   handlePositionPnl,
   handlePositionPnlShare,
   handleClosedPositionPnl,
@@ -355,6 +357,7 @@ import {
 import { startCopyTradeMonitor, NotificationExtra } from '../services/copyTrade';
 import { startBondMonitor, stopBondMonitor } from '../services/bond';
 import { startUpDownMonitor, stopUpDownMonitor } from '../services/updown';
+import { startStopLossMonitor, stopStopLossMonitor } from '../services/stopLoss';
 import { prepareImageBuffer } from '../utils/telegram';
 import { enqueueNotification, startNotificationWorker, closeNotificationWorker } from '../utils/notificationQueue';
 import {
@@ -837,9 +840,13 @@ export class TelegramBot {
     this.bot.action('pos_execute_sl', handlePositionExecuteStopLoss);
     this.bot.action('pos_cancel', handlePositionCancel);
 
-    // Stop loss trigger
+    // Stop loss trigger + cancel
     this.bot.action(/^pos_sl_(\d+)$/, async (ctx) => {
       await handlePositionStopLoss(ctx, parseInt(ctx.match[1], 10));
+    });
+    this.bot.action('pos_cancel_sl', handleCancelStopLoss);
+    this.bot.action(/^pos_cancel_sl_idx_(\d+)$/, async (ctx) => {
+      await handleCancelStopLossByIdx(ctx, parseInt(ctx.match[1], 10));
     });
 
     // PNL handlers
@@ -1854,6 +1861,11 @@ export class TelegramBot {
         );
       });
 
+      // Start position stop loss monitor
+      startStopLossMonitor((chatId, text) => {
+        enqueueNotification(chatId, text);
+      });
+
       logger.info('Telegram bot started successfully');
     } catch (error) {
       logger.error('Failed to start bot:', error);
@@ -1871,6 +1883,7 @@ export class TelegramBot {
       }
       stopBondMonitor();
       stopUpDownMonitor();
+      stopStopLossMonitor();
       await closeNotificationWorker();
       this.bot.stop('SIGINT');
       logger.info('Telegram bot stopped');
