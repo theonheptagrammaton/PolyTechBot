@@ -149,11 +149,19 @@ async function tick(): Promise<void> {
           continue;
         }
 
+        // Polymarket CLOB only supports limit orders for sells — 'market' type is rejected.
+        // Use aggressive limit price (current price minus slippage) to fill immediately.
+        const slippagePct = user.slippageTolerance ?? 5.0;
+        const limitSellPrice = Math.max(
+          parseFloat((currentPrice * (1 - slippagePct / 100)).toFixed(4)),
+          0.01,
+        );
         const orderResp = await predexonPlaceOrder(predexonUserId, {
           venue: 'polymarket',
           tokenId: sl.assetId,
           side: 'sell',
-          type: 'market',
+          type: 'limit',
+          price: String(limitSellPrice),
           size: String(cleanSize),
         });
 

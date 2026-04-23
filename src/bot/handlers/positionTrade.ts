@@ -1644,8 +1644,11 @@ async function executePositionOrder(
   const cleanPrice = parseFloat(price.toFixed(4));
 
   if (action === 'sell') {
+    // Polymarket CLOB only supports limit orders for sells — 'market' type is rejected.
+    // Use a limit sell at the slippage-adjusted price (cleanPrice) to execute immediately.
+    const limitSellPrice = Math.max(parseFloat(cleanPrice.toFixed(4)), 0.01);
     logger.info(
-      `[positionTrade] Predexon market SELL: ${cleanSize} shares (raw=${size}) assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
+      `[positionTrade] Predexon limit SELL: ${cleanSize} shares (raw=${size}) @ ${limitSellPrice} assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
     );
 
     let sellOrderResponse;
@@ -1654,7 +1657,8 @@ async function executePositionOrder(
         venue: 'polymarket',
         tokenId: assetId,
         side: 'sell',
-        type: 'market',
+        type: 'limit',
+        price: String(limitSellPrice),
         size: String(cleanSize),
       });
     } catch (err: any) {

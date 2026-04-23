@@ -345,8 +345,13 @@ async function redeemNegRisk(
 
       const verified = await verifyTxOnChain(txHash);
       if (!verified) {
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx ${txHash} on-chain verification FAILED`);
-        continue;
+        // NegRisk multicall is approve+redeem. If the tx was mined but reverted,
+        // it's almost certainly SafeMath subtraction overflow in the adapter
+        // (unrecoverable via Builder path). Set overflow dedup key to prevent
+        // further gas waste on every user interaction.
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx ${txHash} reverted on-chain — marking overflow dedup to prevent future gas waste`);
+        await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+        return { success: false, error: 'NegRiskAdapter redeem reverted on-chain — only redeemable via Predexon API' };
       }
 
       // Verify CTF tokens were actually burned
@@ -367,7 +372,9 @@ async function redeemNegRisk(
       // Detect "subtraction overflow" — this is UNRECOVERABLE via Builder path.
       // NegRiskAdapter requires complementary token amounts but user only holds one side.
       // Only Predexon API can handle these redeems. Stop immediately, don't waste more relayer quota.
-      if (/subtraction overflow/i.test(errMsg)) {
+      // Check error message AND nested cause chain (relayer may wrap the original error).
+      const errChain = `${errMsg} ${error?.cause?.message ?? ''} ${error?.cause?.cause?.message ?? ''}`;
+      if (/subtraction overflow/i.test(errChain) || /failed onchain/i.test(errMsg)) {
         const freshBalance = await getOnChainTokenBalance(proxyAddress, position.asset);
         if (freshBalance.isZero()) {
           logger.info(`[redeem] Position already fully redeemed (balance now 0)`);
