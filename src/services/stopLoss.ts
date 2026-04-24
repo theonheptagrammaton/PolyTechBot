@@ -81,7 +81,10 @@ async function tick(): Promise<void> {
   try {
     const redis = getRedisClient();
     const members = await redis.smembers(SL_INDEX_KEY);
-    if (members.length === 0) return;
+    if (members.length === 0) {
+      logger.debug('[stopLoss] No active stop losses to check');
+      return;
+    }
 
     // Load all SLs, prune stale index entries
     const sls: PendingStopLoss[] = [];

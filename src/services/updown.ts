@@ -7,7 +7,7 @@ import { placeOrder as predexonPlaceOrder, cancelOrder, getOrder, getPositions }
 import { ensurePredexonUser } from './user';
 import { getUpDownMarkets, UpDownMarket, UPDOWN_COIN_MAP } from './market';
 import { fetchSpotPrice, getRoundOpenPrice } from './cryptoPrice';
-import { getActivePositions } from './portfolio';
+import { getActivePositions, invalidatePortfolioCache } from './portfolio';
 import { manualRedeem } from './redeem';
 
 // ─── Fill-price polling ────────────────────────────────────────────────────
@@ -234,7 +234,7 @@ export async function executeUpDownOrder(
       }
 
       // Schedule TTL cancel
-      scheduleLimitTtl(predexonUserId, orderResp.orderId, strategy.limitTtlSeconds, strategy.id, tokenId);
+      scheduleLimitTtl(predexonUserId, orderResp.orderId, strategy.limitTtlSeconds, strategy.id, tokenId, user.polymarketProxyAddress ?? undefined);
     } else {
       // "Market" order → actually place a limit order at midpoint + slippage
       // This prevents filling at terrible prices in thin orderbooks
@@ -263,7 +263,7 @@ export async function executeUpDownOrder(
       }
 
       // Auto-cancel after 30s if not filled (don't let it sit forever)
-      scheduleLimitTtl(predexonUserId, orderResp.orderId, 30, strategy.id, tokenId);
+      scheduleLimitTtl(predexonUserId, orderResp.orderId, 30, strategy.id, tokenId, user.polymarketProxyAddress ?? undefined);
     }
 
     // Get round open price for context
@@ -308,6 +308,9 @@ export async function executeUpDownOrder(
         status: initialStatus,
       },
     });
+
+    // Invalidate portfolio cache so next view reflects the new position
+    invalidatePortfolioCache(user.polymarketProxyAddress!).catch(() => {});
 
     // Increment roundsExecuted
     await prisma.upDownStrategy.update({
@@ -369,6 +372,7 @@ function scheduleLimitTtl(
   ttlSeconds: number,
   strategyId: string,
   tokenId?: string,
+  proxyAddress?: string,
 ): void {
   function cleanup() {
     const timers = _limitTimers.get(orderId);
@@ -435,6 +439,7 @@ function scheduleLimitTtl(
           where: { orderId },
           data: { status: 'filled', fillPrice },
         });
+        if (proxyAddress) invalidatePortfolioCache(proxyAddress).catch(() => {});
       } else if (order.status === 'cancelled' || order.status === 'expired') {
         cleanup();
         await prisma.upDownTrade.updateMany({
@@ -492,7 +497,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
     },
     include: {
       strategy: true,
-      user: { select: { telegramId: true, predexonUserId: true } },
+      user: { select: { telegramId: true, predexonUserId: true, polymarketProxyAddress: true } },
     },
   });
 
@@ -747,7 +752,7 @@ async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Pr
     },
     include: {
       strategy: true,
-      user: { select: { telegramId: true, predexonUserId: true } },
+      user: { select: { telegramId: true, predexonUserId: true, polymarketProxyAddress: true } },
     },
   });
 
@@ -761,6 +766,7 @@ async function monitorPendingTpSlSells(sendNotification: SendNotificationFn): Pr
         // Sell filled — clean up
         await redisCache.del(`updown:tpsl_retry:${trade.id}`);
         await redisCache.del(`updown:tpsl_sell_at:${trade.id}`);
+        if (trade.user.polymarketProxyAddress) invalidatePortfolioCache(trade.user.polymarketProxyAddress).catch(() => {});
         logger.info(`[updown] TP/SL sell confirmed filled for trade ${trade.id}`);
         continue;
       }
@@ -1040,7 +1046,7 @@ export function startUpDownMonitor(sendNotification: SendNotificationFn): void {
 async function recoverOrphanedLimitOrders(): Promise<void> {
   const orphans = await prisma.upDownTrade.findMany({
     where: { status: 'open' },
-    include: { user: { select: { predexonUserId: true } } },
+    include: { user: { select: { predexonUserId: true, polymarketProxyAddress: true } } },
   });
 
   if (orphans.length === 0) return;
@@ -1078,6 +1084,7 @@ async function recoverOrphanedLimitOrders(): Promise<void> {
           where: { id: trade.id },
           data: { status: 'filled', fillPrice },
         });
+        if (trade.user.polymarketProxyAddress) invalidatePortfolioCache(trade.user.polymarketProxyAddress).catch(() => {});
         logger.info(`[updown] Orphaned order ${trade.orderId} was actually filled at ${fillPrice}`);
       } else if (order.status === 'cancelled' || order.status === 'expired') {
         await prisma.upDownTrade.update({

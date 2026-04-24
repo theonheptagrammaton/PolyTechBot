@@ -3,7 +3,7 @@ import { prisma } from '../database/prisma';
 import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { config } from '../config';
-import { getActivePositions, ActivePosition, fetchTxHashForOrder } from './portfolio';
+import { getActivePositions, ActivePosition, fetchTxHashForOrder, invalidatePortfolioCache } from './portfolio';
 import { transferCommission, COMMISSION_RATE } from './commission';
 import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder } from './predexon';
 import { ensurePredexonUser } from './user';
@@ -933,6 +933,11 @@ async function tickForTrader(
           },
         });
 
+        // Invalidate portfolio cache on filled trades
+        if (result.status === 'filled' && user.polymarketProxyAddress) {
+          invalidatePortfolioCache(user.polymarketProxyAddress).catch(() => {});
+        }
+
         // Track spend for successful BUY fills (atomic increments to prevent race conditions)
         if (result.status === 'filled' && effectiveSide === 'BUY') {
           // Daily spend
@@ -1364,6 +1369,7 @@ async function checkTpSlPositions(
         where: { id: pos.id },
         data: { tpSlStatus: triggerType },
       });
+      if (user.polymarketProxyAddress) invalidatePortfolioCache(user.polymarketProxyAddress).catch(() => {});
     } else {
       // Release lock on failure so next tick can retry
       await redisCache.del(tpSlLockKey);

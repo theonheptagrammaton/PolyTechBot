@@ -6,7 +6,7 @@ import { config } from '../config';
 import { transferCommission, COMMISSION_RATE } from './commission';
 import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder } from './predexon';
 import { ensurePredexonUser } from './user';
-import { getActivePositions } from './portfolio';
+import { getActivePositions, invalidatePortfolioCache } from './portfolio';
 import { manualRedeem } from './redeem';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
@@ -523,6 +523,9 @@ export async function executeBondOrder(
     const dedupKey = `bond:dedup:${strategy.id}:${market.conditionId}`;
     await redisCache.set(dedupKey, 1, 86_400); // 24h
 
+    // Invalidate portfolio cache so next view reflects the new position
+    invalidatePortfolioCache(user.polymarketProxyAddress).catch(() => {});
+
     // Commission (fire-and-forget) — only charge on filled orders
     if (tradeStatus === 'filled' && config.commission?.adminWalletAddress) {
       transferCommission(
@@ -704,6 +707,9 @@ async function checkBondResolutionsInner(sendNotification: SendNotificationFn): 
               where: { id: trade.id },
               data: { status: 'redeemed' },
             });
+            if (trade.user?.polymarketProxyAddress) {
+              invalidatePortfolioCache(trade.user.polymarketProxyAddress).catch(() => {});
+            }
             logger.info(`[bond] Auto-claimed resolved trade ${trade.id}: ${trade.question.slice(0, 50)}`);
 
             const notify = trade.strategy?.notificationsEnabled ?? true;
@@ -812,7 +818,10 @@ async function bondTickInner(): Promise<void> {
     },
   });
 
-  if (strategies.length === 0) return;
+  if (strategies.length === 0) {
+    logger.debug('[bond] No active strategies to process');
+    return;
+  }
 
   const now = Date.now();
 
