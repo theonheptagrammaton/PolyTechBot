@@ -280,22 +280,42 @@ async function redeemNegRisk(
 
       // Pre-simulate the redeemPositions call to catch unrecoverable errors
       // BEFORE the relayer submits (and wastes gas on a doomed transaction).
+      // When CTF approval for NegRiskAdapter isn't set yet, the simulation fails
+      // with "not approved" instead of "subtraction overflow", masking the real error.
+      // Check approval first to choose the right detection strategy.
+      let adapterApproved = false;
       try {
-        await polygonProvider.call({
-          from: proxyAddress,
-          to: NEG_RISK_ADAPTER,
-          data: redeemData,
-        });
-      } catch (simErr: any) {
-        const simMsg = simErr?.message ?? '';
-        if (/subtraction overflow/i.test(simMsg)) {
-          logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-simulation reverted with subtraction overflow — aborting to save gas`);
+        const ctfCheck = new ethers.Contract(CTF_ADDRESS, CTF_ABI, polygonProvider);
+        adapterApproved = await ctfCheck.isApprovedForAll(proxyAddress, NEG_RISK_ADAPTER);
+      } catch { /* proceed without check */ }
+
+      if (adapterApproved) {
+        // Approval is set — pre-simulation will correctly detect overflow
+        try {
+          await polygonProvider.call({
+            from: proxyAddress,
+            to: NEG_RISK_ADAPTER,
+            data: redeemData,
+          });
+        } catch (simErr: any) {
+          const simMsg = simErr?.message ?? '';
+          if (/subtraction overflow/i.test(simMsg)) {
+            logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-simulation reverted with subtraction overflow — aborting to save gas`);
+            await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+            return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
+          }
+          logger.debug?.(`[redeem] ${txType}/NegRiskAdapter: pre-simulation non-fatal error: ${simMsg.slice(0, 120)}`);
+        }
+      } else {
+        // Approval not set — pre-simulation would fail with "not approved", masking overflow.
+        // Heuristic: if opposite side balance is 0, NegRiskAdapter will definitely overflow
+        // (it needs tokens from both sides). Abort immediately to save gas.
+        if (currentOpposite.isZero() && currentBalance.gt(0)) {
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter: opposite side balance is 0, approval not set — redeem will overflow, aborting to save gas`);
           await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
           return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
         }
-        // Other simulation errors (e.g., approval not yet set) are fine —
-        // the multicall sets approval first, so let the relayer proceed.
-        logger.debug?.(`[redeem] ${txType}/NegRiskAdapter: pre-simulation non-fatal error: ${simMsg.slice(0, 120)}`);
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: CTF approval not set — pre-simulation unreliable, proceeding with bundled tx`);
       }
 
       const txPayload = [
@@ -329,12 +349,25 @@ async function redeemNegRisk(
       ]);
 
       if (!result) {
+        // STATE_FAILED — tx was submitted but failed on-chain (subtraction overflow).
+        // Check on-chain balance: if still non-zero, the redeem is unrecoverable via Builder.
+        // Do NOT continue to the next txType — that would waste another on-chain tx.
+        let failedTxHash: string | undefined;
         try {
           const txInfo = await response.getTransaction();
-          logger.warn(`[redeem] ${txType}/NegRiskAdapter STATE_FAILED: ${JSON.stringify(txInfo).slice(0, 400)}`);
+          failedTxHash = (txInfo as any)?.transactionHash ?? (Array.isArray(txInfo) ? (txInfo[0] as any)?.transactionHash : undefined);
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter STATE_FAILED: hash=${failedTxHash ?? 'none'} ${JSON.stringify(txInfo).slice(0, 300)}`);
         } catch { /* ignore */ }
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: relay tx failed (STATE_FAILED)`);
-        continue;
+
+        const balanceAfterFail = await getOnChainTokenBalance(proxyAddress, position.asset);
+        if (balanceAfterFail.isZero()) {
+          logger.info(`[redeem] ${txType}/NegRiskAdapter: balance is now 0 after STATE_FAILED — position was redeemed`);
+          return { success: true, txHash: failedTxHash };
+        }
+        // Balance still non-zero → redeem permanently failed, set overflow dedup to prevent future gas waste
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: STATE_FAILED with balance still ${balanceAfterFail.toString()} — marking overflow dedup`);
+        await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+        return { success: false, error: 'NegRiskAdapter redeem failed on-chain — only redeemable via Predexon API' };
       }
 
       const txHash = result.transactionHash;
@@ -385,8 +418,20 @@ async function redeemNegRisk(
         await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
         return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
       }
-      logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed: ${errMsg.slice(0, 200)}`);
-      // Short delay between tx type attempts to avoid hammering
+      // For NegRisk, any on-chain failure is likely permanent (subtraction overflow).
+      // Check balance: if non-zero, mark overflow dedup to prevent further gas waste.
+      const postErrBalance = await getOnChainTokenBalance(proxyAddress, position.asset);
+      if (postErrBalance.isZero()) {
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: balance is now 0 after error — position was redeemed`);
+        return { success: true, txHash: undefined };
+      }
+      logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed (balance=${postErrBalance.toString()}): ${errMsg.slice(0, 200)}`);
+      // If the error involved an on-chain tx submission (not just a client-side rejection),
+      // stop retrying — the next txType will likely fail the same way, wasting more gas.
+      if (/failed onchain|reverted|execution/i.test(errChain)) {
+        await redisCache.set(overflowKey(proxyAddress, position.conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+        return { success: false, error: 'NegRiskAdapter redeem failed on-chain — only redeemable via Predexon API' };
+      }
       await new Promise(r => setTimeout(r, 2_000));
       continue;
     }
@@ -649,7 +694,9 @@ export async function autoRedeemPositions(
   notifyFn?: (msg: string) => Promise<void>,
   predexonUserId?: string,
 ): Promise<number> {
-  const redeemable = positions.filter(p => p.redeemable);
+  // Filter out losing-side redeemable positions (currentValue <= 0).
+  // These always fail with NegRiskAdapter subtraction overflow, wasting relayer gas.
+  const redeemable = positions.filter(p => p.redeemable && p.currentValue > 0);
   if (redeemable.length === 0) return 0;
 
   // Global lock per proxy — prevents parallel redeem sessions from different page opens
@@ -696,13 +743,24 @@ export async function manualRedeem(
   position: ActivePosition,
   predexonUserId?: string,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position, predexonUserId, skipThrottle: true });
-  if (result.success) {
-    const key = claimedKey(proxyAddress, position.conditionId);
-    await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
-    logger.info(`[redeem] Manual claim success: ${position.outcome} / ${position.title.slice(0, 40)}`);
+  // Lock per proxy — prevents concurrent manual redeems from racing past the overflow
+  // dedup check and submitting multiple doomed on-chain transactions.
+  const lockKey = proxyAddress.toLowerCase();
+  if (_redeemLocks.has(lockKey)) {
+    return { success: false, error: 'Claim already in progress — please wait.' };
   }
-  return result;
+  _redeemLocks.add(lockKey);
+  try {
+    const result = await redeemSingle({ encryptedPrivateKey, proxyAddress, position, predexonUserId, skipThrottle: true });
+    if (result.success) {
+      const key = claimedKey(proxyAddress, position.conditionId);
+      await redisCache.set(key, true, CLAIMED_TTL_SECONDS).catch(() => {});
+      logger.info(`[redeem] Manual claim success: ${position.outcome} / ${position.title.slice(0, 40)}`);
+    }
+    return result;
+  } finally {
+    _redeemLocks.delete(lockKey);
+  }
 }
 
 async function _doRedeem(

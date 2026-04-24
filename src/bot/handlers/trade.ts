@@ -169,6 +169,9 @@ export async function handleTradeFlow(ctx: Context, tradeParam: string): Promise
         } catch { /* keep defaults */ }
         const price = parseFloat(pricesArr[outcomeIdx] ?? '0.5');
 
+        // Clear any conflicting limit-order state so the text handler routes correctly
+        limitTradeState.delete(telegramId);
+
         tradeState.set(telegramId, {
           marketId,
           marketQuestion: market.question || 'Unknown Market',
@@ -330,6 +333,9 @@ export async function handleOutcomeSelection(ctx: Context, data: string): Promis
 
     const outcomePrices = market.outcomePrices || ['0.5', '0.5'];
     const price = parseFloat(outcomePrices[outcomeIndex] || '0.5');
+
+    // Clear any conflicting limit-order state so the text handler routes correctly
+    limitTradeState.delete(telegramId);
 
     // Save state for amount input
     tradeState.set(telegramId, {
@@ -539,6 +545,9 @@ async function executeTrade(
             : JSON.parse(market.outcomePrices || '["0.5","0.5"]');
         } catch { /* keep defaults */ }
         const price = parseFloat(outcomePricesArr[outcomeIndex] ?? '0.5');
+
+        // Clear any conflicting limit-order state so the text handler routes correctly
+        limitTradeState.delete(telegramId);
 
         tradeState.set(telegramId, {
           marketId,
@@ -1276,6 +1285,9 @@ export async function handleLimitOrderStart(
     });
     return;
   }
+
+  // Clear any conflicting market-order state so the text handler routes correctly
+  tradeState.delete(telegramId);
 
   limitTradeState.set(telegramId, {
     step: 'awaiting_limit_price',

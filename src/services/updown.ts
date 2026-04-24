@@ -170,7 +170,7 @@ export async function executeUpDownOrder(
 
     const tokenId = strategy.direction === 'up' ? market.upTokenId : market.downTokenId;
 
-    // Fetch LIVE midpoint from CLOB instead of using stale Gamma API price
+    // Fetch LIVE midpoint from CLOB (REQUIRED — never trade on stale Gamma API prices)
     let liveMidpoint: number | null = null;
     try {
       const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${tokenId}`, {
@@ -187,7 +187,11 @@ export async function executeUpDownOrder(
       logger.warn(`[updown] Failed to fetch live midpoint for ${tokenId}: ${midErr?.message}`);
     }
 
-    const triggerPrice = liveMidpoint ?? (strategy.direction === 'up' ? market.upPrice : market.downPrice);
+    if (liveMidpoint == null) {
+      return { success: false, errorMsg: 'CLOB midpoint unavailable — blocked to prevent stale-price trade' };
+    }
+
+    const triggerPrice = liveMidpoint;
 
     // ── CRITICAL: Verify live CLOB price is within configured range ──
     // The Gamma API price that passed the initial range check can be stale.
@@ -1258,25 +1262,30 @@ async function processStrategy(
         if (elapsed < startSec || elapsed > endSec) continue;
       }
 
-      // 5. Price range check — fetch LIVE CLOB midpoints instead of stale Gamma API prices.
+      // 5. Price range check — fetch LIVE CLOB midpoints (REQUIRED).
       //    Gamma API prices can be significantly outdated, causing trades outside the user's range.
-      let liveUpPrice = market.upPrice;
-      let liveDownPrice = market.downPrice;
+      //    If CLOB midpoint is unavailable, skip this market entirely to prevent stale-price trades.
+      let liveUpPrice: number;
+      let liveDownPrice: number;
       try {
         const upMidResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${market.upTokenId}`, {
           signal: AbortSignal.timeout(5_000),
         });
-        if (upMidResp.ok) {
-          const upMidData: any = await upMidResp.json();
-          const mid = parseFloat(upMidData?.mid ?? '0');
-          if (!isNaN(mid) && mid > 0 && mid < 1) {
-            liveUpPrice = mid;
-            liveDownPrice = 1 - mid;
-          }
+        if (!upMidResp.ok) {
+          logger.debug(`[updown] CLOB midpoint returned ${upMidResp.status} for ${coin}/${tf}, skipping to avoid stale-price trade`);
+          continue;
         }
+        const upMidData: any = await upMidResp.json();
+        const mid = parseFloat(upMidData?.mid ?? '0');
+        if (isNaN(mid) || mid <= 0 || mid >= 1) {
+          logger.debug(`[updown] Invalid CLOB midpoint ${upMidData?.mid} for ${coin}/${tf}, skipping`);
+          continue;
+        }
+        liveUpPrice = mid;
+        liveDownPrice = 1 - mid;
       } catch (midErr: any) {
-        logger.debug(`[updown] Failed to fetch live midpoint for range check (${coin}/${tf}): ${midErr?.message}`);
-        // Fall back to Gamma API prices — still better than skipping the trade
+        logger.debug(`[updown] Failed to fetch live midpoint for ${coin}/${tf}: ${midErr?.message}, skipping to avoid stale-price trade`);
+        continue;
       }
 
       if (strat.direction === 'down') {

@@ -276,6 +276,36 @@ export async function applyStrategyFilters(
   const token = market.tokens[chosenTokenIdx];
   if (!token?.token_id) return fail('no token ID');
 
+  // ── CRITICAL: Verify live CLOB price before proceeding ──
+  // Gamma API prices are cached for 60s and can be significantly stale.
+  // Fetch the live CLOB midpoint and re-verify the probability range.
+  try {
+    const midResp = await fetch(
+      `${CLOB_BASE}/midpoint?token_id=${token.token_id}`,
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (midResp.ok) {
+      const midData: any = await midResp.json();
+      const liveMid = parseFloat(midData?.mid ?? '0');
+      if (!isNaN(liveMid) && liveMid > 0 && liveMid < 1) {
+        const livePct = liveMid * 100;
+        if (livePct < strategy.minProbability || livePct > strategy.maxProbability) {
+          return fail(
+            `live CLOB price ${livePct.toFixed(1)}% outside range ` +
+            `[${strategy.minProbability}–${strategy.maxProbability}%] ` +
+            `(Gamma API said ${chosenPct.toFixed(1)}%)`,
+          );
+        }
+        // Use the live CLOB price for limit order calculation (not stale Gamma price)
+        chosenPrice = liveMid;
+      }
+    } else {
+      return fail(`CLOB midpoint API returned ${midResp.status} — skipping to avoid stale-price trade`);
+    }
+  } catch (midErr: any) {
+    return fail(`CLOB midpoint unavailable — skipping to avoid stale-price trade`);
+  }
+
   // Atomically claim budget using INCRBYFLOAT (prevents race conditions between concurrent ticks)
   const tradeAmount = strategy.dailyBudget > 0
     ? Math.min(strategy.fixedAmount, strategy.dailyBudget - dailySpent)
@@ -354,6 +384,8 @@ export async function executeBondOrder(
     id: string;
     fixedAmount: number;
     slippage: number;
+    minProbability: number;
+    maxProbability: number;
   },
   tokenId: string,
   outcome: string,
@@ -375,17 +407,45 @@ export async function executeBondOrder(
       return { success: false, errorMsg: 'trade amount too small after commission' };
     }
 
+    // ── CRITICAL: Re-verify live CLOB price at execution time ──
+    // Price may have moved since applyStrategyFilters checked it.
+    let livePrice = price;
+    try {
+      const midResp = await fetch(
+        `${CLOB_BASE}/midpoint?token_id=${tokenId}`,
+        { signal: AbortSignal.timeout(5_000) },
+      );
+      if (midResp.ok) {
+        const midData: any = await midResp.json();
+        const mid = parseFloat(midData?.mid ?? '0');
+        if (!isNaN(mid) && mid > 0 && mid < 1) {
+          const livePct = mid * 100;
+          if (livePct < strategy.minProbability || livePct > strategy.maxProbability) {
+            return {
+              success: false,
+              errorMsg: `live price ${livePct.toFixed(1)}% moved outside range [${strategy.minProbability}–${strategy.maxProbability}%]`,
+            };
+          }
+          livePrice = mid;
+        }
+      } else {
+        return { success: false, errorMsg: `CLOB midpoint unavailable (${midResp.status}) — blocked to prevent stale-price trade` };
+      }
+    } catch (midErr: any) {
+      return { success: false, errorMsg: 'CLOB midpoint unavailable — blocked to prevent stale-price trade' };
+    }
+
     // Place BUY order — use limit order with slippage-derived price if slippage is set,
     // otherwise fall back to market order.
     // Slippage is stored as a percentage (e.g. 5 = 5%), convert to decimal for Polymarket prices (0–1).
     const slippagePct = strategy.slippage;
     const slippageDecimal = slippagePct / 100; // e.g. 5% → 0.05
-    const useLimit = slippagePct > 0 && price > 0;
+    const useLimit = slippagePct > 0 && livePrice > 0;
 
     let orderResp: any;
     if (useLimit) {
-      // Convert to limit order: buy at current price + slippage tolerance
-      const limitPrice = Math.min(price + slippageDecimal, 0.99);
+      // Convert to limit order: buy at live CLOB price + slippage tolerance
+      const limitPrice = Math.min(livePrice + slippageDecimal, 0.99);
       if (limitPrice <= 0) return { success: false, errorMsg: 'invalid limit price (≤0)' };
       const size = String(Math.floor((tradeAmount / limitPrice) * 100) / 100);
       orderResp = await predexonPlaceOrder(predexonUserId, {
@@ -413,7 +473,7 @@ export async function executeBondOrder(
 
     // For limit orders, poll for fill status (up to 5 attempts, 2s apart) since
     // they may not fill immediately even though we set price above market.
-    let actualFillPrice = price;
+    let actualFillPrice = livePrice;
     let tradeStatus: 'filled' | 'open' = 'filled';
 
     if (useLimit) {

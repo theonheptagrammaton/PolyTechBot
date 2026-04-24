@@ -143,7 +143,29 @@ async function tick(): Promise<void> {
         }
 
         const predexonUserId = await ensurePredexonUser(user);
-        const cleanSize = Math.floor(sl.shares * 100) / 100;
+
+        // Fetch actual position size from Predexon API instead of using stale sl.shares.
+        // If user partially sold since SL was created, sl.shares would be too large
+        // and the sell order would fail with "not enough balance".
+        let cleanSize = 0;
+        try {
+          const { getPositions } = await import('./predexon');
+          const positions = await getPositions(predexonUserId, 'polymarket');
+          const pos = positions.find(p => p.tokenId === sl.assetId && p.status === 'active');
+          if (pos && parseFloat(pos.size) > 0) {
+            cleanSize = Math.floor(parseFloat(pos.size) * 100) / 100;
+            logger.info(`[stopLoss] Actual position size=${pos.size}, selling ${cleanSize} (sl.shares was ${sl.shares})`);
+          }
+        } catch (posErr: any) {
+          logger.warn(`[stopLoss] Failed to fetch actual position for ${sl.assetId}: ${posErr?.message}`);
+        }
+
+        // Fallback: use sl.shares if API failed, with 5% safety buffer
+        if (cleanSize <= 0) {
+          cleanSize = Math.floor(sl.shares * 0.95 * 100) / 100;
+          logger.warn(`[stopLoss] Using fallback size=${cleanSize} (sl.shares=${sl.shares} × 0.95)`);
+        }
+
         if (cleanSize <= 0) {
           await removeStopLoss(sl.telegramId, sl.assetId);
           continue;
