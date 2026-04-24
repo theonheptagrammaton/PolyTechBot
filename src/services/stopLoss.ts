@@ -123,7 +123,7 @@ async function tick(): Promise<void> {
       // ── SL triggered ─────────────────────────────────────────────────
       const lockKey = `pos:sl:lock:${sl.telegramId}:${sl.assetId}`;
       const locked = await redisCache.get<number>(lockKey);
-      if (locked) continue;
+      if (locked != null) continue;
       await redisCache.set(lockKey, 1, 60);
 
       logger.info(
@@ -181,8 +181,9 @@ async function tick(): Promise<void> {
           user.predexonUserId ?? undefined,
         ).catch((err) => logger.warn('[stopLoss] Commission failed (non-fatal):', err));
 
-        // Done — remove SL
+        // Done — remove SL + lock
         await removeStopLoss(sl.telegramId, sl.assetId);
+        await redisCache.del(lockKey);
 
         // Notify user
         const triggerCents = (sl.triggerPrice * 100).toFixed(1);

@@ -456,9 +456,12 @@ async function executeCopyOrder(
       );
     }
 
-    // Try to get actual fill price (best-effort, don't block on failure)
+    // Try to get actual fill price (best-effort, don't block on failure).
+    // pollFillPrice may return the order's LIMIT price rather than the execution price.
+    // Fall back to trade.price (leader's trade price) — NOT the slippage-inflated `price`,
+    // which would corrupt TP/SL calculations.
     const actualFillPrice = await pollFillPrice(predexonUserId, orderResp.orderId).catch(() => null);
-    const finalPrice = actualFillPrice ?? price;
+    const finalPrice = actualFillPrice ?? trade.price;
 
     return { status: 'filled', orderID: orderResp.orderId, filledPrice: finalPrice, actualAmount: tradeAmount };
   } catch (err: any) {
@@ -647,9 +650,11 @@ async function tickForTrader(
           if (trade.side === 'SELL' && !sub.copySells) continue;
         }
 
-        // Copy side filter (only copy YES, NO, or both outcomes)
-        if (sub.copySide === 'yes' && effectiveOutcome !== 'YES') continue;
-        if (sub.copySide === 'no' && effectiveOutcome !== 'NO') continue;
+        // Copy side filter — applied to the ORIGINAL trade outcome, not the
+        // effective one (counter-trade flips outcome, but the filter should
+        // match the leader's original side so the user gets what they asked for)
+        if (sub.copySide === 'yes' && trade.outcome !== 'YES') continue;
+        if (sub.copySide === 'no' && trade.outcome !== 'NO') continue;
 
         const balance = balanceCache.get(sub.userId) ?? 0;
 
@@ -1216,6 +1221,8 @@ async function checkTpSlPositions(
   // does not accidentally TP/SL exit positions from a previous subscription.
   // Legacy records (subscriptionId = null, created before this field was added)
   // are intentionally excluded — they cannot be attributed to a specific subscription.
+  // Grace period: skip positions created within the last 60s to prevent
+  // false SL triggers right after placement (fillPrice may be inaccurate).
   const openPositions = await prisma.copiedTrade.findMany({
     where: {
       subscriptionId: sub.subscriptionId,
@@ -1225,6 +1232,7 @@ async function checkTpSlPositions(
       status: 'filled',
       tpSlStatus: null,
       assetId: { not: null },
+      createdAt: { lt: new Date(Date.now() - 60_000) },
     },
   });
 

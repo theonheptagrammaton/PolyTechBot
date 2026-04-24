@@ -20,15 +20,40 @@ const FILL_POLL_MAX_ATTEMPTS = 10; // 20 seconds max
 async function pollActualFillPrice(
   predexonUserId: string,
   orderId: string,
+  tokenId?: string,
 ): Promise<{ price: number | null; sizeMatched: string | null }> {
   for (let i = 0; i < FILL_POLL_MAX_ATTEMPTS; i++) {
     try {
       const order = await getOrder(predexonUserId, orderId);
       if (order.status === 'filled') {
+        const sizeMatched = order.sizeMatched ?? order.size ?? null;
+
+        // order.price returns the LIMIT price, not the actual fill price.
+        // For slippage-protected limit orders (all updown orders), this is
+        // inflated by the slippage factor, causing TP/SL to trigger immediately.
+        // Use the CLOB midpoint (fetched right after fill) as the best proxy
+        // for the actual execution price.
+        if (tokenId) {
+          try {
+            const midResp = await fetch(
+              `https://clob.polymarket.com/midpoint?token_id=${tokenId}`,
+              { signal: AbortSignal.timeout(5_000) },
+            );
+            if (midResp.ok) {
+              const midData: any = await midResp.json();
+              const mid = parseFloat(midData?.mid ?? '0');
+              if (!isNaN(mid) && mid > 0) {
+                logger.debug(`[updown] Fill price: using midpoint ${mid} instead of order.price ${order.price} for ${orderId}`);
+                return { price: mid, sizeMatched };
+              }
+            }
+          } catch { /* fall through to order.price */ }
+        }
+
         const price = parseFloat(order.price ?? '0');
         return {
           price: isNaN(price) || price <= 0 ? null : price,
-          sizeMatched: order.sizeMatched ?? order.size ?? null,
+          sizeMatched,
         };
       }
       if (order.status === 'cancelled' || order.status === 'expired') {
@@ -205,7 +230,7 @@ export async function executeUpDownOrder(
       }
 
       // Schedule TTL cancel
-      scheduleLimitTtl(predexonUserId, orderResp.orderId, strategy.limitTtlSeconds, strategy.id);
+      scheduleLimitTtl(predexonUserId, orderResp.orderId, strategy.limitTtlSeconds, strategy.id, tokenId);
     } else {
       // "Market" order → actually place a limit order at midpoint + slippage
       // This prevents filling at terrible prices in thin orderbooks
@@ -234,7 +259,7 @@ export async function executeUpDownOrder(
       }
 
       // Auto-cancel after 30s if not filled (don't let it sit forever)
-      scheduleLimitTtl(predexonUserId, orderResp.orderId, 30, strategy.id);
+      scheduleLimitTtl(predexonUserId, orderResp.orderId, 30, strategy.id, tokenId);
     }
 
     // Get round open price for context
@@ -247,7 +272,7 @@ export async function executeUpDownOrder(
     // All orders are now limit orders (market orders converted to slippage-protected limits)
     let actualFillPrice: number | null = null;
     let actualSizeMatched: string | null = null;
-    const fillResult = await pollActualFillPrice(predexonUserId, orderResp.orderId);
+    const fillResult = await pollActualFillPrice(predexonUserId, orderResp.orderId, tokenId);
     actualFillPrice = fillResult.price;
     actualSizeMatched = fillResult.sizeMatched;
     if (actualFillPrice) {
@@ -339,6 +364,7 @@ function scheduleLimitTtl(
   orderId: string,
   ttlSeconds: number,
   strategyId: string,
+  tokenId?: string,
 ): void {
   function cleanup() {
     const timers = _limitTimers.get(orderId);
@@ -350,32 +376,55 @@ function scheduleLimitTtl(
   }
 
   // Check fill status every 3s
+  let _limitCheckRunning = false;
   const checkInterval = setInterval(async () => {
+    if (_limitCheckRunning) return;
+    _limitCheckRunning = true;
     try {
       const order = await getOrder(predexonUserId, orderId);
       if (order.status === 'filled') {
         cleanup();
-        // Update DB — use order.price if valid, otherwise try sizeMatched-based calc,
-        // and fall back to the strategy's limitPrice to ensure fillPrice is never null
+        // order.price returns the LIMIT price, not the actual fill price.
+        // Use CLOB midpoint (right after fill) as the best proxy for execution price.
         let fillPrice: number | null = null;
-        const rawPrice = parseFloat(order.price ?? '0');
-        if (!isNaN(rawPrice) && rawPrice > 0) {
-          fillPrice = rawPrice;
-        } else {
-          // Fallback 1: strategy's limitPrice (for explicit limit orders)
-          // Fallback 2: trade's triggerPrice (for market orders that have no limitPrice)
-          const trade = await prisma.upDownTrade.findFirst({
-            where: { orderId },
-            select: { triggerPrice: true, strategy: { select: { limitPrice: true } } },
-          });
-          if (trade?.strategy?.limitPrice != null && trade.strategy.limitPrice > 0) {
-            fillPrice = trade.strategy.limitPrice;
-            logger.warn(`[updown] Order ${orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
-          } else if (trade?.triggerPrice != null && trade.triggerPrice > 0) {
-            fillPrice = trade.triggerPrice;
-            logger.warn(`[updown] Order ${orderId} filled with invalid price (${order.price}), using triggerPrice=${fillPrice}`);
+
+        // Primary: fetch CLOB midpoint (most accurate for TP/SL)
+        if (tokenId) {
+          try {
+            const midResp = await fetch(
+              `https://clob.polymarket.com/midpoint?token_id=${tokenId}`,
+              { signal: AbortSignal.timeout(5_000) },
+            );
+            if (midResp.ok) {
+              const midData: any = await midResp.json();
+              const mid = parseFloat(midData?.mid ?? '0');
+              if (!isNaN(mid) && mid > 0) {
+                fillPrice = mid;
+                logger.debug(`[updown] Limit fill: using midpoint ${mid} instead of order.price ${order.price} for ${orderId}`);
+              }
+            }
+          } catch { /* fall through */ }
+        }
+
+        // Fallback: order.price, strategy limitPrice, or triggerPrice
+        if (fillPrice == null) {
+          const rawPrice = parseFloat(order.price ?? '0');
+          if (!isNaN(rawPrice) && rawPrice > 0) {
+            fillPrice = rawPrice;
           } else {
-            logger.warn(`[updown] Order ${orderId} filled with invalid price: ${order.price}, no fallback available`);
+            const trade = await prisma.upDownTrade.findFirst({
+              where: { orderId },
+              select: { triggerPrice: true, strategy: { select: { limitPrice: true } } },
+            });
+            if (trade?.strategy?.limitPrice != null && trade.strategy.limitPrice > 0) {
+              fillPrice = trade.strategy.limitPrice;
+              logger.warn(`[updown] Order ${orderId} filled with invalid price (${order.price}), using strategy limitPrice=${fillPrice}`);
+            } else if (trade?.triggerPrice != null && trade.triggerPrice > 0) {
+              fillPrice = trade.triggerPrice;
+              logger.warn(`[updown] Order ${orderId} filled with invalid price (${order.price}), using triggerPrice=${fillPrice}`);
+            } else {
+              logger.warn(`[updown] Order ${orderId} filled with invalid price: ${order.price}, no fallback available`);
+            }
           }
         }
         await prisma.upDownTrade.updateMany({
@@ -391,6 +440,8 @@ function scheduleLimitTtl(
       }
     } catch (err: any) {
       logger.debug(`[updown] Limit fill check error for ${orderId}: ${err?.message}`);
+    } finally {
+      _limitCheckRunning = false;
     }
   }, 3000);
 
@@ -422,13 +473,18 @@ function scheduleLimitTtl(
 
 // ─── TP/SL Check ────────────────────────────────────────────────────────────
 
+const TPSL_GRACE_PERIOD_MS = 60_000; // Skip TP/SL for trades younger than 60s
+
 async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<void> {
-  // Find filled trades with no tpSlStatus and linked to an active strategy
+  // Find filled trades with no tpSlStatus and linked to an active strategy.
+  // Grace period: skip trades created within the last 60s to prevent
+  // false SL triggers from fillPrice inaccuracies right after placement.
   const trades = await prisma.upDownTrade.findMany({
     where: {
       status: 'filled',
       tpSlStatus: null,
       strategy: { isActive: true },
+      createdAt: { lt: new Date(Date.now() - TPSL_GRACE_PERIOD_MS) },
     },
     include: {
       strategy: true,
@@ -457,7 +513,7 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
     // Prevent race condition: if another tick is already processing this trade's TP/SL, skip it
     const tpSlLockKey = `updown:tpsl_lock:${trade.id}`;
     const alreadyProcessing = await redisCache.get<number>(tpSlLockKey);
-    if (alreadyProcessing) continue;
+    if (alreadyProcessing != null) continue;
 
     // Get current LIVE price from CLOB midpoint (never use stale Gamma API prices for TP/SL)
     try {
@@ -614,8 +670,8 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
 
         if (!sellResp.orderId) {
           logger.warn(`[updown] TP/SL sell order rejected for trade ${trade.id}: ${sellResp.error || sellResp.message || 'no orderId'}`);
-          await redisCache.del(tpSlLockKey);
           await redisCache.set(retryKey, retryCount + 1, 3600);
+          await redisCache.del(tpSlLockKey); // Release lock AFTER retry counter is set
           continue;
         }
 

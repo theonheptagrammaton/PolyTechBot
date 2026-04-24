@@ -386,6 +386,7 @@ export async function executeBondOrder(
     if (useLimit) {
       // Convert to limit order: buy at current price + slippage tolerance
       const limitPrice = Math.min(price + slippageDecimal, 0.99);
+      if (limitPrice <= 0) return { success: false, errorMsg: 'invalid limit price (≤0)' };
       const size = String(Math.floor((tradeAmount / limitPrice) * 100) / 100);
       orderResp = await predexonPlaceOrder(predexonUserId, {
         venue: 'polymarket',
@@ -448,7 +449,7 @@ export async function executeBondOrder(
         strategyId: strategy.id,
         conditionId: market.conditionId,
         tokenId,
-        question: market.question.slice(0, 255),
+        question: (market.question || '').slice(0, 255),
         outcome,
         probability: price,
         amount: tradeAmount,
@@ -483,14 +484,15 @@ export async function executeBondOrder(
     };
   } catch (err: any) {
     // Record failed trade (amount = intended tradeAmount after commission)
-    const failedTradeAmt = parseFloat((strategy.fixedAmount - strategy.fixedAmount * COMMISSION_RATE).toFixed(6));
+    const attemptedAmount = overrideAmount ?? strategy.fixedAmount;
+    const failedTradeAmt = parseFloat((attemptedAmount - attemptedAmount * COMMISSION_RATE).toFixed(6));
     await prisma.bondTrade.create({
       data: {
         userId: user.id,
         strategyId: strategy.id,
         conditionId: market.conditionId,
         tokenId,
-        question: market.question.slice(0, 255),
+        question: (market.question || '').slice(0, 255),
         outcome,
         probability: price,
         amount: failedTradeAmt,
