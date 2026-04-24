@@ -1176,6 +1176,12 @@ export async function handlePositionSellPct(ctx: Context, idx: number, pct: numb
     // Floor to 2 decimals — never sell more shares than the user owns
     const shares = Math.floor((pos.size * pct) / 100 * 100) / 100;
 
+    if (shares <= 0) {
+      const lang = ((ctx as any).userLanguage as Locale) || 'en';
+      await ctx.answerCbQuery(`⚠️ ${t(lang, 'Position too small to sell at this percentage.')}`, { show_alert: true });
+      return;
+    }
+
     await ctx.answerCbQuery();
 
     // F2: Apply slippage floor to SELL
@@ -1250,6 +1256,10 @@ export async function handlePositionTradeInput(ctx: Context, text: string): Prom
   if (state.action === 'sell') {
     // Floor to 4 decimals — never sell more than owned
     const shares = Math.floor(val * 10000) / 10000;
+    if (shares <= 0) {
+      await ctx.reply(`❌ ${t(lang, 'Amount too small. Minimum sell is 0.01 shares.')}`);
+      return;
+    }
     if (shares > state.currentSize * 1.001) {
       await ctx.reply(`❌ ${t(lang, 'You only have')} ${state.currentSize.toFixed(4)} ${t(lang, 'shares')}. ${t(lang, 'Cannot sell')} ${shares}.`);
       return;
@@ -1422,14 +1432,19 @@ export async function handlePositionExecuteSell(ctx: Context): Promise<void> {
         [Markup.button.callback(t(userLang, 'btn.mainMenu'), 'back_to_menu')],
       ]);
 
-      const sellSize  = state.size!;
+      // Use actual filled size from CLOB (may differ from requested if partial fill)
+      const sellSize  = result.sizeMatched ?? state.size!;
       const sellPrice = state.price!;
+      const partialNote = (result.sizeMatched && result.sizeMatched < state.size! * 0.95)
+        ? `\n⚠️ _Partial fill: ${result.sizeMatched.toFixed(4)} of ${state.size!.toFixed(4)} shares sold. Remaining order cancelled._\n`
+        : '';
       const buildSellMsg = (txLine: string) =>
         `✅ *${t(userLang, 'Sell Executed!')}*\n\n` +
         `*${state.outcome}* — ${truncate(state.title, 50)}\n\n` +
         `📉 ${t(userLang, 'Shares')}: *${sellSize.toFixed(4)}*\n` +
         `💰 ${t(userLang, 'Min price')}: *${(sellPrice * 100).toFixed(2)}¢*\n` +
         `💵 ${t(userLang, 'Est. proceeds')}: *$${(sellSize * sellPrice).toFixed(2)}*\n` +
+        partialNote +
         txLine +
         `_${t(userLang, 'Market sell executed — your position has been closed or reduced.')}_`;
 
@@ -1630,10 +1645,10 @@ async function executePositionOrder(
   action: 'buy' | 'sell',
   price: number,
   size: number
-): Promise<{ orderID: string }> {
+): Promise<{ orderID: string; sizeMatched?: number }> {
   // Predexon handles approvals, balance refresh, and order signing automatically
   const { ensurePredexonUser } = await import('../../services/user');
-  const { placeOrder: predexonPlaceOrder } = await import('../../services/predexon');
+  const { placeOrder: predexonPlaceOrder, getOrder: predexonGetOrder, cancelOrder: predexonCancelOrder } = await import('../../services/predexon');
 
   const predexonUserId = await ensurePredexonUser(user);
 
@@ -1644,11 +1659,32 @@ async function executePositionOrder(
   const cleanPrice = parseFloat(price.toFixed(4));
 
   if (action === 'sell') {
+    // ── CRITICAL: Fetch LIVE CLOB midpoint — never sell at stale cached price ──
+    const slippagePct = user.slippageTolerance ?? 1.0;
+    let liveMidpoint: number | null = null;
+    try {
+      const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${assetId}`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (midResp.ok) {
+        const midData = await midResp.json();
+        const mid = parseFloat(midData?.mid);
+        if (!isNaN(mid) && mid > 0) liveMidpoint = mid;
+      }
+    } catch (midErr: any) {
+      logger.warn(`[positionTrade] Failed to fetch live midpoint for sell: ${midErr?.message}`);
+    }
+
+    if (liveMidpoint == null) {
+      throw new Error('Could not fetch live market price — sell blocked to protect your position. Please try again.');
+    }
+
     // Polymarket CLOB only supports limit orders for sells — 'market' type is rejected.
-    // Use a limit sell at the slippage-adjusted price (cleanPrice) to execute immediately.
-    const limitSellPrice = Math.max(parseFloat(cleanPrice.toFixed(4)), 0.01);
+    // Use a limit sell at the LIVE midpoint minus slippage to execute immediately.
+    const limitSellPrice = Math.max(parseFloat((liveMidpoint * (1 - slippagePct / 100)).toFixed(4)), 0.01);
+
     logger.info(
-      `[positionTrade] Predexon limit SELL: ${cleanSize} shares (raw=${size}) @ ${limitSellPrice} assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
+      `[positionTrade] Predexon limit SELL: ${cleanSize} shares (raw=${size}) @ ${limitSellPrice} (liveMid=${liveMidpoint}, slippage=${slippagePct}%, stalePrice=${cleanPrice}) assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
     );
 
     let sellOrderResponse;
@@ -1670,14 +1706,50 @@ async function executePositionOrder(
       throw classifyOrderError(new Error(errMsg), 'sell');
     }
 
-    // Transfer 1% commission from estimated sell proceeds (fire-and-forget)
-    const sellCommissionUsdc = cleanPrice * cleanSize * COMMISSION_RATE;
+    // ── CRITICAL: Verify the order actually FILLED — orderId alone does NOT mean filled ──
+    const orderId = sellOrderResponse.orderId;
+    let finalStatus = sellOrderResponse.status;
+    let finalSizeMatched = parseFloat(sellOrderResponse.sizeMatched || '0');
+
+    // Poll for fill if not immediately filled (up to 5 attempts, 1.5s apart = max ~7.5s)
+    if (finalStatus !== 'filled' && finalSizeMatched < cleanSize * 0.95) {
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+          const orderStatus = await predexonGetOrder(predexonUserId, orderId);
+          finalStatus = orderStatus.status;
+          finalSizeMatched = parseFloat(orderStatus.sizeMatched || '0');
+          logger.info(`[positionTrade] Sell order poll #${attempt}: status=${finalStatus} sizeMatched=${finalSizeMatched}/${cleanSize}`);
+          if (finalStatus === 'filled' || finalSizeMatched >= cleanSize * 0.95) break;
+        } catch (pollErr: any) {
+          logger.warn(`[positionTrade] Sell order poll #${attempt} failed: ${pollErr?.message}`);
+        }
+      }
+    }
+
+    // Cancel any unfilled remainder to prevent shares from being locked on the order book
+    if (finalStatus !== 'filled' && finalStatus !== 'cancelled') {
+      try {
+        await predexonCancelOrder(predexonUserId, orderId);
+        logger.info(`[positionTrade] Cancelled unfilled sell order ${orderId} (filled=${finalSizeMatched}/${cleanSize})`);
+      } catch (cancelErr: any) {
+        logger.warn(`[positionTrade] Failed to cancel unfilled sell order ${orderId}: ${cancelErr?.message}`);
+      }
+    }
+
+    // If NOTHING was filled, throw — user's shares were NOT sold
+    if (finalSizeMatched <= 0) {
+      throw new Error('Sell order was not filled — the market may be illiquid or the price has moved. Your shares have NOT been sold. Please try again.');
+    }
+
+    // ── Commission: ONLY after confirmed fill, and ONLY on the filled amount ──
+    const sellCommissionUsdc = limitSellPrice * finalSizeMatched * COMMISSION_RATE;
     transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, sellCommissionUsdc, user.id, user.predexonUserId ?? undefined)
       .catch((feeErr) => {
         logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);
       });
 
-    return { orderID: sellOrderResponse.orderId };
+    return { orderID: orderId, sizeMatched: finalSizeMatched };
   }
 
   // BUY: market order via Predexon

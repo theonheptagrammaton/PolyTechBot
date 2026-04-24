@@ -193,8 +193,34 @@ async function tick(): Promise<void> {
           throw new Error(errMsg);
         }
 
-        // Commission (fire-and-forget)
-        const commissionUsdc = currentPrice * cleanSize * COMMISSION_RATE;
+        // ── Verify fill — don't assume orderId means filled ──
+        const { getOrder: predexonGetOrder, cancelOrder: predexonCancelOrder } = await import('./predexon');
+        let slFinalStatus = orderResp.status;
+        let slFilledSize = parseFloat(orderResp.sizeMatched || '0');
+
+        if (slFinalStatus !== 'filled' && slFilledSize < cleanSize * 0.95) {
+          for (let att = 1; att <= 5; att++) {
+            await new Promise(r => setTimeout(r, 1500));
+            try {
+              const os = await predexonGetOrder(predexonUserId, orderResp.orderId);
+              slFinalStatus = os.status;
+              slFilledSize = parseFloat(os.sizeMatched || '0');
+              if (slFinalStatus === 'filled' || slFilledSize >= cleanSize * 0.95) break;
+            } catch {}
+          }
+        }
+
+        // Cancel unfilled remainder
+        if (slFinalStatus !== 'filled' && slFinalStatus !== 'cancelled') {
+          try { await predexonCancelOrder(predexonUserId, orderResp.orderId); } catch {}
+        }
+
+        if (slFilledSize <= 0) {
+          throw new Error(`Stop loss sell not filled (order ${orderResp.orderId})`);
+        }
+
+        // Commission: ONLY on actually filled amount
+        const commissionUsdc = limitSellPrice * slFilledSize * COMMISSION_RATE;
         transferCommission(
           user.encryptedPrivateKey,
           user.polymarketProxyAddress!,
@@ -214,18 +240,21 @@ async function tick(): Promise<void> {
           s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const title =
           sl.title.length > 50 ? sl.title.substring(0, 47) + '...' : sl.title;
+        const partialWarn = slFilledSize < cleanSize * 0.95
+          ? `\n⚠️ Partial fill: ${slFilledSize.toFixed(2)} of ${cleanSize} shares`
+          : '';
 
         _sendNotification?.(
           sl.telegramId,
           `🛑 <b>Stop Loss Triggered</b>\n\n` +
             `<b>${esc(sl.outcome)}</b> — ${esc(title)}\n\n` +
             `📉 Trigger: ${triggerCents}¢  →  Market: ${currentCents}¢\n` +
-            `📦 Shares sold: ${cleanSize}\n` +
-            `✅ Market sell order placed`,
+            `📦 Shares sold: ${slFilledSize.toFixed(2)}` + partialWarn + `\n` +
+            `✅ Sell order filled`,
         );
 
         logger.info(
-          `[stopLoss] Executed: user=${sl.telegramId} shares=${cleanSize} orderId=${orderResp.orderId}`,
+          `[stopLoss] Executed: user=${sl.telegramId} shares=${slFilledSize}/${cleanSize} orderId=${orderResp.orderId}`,
         );
       } catch (err: any) {
         logger.error(
