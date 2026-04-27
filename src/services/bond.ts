@@ -204,10 +204,11 @@ export async function applyStrategyFilters(
   if (hoursLeft > strategy.maxHoursOut) return fail(`expires in ${hoursLeft.toFixed(0)}h > ${strategy.maxHoursOut}h`);
 
   // 3. maxConcurrent — count active bond positions for this user+strategy
+  //    Count both filled positions AND open (pending) limit orders
   const openPositions = await prisma.bondTrade.count({
     where: {
       strategyId: strategy.id,
-      status: 'filled',
+      status: { in: ['filled', 'open'] },
     },
   });
   if (openPositions >= strategy.maxConcurrent) {
@@ -216,9 +217,21 @@ export async function applyStrategyFilters(
 
   // 4. Sports / CryptoUpDown filters
   const tags = (market.tags || []).map(t => t.toLowerCase());
-  const isSports = tags.some(t => t.includes('sport') || t.includes('nba') || t.includes('nfl') || t.includes('mlb') || t.includes('soccer') || t.includes('football'));
-  const isCryptoUpDown = tags.some(t => t.includes('crypto')) &&
-    (market.question.toLowerCase().includes('up or down') || market.question.toLowerCase().includes('above') || market.question.toLowerCase().includes('below'));
+  const isSports = tags.some(t =>
+    t.includes('sport') || t.includes('nba') || t.includes('nfl') ||
+    t.includes('mlb') || t.includes('nhl') || t.includes('soccer') ||
+    t.includes('football') || t.includes('tennis') || t.includes('ufc') ||
+    t.includes('mma') || t.includes('boxing') || t.includes('cricket') ||
+    t.includes('rugby') || t.includes('golf') || t.includes('f1') ||
+    t.includes('formula') || t.includes('hockey') || t.includes('racing')
+  );
+  const questionLower = market.question.toLowerCase();
+  const isCryptoUpDown = tags.some(t => t.includes('crypto') || t.includes('bitcoin') || t.includes('ethereum')) &&
+    (questionLower.includes('up or down') || questionLower.includes('above') ||
+     questionLower.includes('below') || questionLower.includes('hit') ||
+     questionLower.includes('reach') || questionLower.includes('over') ||
+     questionLower.includes('under') || questionLower.includes('higher than') ||
+     questionLower.includes('lower than'));
 
   if (isSports && !strategy.includeSports) return fail('sports market excluded');
   if (isCryptoUpDown && !strategy.includeCryptoUpDown) return fail('crypto up/down excluded');
@@ -234,10 +247,9 @@ export async function applyStrategyFilters(
   }
 
   // 7. Categories filter
-  if (strategy.categories) {
-    const allowed = strategy.categories.split(',').map(c => c.trim().toLowerCase());
-    const marketTags = tags;
-    if (!allowed.some(a => marketTags.includes(a))) {
+  if (strategy.categories != null && strategy.categories.trim() !== '') {
+    const allowed = strategy.categories.split(',').map(c => c.trim().toLowerCase()).filter(c => c.length > 0);
+    if (allowed.length > 0 && !allowed.some(a => tags.includes(a))) {
       return fail('category not in allowed list');
     }
   }
