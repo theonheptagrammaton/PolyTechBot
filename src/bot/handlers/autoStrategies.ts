@@ -1,8 +1,11 @@
+import path from 'path';
 import { Context, Markup } from 'telegraf';
 import { prisma } from '../../database/prisma';
 import { getUserByTelegramId } from '../../services/user';
 import { sendPage } from '../../utils/telegram';
 import { t, Locale } from '../../i18n';
+
+const IMG_AUTOTRADE = path.join(__dirname, '../img/autotrade.PNG');
 
 function getLang(user: any): Locale {
   return (user?.language as Locale) || 'en';
@@ -84,5 +87,5 @@ export async function handleAutoStrategies(ctx: Context): Promise<void> {
     [Markup.button.callback(`🔙 ${t(lang, 'Main Menu')}`, 'back_to_menu')],
   ];
 
-  await sendPage(ctx, lines.join('\n'), { ...Markup.inlineKeyboard(buttons), parse_mode: 'HTML' });
+  await sendPage(ctx, lines.join('\n'), { ...Markup.inlineKeyboard(buttons), parse_mode: 'HTML', image_path: IMG_AUTOTRADE });
 }

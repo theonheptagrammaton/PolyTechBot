@@ -39,12 +39,14 @@ const IMG_POPCULTURE   = path.join(__dirname, '../img/popculture.jpg');
 const IMG_SCIENCE      = path.join(__dirname, '../img/science.jpg');
 const IMG_TECH         = path.join(__dirname, '../img/techbets.jpg');
 const IMG_AI           = path.join(__dirname, '../img/ai.jpg');
+const IMG_BREAKING     = path.join(__dirname, '../img/breaking.PNG');
+const IMG_NEWEST       = path.join(__dirname, '../img/newest.PNG');
 export const IMG_COPYTRADE = path.join(__dirname, '../img/copytrade.jpg');
 
 const CATEGORY_IMAGE: Record<string, string> = {
   'trending':    IMG_TRENDS,
-  'breaking':    IMG_TRENDS,
-  'newest':      IMG_ALLMARKETS,
+  'breaking':    IMG_BREAKING,
+  'newest':      IMG_NEWEST,
   'politics':    IMG_POLITICS,
   'crypto':      IMG_CRYPTO,
   'sports':      IMG_SPORTS,
