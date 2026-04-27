@@ -467,6 +467,7 @@ export const en: Record<string, string> = {
   'position.noTradingWallet': '📊 *Active Positions*\n\n⚠️ No trading wallet found.\n\nGo to 💼 My Wallet to set up your account first.',
   'position.noActive': '📊 *Active Positions*\n\n📭 No active positions.',
   'position.marketResolved': '✅ _Market Resolved — Claim your USDC below_',
+  'This position resolved against you. Nothing to claim.': 'This position resolved against you. Nothing to claim.',
   'btn.buyMore': '📈 Buy More',
   'btn.sell': '📉 Sell',
   'btn.redeemIt': '💰 Redeem It',

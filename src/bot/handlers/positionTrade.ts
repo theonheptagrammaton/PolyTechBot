@@ -738,6 +738,11 @@ export async function handlePositionRedeem(ctx: Context, idx: number): Promise<v
       return;
     }
 
+    if (pos.currentValue <= 0) {
+      await ctx.reply(`⚠️ ${t(lang, 'This position resolved against you. Nothing to claim.')}`);
+      return;
+    }
+
     if (!user || !user.polymarketProxyAddress) {
       await ctx.reply(t(lang, 'common.userNotFoundShort'));
       return;

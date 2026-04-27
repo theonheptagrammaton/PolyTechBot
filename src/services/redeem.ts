@@ -291,19 +291,14 @@ async function redeemNegRisk(
 
       // Build amounts using actual on-chain balances.
       // effectiveOutcomeIndex determines which slot gets which balance.
-      // If Data API outcomeIndex is wrong, the flip-on-overflow logic below corrects it.
-      const amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
+      let amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
       amounts[effectiveOutcomeIndex] = currentBalance;
       amounts[1 - effectiveOutcomeIndex] = currentOpposite;
 
       const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
-      const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+      let redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
 
-      // Pre-simulate the redeemPositions call to catch unrecoverable errors
-      // BEFORE the relayer submits (and wastes gas on a doomed transaction).
-      // When CTF approval for NegRiskAdapter isn't set yet, the simulation fails
-      // with "not approved" instead of "subtraction overflow", masking the real error.
-      // Check approval first to choose the right detection strategy.
+      // Pre-simulate to catch overflow BEFORE wasting gas on a doomed transaction.
       let adapterApproved = false;
       try {
         const ctfCheck = new ethers.Contract(CTF_ADDRESS, CTF_ABI, polygonProvider);
@@ -311,32 +306,56 @@ async function redeemNegRisk(
       } catch { /* proceed without check */ }
 
       if (adapterApproved) {
-        // Approval is set — pre-simulation will correctly detect overflow
+        // Approval is set — pre-simulation will correctly detect overflow.
+        // If overflow detected, try flipped outcomeIndex (Data API may be wrong).
+        let simPassed = false;
         try {
-          await polygonProvider.call({
-            from: proxyAddress,
-            to: NEG_RISK_ADAPTER,
-            data: redeemData,
-          });
+          await polygonProvider.call({ from: proxyAddress, to: NEG_RISK_ADAPTER, data: redeemData });
+          simPassed = true;
         } catch (simErr: any) {
           const simMsg = simErr?.message ?? '';
-          if (/subtraction overflow/i.test(simMsg)) {
-            logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-simulation reverted with subtraction overflow — aborting to save gas`);
+          if (/subtraction overflow/i.test(simMsg) && !outcomeFlipped) {
+            // Data API outcomeIndex may be wrong — flip and re-simulate (free, no gas)
+            effectiveOutcomeIndex = 1 - effectiveOutcomeIndex;
+            outcomeFlipped = true;
+            amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
+            amounts[effectiveOutcomeIndex] = currentBalance;
+            amounts[1 - effectiveOutcomeIndex] = currentOpposite;
+            const flippedRedeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+            try {
+              await polygonProvider.call({ from: proxyAddress, to: NEG_RISK_ADAPTER, data: flippedRedeemData });
+              redeemData = flippedRedeemData;
+              simPassed = true;
+              logger.info(`[redeem] ${txType}/NegRiskAdapter: pre-sim overflow fixed by flipping outcomeIndex to ${effectiveOutcomeIndex}`);
+            } catch (flipErr: any) {
+              if (/subtraction overflow/i.test(flipErr?.message ?? '')) {
+                logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-sim overflow on both orientations — aborting`);
+                await setOverflowDedup(proxyAddress, position.conditionId, 'pre-sim overflow both orientations');
+                return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
+              }
+              // Non-overflow error on flipped — proceed with flipped data
+              redeemData = flippedRedeemData;
+              simPassed = true;
+            }
+          } else if (/subtraction overflow/i.test(simMsg)) {
+            // Already flipped, still overflow
+            logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-sim overflow (already flipped) — aborting`);
             await setOverflowDedup(proxyAddress, position.conditionId, 'pre-sim subtraction overflow');
             return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
+          } else {
+            // Non-overflow simulation error — proceed, might work on-chain
+            simPassed = true;
+            logger.debug?.(`[redeem] ${txType}/NegRiskAdapter: pre-simulation non-fatal error: ${simMsg.slice(0, 120)}`);
           }
-          logger.debug?.(`[redeem] ${txType}/NegRiskAdapter: pre-simulation non-fatal error: ${simMsg.slice(0, 120)}`);
         }
       } else {
-        // Approval not set — pre-simulation would fail with "not approved", masking overflow.
-        // Heuristic: if opposite side balance is 0, NegRiskAdapter will definitely overflow
-        // (it needs tokens from both sides). Abort immediately to save gas.
+        // Approval not set — heuristic check.
         if (currentOpposite.isZero() && currentBalance.gt(0)) {
-          logger.warn(`[redeem] ${txType}/NegRiskAdapter: opposite side balance is 0, approval not set — redeem will overflow, aborting to save gas`);
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter: opposite side balance is 0, approval not set — aborting`);
           await setOverflowDedup(proxyAddress, position.conditionId, 'opposite-balance-zero heuristic');
           return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
         }
-        logger.info(`[redeem] ${txType}/NegRiskAdapter: CTF approval not set — pre-simulation unreliable, proceeding with bundled tx`);
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: CTF approval not set — proceeding with bundled tx`);
       }
 
       const txPayload = [
