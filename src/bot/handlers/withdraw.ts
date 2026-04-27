@@ -101,9 +101,6 @@ export async function handleWithdrawMenu(ctx: Context): Promise<void> {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [Markup.button.callback(t(lang, 'withdraw.chainPolygon'), 'wd_chain_polygon')],
-          [Markup.button.callback(t(lang, 'withdraw.chainSolana'), 'wd_chain_solana')],
-          [Markup.button.callback(t(lang, 'withdraw.chainEthereum'), 'wd_chain_ethereum')],
-          [Markup.button.callback(t(lang, 'withdraw.chainBSC'), 'wd_chain_bsc')],
           [Markup.button.callback(t(lang, 'common.mainMenu'), 'back_to_menu')],
         ]),
       }
