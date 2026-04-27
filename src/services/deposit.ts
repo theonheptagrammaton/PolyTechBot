@@ -555,7 +555,9 @@ export async function approveAndDepositWithRelayer(
     );
 
     // Get builder config
-    const builderConfig = clobClient.builderConfig;
+    // Cast needed: clob-client bundles builder-signing-sdk@1.0.0 while
+    // builder-relayer-client uses @0.0.8 — structurally identical at runtime.
+    const builderConfig = clobClient.builderConfig as any;
 
     // Initialize Relayer Client with builder config
     const relayerClient = new RelayClient(
