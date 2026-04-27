@@ -306,7 +306,8 @@ async function executeCopyOrder(
   },
   trade: DetectedTrade,
   copySize: number,
-  subSlippage?: number   // per-subscription slippage (falls back to user.slippageTolerance)
+  subSlippage?: number,   // per-subscription slippage (falls back to user.slippageTolerance)
+  subLimitMode?: boolean   // when true, BUYs are placed as GTC limit orders at the slippage-capped price instead of FAK market
 ): Promise<ExecResult> {
   if (!user.polymarketProxyAddress) {
     return { status: 'skipped', errorMsg: 'no proxy address' };
@@ -454,14 +455,24 @@ async function executeCopyOrder(
       return { status: 'skipped', errorMsg: 'buy size too small' };
     }
 
-    // BUY via Predexon — market order (amount = USD to spend)
-    const orderResp = await predexonPlaceOrder(predexonUserId, {
-      venue: 'polymarket',
-      tokenId,
-      side: 'buy',
-      type: 'market',
-      amount: String(tradeAmount),
-    });
+    // BUY via Predexon — market order (amount = USD to spend) OR slippage-capped limit when limitMode is on
+    const limitPrice = Math.min(parseFloat(price.toFixed(4)), 0.99);
+    const orderResp = subLimitMode
+      ? await predexonPlaceOrder(predexonUserId, {
+          venue: 'polymarket',
+          tokenId,
+          side: 'buy',
+          type: 'limit',
+          price: String(limitPrice),
+          size: String(size),
+        })
+      : await predexonPlaceOrder(predexonUserId, {
+          venue: 'polymarket',
+          tokenId,
+          side: 'buy',
+          type: 'market',
+          amount: String(tradeAmount),
+        });
 
     if (!orderResp.orderId) {
       const errMsg = (orderResp as any).error || (orderResp as any).message || 'order rejected';
@@ -880,7 +891,7 @@ async function tickForTrader(
           if (sub.maxDaysOut != null && mktMeta?.endDate) {
             const endMs = new Date(mktMeta.endDate).getTime();
             const nowMs = Date.now();
-            const daysOut = Math.ceil((endMs - nowMs) / (24 * 3600 * 1000));
+            const daysOut = Math.floor((endMs - nowMs) / (24 * 3600 * 1000));
             if (daysOut > sub.maxDaysOut) {
               await prisma.copiedTrade.create({ data: { subscriptionId: sub.id, userId: user.id, traderAddress, marketId: trade.marketId, assetId: trade.assetId || null, outcome: effectiveOutcome, side: effectiveSide, sourceSize: trade.sizeUsd, copiedSize: 0, price: trade.price, status: 'skipped', errorMsg: `market expires in ${daysOut} days (max ${sub.maxDaysOut})` } });
               if (sub.notificationsEnabled) await sendNotification(user.telegramId, `⏭ <b>Trade Skipped</b>\n\nTrader: <a href="https://polymarket.com/profile/${traderAddress}">${(sub.label || (traderAddress.slice(0, 6) + '...' + traderAddress.slice(-4))).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</a>\nReason: Market expires in ${daysOut} days &gt; max ${sub.maxDaysOut}`);
@@ -909,7 +920,7 @@ async function tickForTrader(
         };
 
         // Execute the copy
-        const result = await executeCopyOrder(user, effectiveTrade, copySize, sub.slippage);
+        const result = await executeCopyOrder(user, effectiveTrade, copySize, sub.slippage, sub.limitMode);
 
         // Delay between orders to avoid Cloudflare 1015 rate limiting on CLOB
         await new Promise(r => setTimeout(r, 1200));

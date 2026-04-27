@@ -1241,9 +1241,11 @@ async function processStrategy(
     return;
   }
 
-  // Parse multi-values
-  const coins: string[] = strat.coins ? strat.coins.split(',') : [strat.coin];
-  const timeframes: string[] = strat.timeframes ? strat.timeframes.split(',') : [strat.timeframe];
+  // Parse multi-values — trim/filter so 'BTC, ETH' doesn't yield a phantom ' ETH' that never matches a market
+  const rawCoins: string[] = strat.coins ? strat.coins.split(',').map((c: string) => c.trim()).filter((c: string) => c) : [];
+  const coins: string[] = rawCoins.length ? rawCoins : [strat.coin];
+  const rawTfs: string[] = strat.timeframes ? strat.timeframes.split(',').map((t: string) => t.trim()).filter((t: string) => t) : [];
+  const timeframes: string[] = rawTfs.length ? rawTfs : [strat.timeframe];
 
   for (const coin of coins) {
     for (const tf of timeframes) {
