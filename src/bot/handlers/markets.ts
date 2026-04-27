@@ -693,7 +693,7 @@ export function mainMenuKeyboard(lang: Locale = 'en') {
     ],
     [
       Markup.button.callback(t(lang, 'menu.smartTraders'), 'show_wallet'),
-      // Markup.button.callback('🤖 Auto Trading', 'auto_strategies'),
+      Markup.button.callback('🤖 Auto Trading', 'auto_strategies'),
     ],
     [
       Markup.button.callback(t(lang, 'menu.limitOrders'), 'portfolio_orders_1'),

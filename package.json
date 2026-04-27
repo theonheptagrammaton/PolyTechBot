@@ -28,6 +28,7 @@
     "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client": "^5.2.3",
+    "@polymarket/clob-client-v2": "^1.0.2",
     "@polymarket/relayer-client": "^3.0.0",
     "@prisma/client": "^6.1.0",
     "@solana/spl-token": "^0.4.14",
