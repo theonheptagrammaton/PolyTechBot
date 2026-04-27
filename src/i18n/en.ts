@@ -11,6 +11,7 @@ export const en: Record<string, string> = {
   'common.noWallet': '❌ Wallet not set up. Use /start first.',
   'common.sessionExpired': '❌ Session expired. Please start again.',
   'common.back': 'Back',
+  'common.mainMenu': '🏠 Main Menu',
 
   // ─── Buttons (common) ──────────────────────────────────────
   'btn.mainMenu': '🏠 Main Menu',
@@ -200,16 +201,64 @@ export const en: Record<string, string> = {
   'deposit.bridgeHandlesBody': 'Your USDC is relayed directly to your Polymarket account by Bridge.',
 
   // ─── Withdraw ─────────────────────────────────────────────
+  // Chain selection
   'withdraw.selectChain': '🏦 *Select Withdrawal Destination*\n\nChoose where you want to receive your funds:',
-  'withdraw.cancelled': '❌ Withdrawal cancelled.',
-  'withdraw.walletNotFound': '❌ Wallet not found. Please contact support.',
-  'withdraw.invalidAddress': '❌ <b>Invalid address.</b> Please enter a valid EVM wallet address:',
-  'withdraw.invalidSolanaAddress': '❌ <b>Invalid Solana address.</b> Please enter a valid Solana wallet address:',
-  'withdraw.invalidAmount': '❌ <b>Invalid amount.</b> Please enter a positive number:',
-  'withdraw.insufficientBalance': '❌ <b>Insufficient balance.</b> Max: {{balance}} {{symbol}}\n\nPlease enter a smaller amount:',
+  'withdraw.selectDestination': '🏦 *Select Withdrawal Destination*\n\nChoose where you want to receive your funds:',
+  'withdraw.chainPolygon': '🟢 Polygon',
+  'withdraw.chainSolana': '🟣 Solana',
+  'withdraw.chainEthereum': '🔵 Ethereum',
+  'withdraw.chainBSC': '🟡 Binance Smart Chain',
+  // Wallet not set up
+  'withdraw.walletNotSetUp': '❌ *Wallet not set up.*\n\nPlease use /start to create your wallet first.',
+  // Cross-chain page
+  'withdraw.crossChainTitle': 'Withdraw USDC — {{chain}}',
+  'withdraw.available': 'Available',
+  'withdraw.enterDestinationAddress': 'Enter your {{chain}} wallet address:',
+  // Polygon page
+  'withdraw.polygonTitle': 'Polygon USDC Withdrawal',
+  'withdraw.token': 'Token',
+  'withdraw.enterPolygonAddress': 'Enter your Polygon wallet address:',
+  // Token page
+  'withdraw.loadingBalance': 'Loading balance...',
+  'withdraw.tokenTitle': '{{symbol}} Withdrawal',
+  'withdraw.availableBalance': 'Available Balance',
+  'withdraw.tokenAddress': 'Token Address',
+  // Address & amount input
+  'withdraw.destination': 'Destination',
+  'withdraw.enterAmount': 'Enter the amount in {{label}} to withdraw:',
+  'withdraw.invalidEVMAddress': 'Invalid address. Please enter a valid EVM wallet address:',
+  'withdraw.invalidSolanaAddress': 'Invalid Solana address. Please enter a valid Solana wallet address:',
+  'withdraw.invalidAmount': 'Invalid amount. Please enter a positive number:',
+  'withdraw.insufficientBalance': 'Insufficient balance. Max: {{max}} {{symbol}}\n\nPlease enter a smaller amount:',
+  'withdraw.cancel': '← Cancel',
+  // Processing & result
+  'withdraw.processing': 'Processing {{amount}} {{symbol}} withdrawal...',
+  'withdraw.to': 'To',
+  'withdraw.submitted': 'Withdrawal Submitted',
+  'withdraw.amount': 'Amount',
+  'withdraw.tx': 'Tx',
+  'withdraw.status': 'Status',
+  'withdraw.pendingConfirmation': 'Pending confirmation...',
+  'withdraw.confirmed': 'Confirmed',
+  'withdraw.bridgeDelivering': 'Bridge is delivering funds to {{chain}}. This may take a few minutes.',
+  'withdraw.trackOnPolygonscan': 'Track on Polygonscan',
+  // Cancel & wallet
+  'withdraw.cancelled': 'Withdrawal cancelled.',
+  'withdraw.walletNotFound': 'Wallet not found. Please contact support.',
+  'withdraw.myWallet': '💼 My Wallet',
+  'withdraw.tryAgain': '🔄 Try Again',
+  // Errors
+  'withdraw.failed': 'Withdrawal Failed',
+  'withdraw.errInvalidRecipient': 'Invalid recipient address.',
+  'withdraw.errInsufficientBalance': 'Insufficient balance for this withdrawal.',
+  'withdraw.errNotConfigured': 'Withdrawal service not configured. Please contact support.',
+  'withdraw.errNetworkUnavailable': 'Network unavailable. Please try again later.',
+  'withdraw.errGeneric': 'Something went wrong. Please try again.',
+  'withdraw.errUnexpected': 'An unexpected error occurred. Please try again.',
+  // Legacy keys (kept for backward compatibility)
   'withdraw.success': '✅ <b>Withdrawal Submitted</b>',
-  'withdraw.failed': '❌ <b>Withdrawal Failed</b>',
   'withdraw.unexpectedError': '❗ An unexpected error occurred. Please try again.',
+  'withdraw.invalidAddress': '❌ <b>Invalid address.</b> Please enter a valid EVM wallet address:',
   'btn.polygonChain': '🟢 Polygon',
   'btn.solanaChain': '🟣 Solana',
   'btn.ethereumChain': '🔵 Ethereum',
