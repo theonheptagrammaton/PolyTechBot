@@ -77,6 +77,10 @@ const NEG_RISK_ADAPTER_ABI = [
   'function redeemPositions(bytes32 conditionId, uint256[] amounts) external',
 ];
 
+// NegRisk wrapped collateral — redeemed CTF tokens are returned as wcol, then unwrapped to USDC.e
+const WCOL_ADDRESS = '0x3a3bd7bb9528e159577f7c2e685cc81a765002e2';
+const WCOL_ABI = ['function withdraw(uint256 amount) external'];
+
 // Polymarket Builder Relayer (gasless proxy transactions)
 const POLYGON_RPC  = 'https://polygon-bor-rpc.publicnode.com';
 const RELAYER_URL  = 'https://relayer-v2.polymarket.com';
@@ -215,13 +219,20 @@ async function redeemPosition(params: {
 
   const privateKey  = decrypt(params.encryptedPrivateKey);
 
-  // If Data API says negativeRisk, go straight to NegRiskAdapter
-  // BUT skip if we already know Builder path fails with subtraction overflow for this position
+  // If Data API says negativeRisk, try NegRiskAdapter first, then direct CTF as fallback
   if (params.position.negativeRisk) {
-    if (await checkOverflowDedup(params.proxyAddress, params.position.conditionId)) {
-      return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API (cached)' };
+    const overflowCached = await checkOverflowDedup(params.proxyAddress, params.position.conditionId);
+    if (!overflowCached) {
+      const adapterResult = await redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
+      if (adapterResult.success) return adapterResult;
     }
-    return redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
+    // NegRiskAdapter failed (overflow) — try direct CTF.redeemPositions(wcol, 0x0, ...) as fallback
+    const directBalance = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
+    if (directBalance.isZero()) {
+      return { success: true, txHash: undefined };
+    }
+    logger.info(`[redeem] NegRiskAdapter failed, trying direct CTF path for conditionId=${params.position.conditionId.slice(0, 18)}...`);
+    return redeemNegRiskDirect(privateKey, params.proxyAddress, params.position, params.skipThrottle);
   }
 
   // Try standard CTF path first (USDC.e, then native USDC)
@@ -239,7 +250,16 @@ async function redeemPosition(params: {
     return stdResult;
   }
   logger.info(`[redeem] Standard CTF redeem failed, trying NegRiskAdapter as fallback (balance still ${balanceNow.toString()})`);
-  return redeemNegRisk(privateKey, params.proxyAddress, params.position, balanceNow, params.skipThrottle);
+  const negResult = await redeemNegRisk(privateKey, params.proxyAddress, params.position, balanceNow, params.skipThrottle);
+  if (negResult.success) return negResult;
+
+  // All adapter paths failed — try direct CTF path as last resort
+  const directBalance = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
+  if (!directBalance.isZero()) {
+    logger.info(`[redeem] All adapter paths failed, trying direct CTF path`);
+    return redeemNegRiskDirect(privateKey, params.proxyAddress, params.position, params.skipThrottle);
+  }
+  return negResult;
 }
 
 /**
@@ -477,6 +497,126 @@ async function redeemNegRisk(
   }
 
   return { success: false, error: (await isRelayerBackedOff()) ? 'Relayer rate-limited' : 'NegRiskAdapter redemption failed with all tx types' };
+}
+
+/**
+ * Direct CTF redemption bypassing NegRiskAdapter.
+ * Used as a last-resort fallback when NegRiskAdapter.redeemPositions overflows.
+ * Calls CTF.redeemPositions(wcol, 0x0, conditionId, [1,2]) to redeem position tokens
+ * into wrapped collateral (wcol), then wcol.withdraw() to convert back to USDC.e.
+ */
+async function redeemNegRiskDirect(
+  privateKey: string,
+  proxyAddress: string,
+  position: ActivePosition,
+  skipThrottle?: boolean,
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  const conditionId = position.conditionId;
+  const ctfIface = new ethers.utils.Interface(CTF_ABI);
+  const wcolIface = new ethers.utils.Interface(WCOL_ABI);
+
+  if (!skipThrottle && await isRelayerBackedOff()) {
+    return { success: false, error: 'Relayer rate-limited' };
+  }
+
+  // Pre-simulate CTF.redeemPositions(wcol, 0x0, conditionId, [1,2])
+  const redeemData = ctfIface.encodeFunctionData('redeemPositions', [
+    WCOL_ADDRESS,
+    ethers.constants.HashZero,
+    conditionId,
+    [1, 2],
+  ]);
+
+  try {
+    await polygonProvider.call({ from: proxyAddress, to: CTF_ADDRESS, data: redeemData });
+  } catch (simErr: any) {
+    const msg = simErr?.message ?? '';
+    logger.warn(`[redeem] Direct CTF pre-sim failed: ${msg.slice(0, 150)}`);
+    return { success: false, error: `Direct CTF redemption simulation failed: ${msg.slice(0, 80)}` };
+  }
+
+  logger.info(`[redeem] Direct CTF path: pre-sim passed for conditionId=${conditionId.slice(0, 18)}...`);
+
+  // Read current wcol balance (so we can withdraw exactly what we gain)
+  const wcolContract = new ethers.Contract(WCOL_ADDRESS, ['function balanceOf(address) view returns (uint256)'], polygonProvider);
+  const wcolBefore = await wcolContract.balanceOf(proxyAddress).catch(() => ethers.BigNumber.from(0));
+
+  const txTypes = [RelayerTxType.SAFE, RelayerTxType.PROXY];
+  for (const txType of txTypes) {
+    if (await isRelayerBackedOff()) break;
+    try {
+      // Step 1: CTF.redeemPositions → receive wcol
+      const redeemPayload = [{ to: CTF_ADDRESS, data: redeemData, value: '0' }];
+      logger.info(`[redeem] Trying ${txType}/DirectCTF: conditionId=${conditionId.slice(0, 18)}...`);
+
+      const relayClient = createRelayClient(privateKey, txType);
+      const response = await Promise.race([
+        relayClient.execute(redeemPayload),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 30_000)),
+      ]);
+      if (!response) { logger.warn(`[redeem] ${txType}/DirectCTF: no response`); continue; }
+
+      const result = await Promise.race([
+        response.wait(),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('confirm timeout')), 60_000)),
+      ]);
+
+      const txHash = result?.transactionHash;
+      if (txHash && !(await verifyTxOnChain(txHash))) {
+        logger.warn(`[redeem] ${txType}/DirectCTF: redeem tx reverted`);
+        continue;
+      }
+
+      // Verify position tokens were burned
+      const balanceAfter = await getOnChainTokenBalance(proxyAddress, position.asset);
+      if (!balanceAfter.isZero()) {
+        logger.warn(`[redeem] ${txType}/DirectCTF: position balance still ${balanceAfter.toString()} after redeem`);
+        continue;
+      }
+
+      logger.info(`[redeem] ${txType}/DirectCTF: position tokens redeemed, now converting wcol → USDC.e`);
+
+      // Step 2: Withdraw wcol → USDC.e
+      const wcolAfter = await wcolContract.balanceOf(proxyAddress).catch(() => ethers.BigNumber.from(0));
+      const wcolGained = wcolAfter.sub(wcolBefore);
+      if (wcolGained.lte(0)) {
+        logger.info(`[redeem] ${txType}/DirectCTF: no wcol gained (losing position), done`);
+        return { success: true, txHash };
+      }
+
+      const withdrawData = wcolIface.encodeFunctionData('withdraw', [wcolGained]);
+      const withdrawPayload = [{ to: WCOL_ADDRESS, data: withdrawData, value: '0' }];
+
+      try {
+        const relayClient2 = createRelayClient(privateKey, txType);
+        const wResp = await Promise.race([
+          relayClient2.execute(withdrawPayload),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 30_000)),
+        ]);
+        if (wResp) {
+          const wResult = await Promise.race([
+            wResp.wait(),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 60_000)),
+          ]);
+          if (wResult?.transactionHash) {
+            await verifyTxOnChain(wResult.transactionHash);
+          }
+        }
+        logger.info(`[redeem] ${txType}/DirectCTF: wcol withdraw complete (${wcolGained.toString()} → USDC.e)`);
+      } catch (wErr: any) {
+        logger.warn(`[redeem] ${txType}/DirectCTF: wcol withdraw failed: ${wErr?.message?.slice(0, 100)} — position redeemed but wcol stuck in wallet`);
+      }
+
+      return { success: true, txHash };
+    } catch (error: any) {
+      const errMsg = error?.message ?? '';
+      if (isRateLimitError(errMsg)) { await setRelayerBackoff(errMsg); break; }
+      logger.warn(`[redeem] ${txType}/DirectCTF failed: ${errMsg.slice(0, 200)}`);
+      continue;
+    }
+  }
+
+  return { success: false, error: 'Direct CTF redemption failed with all tx types' };
 }
 
 /**
