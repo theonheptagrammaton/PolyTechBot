@@ -281,7 +281,6 @@ export async function handleStart(ctx: Context): Promise<void> {
                 Markup.button.callback(t(lang, 'btn.buyMore'), `pos_buy_${idx}`),
                 Markup.button.callback(t(lang, 'btn.sell'), `pos_sell_${idx}`),
               ],
-              [Markup.button.callback(t(lang, 'btn.pnl'), `pos_pnl_${idx}`)],
               [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
             ];
 

@@ -227,6 +227,12 @@ model BondStrategy {
   scanInterval        Int      @default(5)
   outcomeSide         String   @default("auto")
 
+  // TP/SL (per-strategy)
+  takeProfitPct       Float?   // sell when price rises N% from fill (e.g. 50 → +50%)
+  stopLossPct         Float?   // sell when price drops N% from fill (e.g. 25 → −25%)
+  takeProfitPrice     Float?   // sell when price reaches X cents (e.g. 99)
+  stopLossPrice       Float?   // sell when price drops to X cents (e.g. 80)
+
   // Status
   isActive            Boolean  @default(true)
   isPaused            Boolean  @default(true)
@@ -256,8 +262,11 @@ model BondTrade {
   probability   Float
   amount        Float
   price         Float
+  fillPrice     Float?        // actual execution price (CLOB midpoint after fill); used by TP/SL pct calcs
   orderId       String?
   status        String        @default("pending")
+  tpSlOrderId   String?       // outstanding TP/SL sell order
+  tpSlStatus    String?       // 'tp_triggered' | 'sl_triggered' | '*_failed' | 'awaiting_resolution' | 'redeemed'
   errorMsg      String?
 
   createdAt     DateTime      @default(now())

@@ -4,7 +4,7 @@ import { redisCache } from '../database/redis';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { transferCommission, COMMISSION_RATE } from './commission';
-import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder } from './predexon';
+import { placeOrder as predexonPlaceOrder, getOrder as predexonGetOrder, cancelOrder as predexonCancelOrder, getPositions } from './predexon';
 import { ensurePredexonUser } from './user';
 import { getActivePositions, invalidatePortfolioCache } from './portfolio';
 import { manualRedeem } from './redeem';
@@ -487,6 +487,9 @@ export async function executeBondOrder(
     // they may not fill immediately even though we set price above market.
     let actualFillPrice = livePrice;
     let tradeStatus: 'filled' | 'open' = 'filled';
+    // Track whether the fill price was actually confirmed via CLOB midpoint
+    // so TP/SL percentage math doesn't fire on a stale `livePrice` proxy.
+    let confirmedFillPrice: number | null = null;
 
     if (useLimit) {
       let filled = false;
@@ -514,6 +517,23 @@ export async function executeBondOrder(
       }
     }
 
+    // Capture an accurate fillPrice (post-fill CLOB midpoint, fallback to limit price).
+    // order.price returns the LIMIT price not the actual execution price.
+    if (tradeStatus === 'filled') {
+      try {
+        const midResp = await fetch(
+          `${CLOB_BASE}/midpoint?token_id=${tokenId}`,
+          { signal: AbortSignal.timeout(5_000) },
+        );
+        if (midResp.ok) {
+          const midData: any = await midResp.json();
+          const mid = parseFloat(midData?.mid ?? '0');
+          if (!isNaN(mid) && mid > 0 && mid < 1) confirmedFillPrice = mid;
+        }
+      } catch { /* fall through */ }
+      if (confirmedFillPrice == null) confirmedFillPrice = actualFillPrice;
+    }
+
     // Record trade in DB
     await prisma.bondTrade.create({
       data: {
@@ -526,6 +546,7 @@ export async function executeBondOrder(
         probability: price,
         amount: tradeAmount,
         price: actualFillPrice,
+        fillPrice: confirmedFillPrice,
         orderId: orderResp.orderId,
         status: tradeStatus,
       },
@@ -647,6 +668,345 @@ export async function checkDailyLoss(
   return false;
 }
 
+// ─── TP/SL Check ────────────────────────────────────────────────────────────
+// Mirrors updown's checkUpDownTpSl: 15s tick, fixed-price + percentage modes,
+// slippage-protected limit sells, lock + retry counter, separate sell-monitor
+// for stale/failed sell orders.
+
+const BOND_TPSL_GRACE_MS = 60_000; // skip trades younger than 60s (avoids fillPrice noise)
+const BOND_TPSL_MAX_RETRIES = 5;
+
+async function reconcileOpenBondLimits(): Promise<void> {
+  // Bring `status='open'` bond trades up to date by polling Predexon. When a
+  // limit order finally fills, capture an accurate fillPrice from the CLOB
+  // midpoint so TP/SL percentage math is correct.
+  const opens = await prisma.bondTrade.findMany({
+    where: { status: 'open' },
+    include: { user: { select: { predexonUserId: true, polymarketProxyAddress: true } } },
+  });
+  for (const trade of opens) {
+    if (!trade.orderId || !trade.user.predexonUserId) continue;
+    try {
+      const order = await predexonGetOrder(trade.user.predexonUserId, trade.orderId);
+      if (order.status === 'filled') {
+        let fp: number | null = null;
+        try {
+          const midResp = await fetch(
+            `${CLOB_BASE}/midpoint?token_id=${trade.tokenId}`,
+            { signal: AbortSignal.timeout(5_000) },
+          );
+          if (midResp.ok) {
+            const midData: any = await midResp.json();
+            const mid = parseFloat(midData?.mid ?? '0');
+            if (!isNaN(mid) && mid > 0 && mid < 1) fp = mid;
+          }
+        } catch { /* fall through */ }
+        if (fp == null) {
+          const raw = parseFloat(order.price ?? '0');
+          if (!isNaN(raw) && raw > 0) fp = raw;
+        }
+        await prisma.bondTrade.update({
+          where: { id: trade.id },
+          data: { status: 'filled', fillPrice: fp ?? trade.price },
+        });
+        if (trade.user.polymarketProxyAddress) {
+          invalidatePortfolioCache(trade.user.polymarketProxyAddress).catch(() => {});
+        }
+      } else if (order.status === 'cancelled' || order.status === 'expired') {
+        await prisma.bondTrade.update({
+          where: { id: trade.id },
+          data: { status: 'cancelled' },
+        });
+      }
+    } catch { /* transient — retry next tick */ }
+  }
+}
+
+async function checkBondTpSl(sendNotification: SendNotificationFn): Promise<void> {
+  await reconcileOpenBondLimits().catch(err =>
+    logger.debug(`[bond] reconcileOpenBondLimits error: ${err?.message}`)
+  );
+
+  const trades = await prisma.bondTrade.findMany({
+    where: {
+      status: 'filled',
+      tpSlStatus: null,
+      strategy: { isActive: true },
+      createdAt: { lt: new Date(Date.now() - BOND_TPSL_GRACE_MS) },
+    },
+    include: {
+      strategy: true,
+      user: {
+        select: {
+          telegramId: true,
+          predexonUserId: true,
+          polymarketProxyAddress: true,
+          slippageTolerance: true,
+        },
+      },
+    },
+  });
+
+  for (const trade of trades) {
+    if (!trade.strategy) continue;
+    const strat = trade.strategy;
+
+    const hasFixedTp = strat.takeProfitPrice != null;
+    const hasFixedSl = strat.stopLossPrice != null;
+    const hasPctTp = strat.takeProfitPct != null;
+    const hasPctSl = strat.stopLossPct != null;
+    if (!hasFixedTp && !hasFixedSl && !hasPctTp && !hasPctSl) continue;
+
+    // Percentage-only modes require a fillPrice
+    if (trade.fillPrice == null && !hasFixedTp && !hasFixedSl) continue;
+
+    const lockKey = `bond:tpsl_lock:${trade.id}`;
+    if ((await redisCache.get<number>(lockKey)) != null) continue;
+
+    // Live midpoint
+    let currentPrice: number;
+    try {
+      const midResp = await fetch(
+        `${CLOB_BASE}/midpoint?token_id=${trade.tokenId}`,
+        { signal: AbortSignal.timeout(5_000) },
+      );
+      if (!midResp.ok) {
+        // Track 404s — market likely resolved after several misses
+        const mid404Key = `bond:tpsl_mid404:${trade.id}`;
+        const c = ((await redisCache.get<number>(mid404Key)) ?? 0) + 1;
+        await redisCache.set(mid404Key, c, 3600);
+        if (c >= 5) {
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'awaiting_resolution' },
+          });
+          await redisCache.del(mid404Key);
+        }
+        continue;
+      }
+      const midData: any = await midResp.json();
+      const mid = parseFloat(midData?.mid ?? '0');
+      if (isNaN(mid) || mid <= 0) continue;
+      currentPrice = mid;
+    } catch { continue; }
+
+    // Trigger detection — fixed price (in cents) checked first, then pct
+    let tpTriggered = false;
+    if (hasFixedTp && currentPrice * 100 >= strat.takeProfitPrice!) {
+      tpTriggered = true;
+    } else if (hasPctTp && trade.fillPrice != null) {
+      const target = trade.fillPrice * (1 + strat.takeProfitPct! / 100);
+      if (currentPrice >= target) tpTriggered = true;
+    }
+
+    let slTriggered = false;
+    if (hasFixedSl && currentPrice * 100 <= strat.stopLossPrice!) {
+      slTriggered = true;
+    } else if (hasPctSl && trade.fillPrice != null) {
+      const target = trade.fillPrice * (1 - strat.stopLossPct! / 100);
+      if (currentPrice <= target) slTriggered = true;
+    }
+
+    if (!tpTriggered && !slTriggered) continue;
+
+    const tpSlStatus = tpTriggered ? 'tp_triggered' : 'sl_triggered';
+    const retryKey = `bond:tpsl_retry:${trade.id}`;
+    const retryCount = (await redisCache.get<number>(retryKey)) ?? 0;
+
+    if (retryCount >= BOND_TPSL_MAX_RETRIES) {
+      await prisma.bondTrade.update({
+        where: { id: trade.id },
+        data: { tpSlStatus: `${tpSlStatus}_failed` },
+      });
+      await redisCache.del(retryKey);
+      if (strat.notificationsEnabled) {
+        const label = tpTriggered ? 'Take Profit' : 'Stop Loss';
+        sendNotification({
+          chatId: trade.user.telegramId,
+          text:
+            `⚠️ <b>Bond ${label} Failed</b>\n\n` +
+            `📊 ${trade.question.slice(0, 100)}\n` +
+            `Could not execute sell after ${BOND_TPSL_MAX_RETRIES} attempts — please sell manually.`,
+        });
+      }
+      continue;
+    }
+
+    await redisCache.set(lockKey, 1, 60);
+
+    if (!trade.user.predexonUserId) {
+      await prisma.bondTrade.update({
+        where: { id: trade.id },
+        data: { tpSlStatus: `${tpSlStatus}_no_sell` },
+      });
+      await redisCache.del(lockKey);
+      continue;
+    }
+
+    try {
+      // Pull the live position size to avoid SafeMath overflow on partial sells.
+      let sellSize = '0';
+      try {
+        const positions = await getPositions(trade.user.predexonUserId, 'polymarket');
+        const pos = positions.find(p => p.tokenId === trade.tokenId && p.status === 'active');
+        if (pos && parseFloat(pos.size) > 0) {
+          sellSize = String(Math.floor(parseFloat(pos.size) * 100) / 100);
+        }
+      } catch (posErr: any) {
+        logger.warn(`[bond] TP/SL: failed to fetch positions for trade ${trade.id}: ${posErr?.message}`);
+      }
+      // Fallback: derive from amount/fillPrice with safety buffer
+      if (sellSize === '0' && trade.fillPrice != null && trade.fillPrice > 0) {
+        sellSize = String(Math.floor((trade.amount / trade.fillPrice) * 0.95 * 100) / 100);
+      }
+      if (sellSize === '0' || parseFloat(sellSize) <= 0) {
+        await redisCache.del(lockKey);
+        await redisCache.set(retryKey, retryCount + 1, 3600);
+        continue;
+      }
+
+      const slippagePct = strat.slippage ?? trade.user.slippageTolerance ?? 5;
+      const minSellPrice = Math.max(
+        parseFloat((currentPrice * (1 - slippagePct / 100)).toFixed(4)),
+        0.01,
+      );
+
+      const sellResp = await predexonPlaceOrder(trade.user.predexonUserId, {
+        venue: 'polymarket',
+        tokenId: trade.tokenId,
+        side: 'sell',
+        type: 'limit',
+        price: String(minSellPrice),
+        size: sellSize,
+      });
+
+      if (!sellResp.orderId) {
+        await redisCache.set(retryKey, retryCount + 1, 3600);
+        await redisCache.del(lockKey);
+        continue;
+      }
+
+      await redisCache.set(`bond:tpsl_sell_at:${trade.id}`, Date.now(), 600);
+
+      await prisma.bondTrade.update({
+        where: { id: trade.id },
+        data: { tpSlStatus, tpSlOrderId: sellResp.orderId },
+      });
+
+      if (strat.notificationsEnabled) {
+        const emoji = tpTriggered ? '🏆' : '🛑';
+        const label = tpTriggered ? 'Take Profit' : 'Stop Loss';
+        sendNotification({
+          chatId: trade.user.telegramId,
+          text:
+            `${emoji} <b>Bond ${label} Triggered</b>\n\n` +
+            `📊 ${trade.question.slice(0, 100)}\n` +
+            `Entry: ${(trade.fillPrice ?? trade.price).toFixed(2)} → Exit: ${currentPrice.toFixed(2)}\n` +
+            `Amount: $${trade.amount.toFixed(2)}`,
+        });
+      }
+    } catch (err: any) {
+      logger.warn(`[bond] TP/SL sell failed for trade ${trade.id}: ${err?.message}`);
+      await redisCache.del(lockKey);
+      await redisCache.set(retryKey, retryCount + 1, 3600);
+    }
+  }
+}
+
+async function monitorPendingBondTpSlSells(sendNotification: SendNotificationFn): Promise<void> {
+  const pending = await prisma.bondTrade.findMany({
+    where: {
+      tpSlStatus: { in: ['tp_triggered', 'sl_triggered'] },
+      tpSlOrderId: { not: null },
+    },
+    include: {
+      user: { select: { telegramId: true, predexonUserId: true, polymarketProxyAddress: true } },
+    },
+  });
+
+  for (const trade of pending) {
+    if (!trade.tpSlOrderId || !trade.user.predexonUserId) continue;
+    try {
+      const order = await predexonGetOrder(trade.user.predexonUserId, trade.tpSlOrderId);
+
+      if (order.status === 'filled') {
+        await redisCache.del(`bond:tpsl_retry:${trade.id}`);
+        await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        if (trade.user.polymarketProxyAddress) {
+          invalidatePortfolioCache(trade.user.polymarketProxyAddress).catch(() => {});
+        }
+        logger.info(`[bond] TP/SL sell confirmed filled for trade ${trade.id}`);
+        continue;
+      }
+
+      if (order.status === 'cancelled' || order.status === 'expired') {
+        const retryKey = `bond:tpsl_retry:${trade.id}`;
+        const c = (await redisCache.get<number>(retryKey)) ?? 0;
+        if (c >= BOND_TPSL_MAX_RETRIES) {
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'awaiting_resolution', tpSlOrderId: null },
+          });
+          await redisCache.del(retryKey);
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        } else {
+          await redisCache.set(retryKey, c + 1, 3600);
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: null, tpSlOrderId: null },
+          });
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        }
+        continue;
+      }
+
+      // Still open — cancel + retry if stale (>90s)
+      const sellAt = await redisCache.get<number>(`bond:tpsl_sell_at:${trade.id}`);
+      const age = sellAt ? Date.now() - sellAt : 120_000;
+      if (age > 90_000) {
+        try { await predexonCancelOrder(trade.user.predexonUserId, trade.tpSlOrderId); } catch {}
+        const retryKey = `bond:tpsl_retry:${trade.id}`;
+        const c = (await redisCache.get<number>(retryKey)) ?? 0;
+        if (c >= BOND_TPSL_MAX_RETRIES) {
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'awaiting_resolution', tpSlOrderId: null },
+          });
+          await redisCache.del(retryKey);
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        } else {
+          await redisCache.set(retryKey, c + 1, 3600);
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: null, tpSlOrderId: null },
+          });
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        }
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('404')) {
+        const retryKey = `bond:tpsl_retry:${trade.id}`;
+        const c = (await redisCache.get<number>(retryKey)) ?? 0;
+        if (c >= BOND_TPSL_MAX_RETRIES) {
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'awaiting_resolution', tpSlOrderId: null },
+          });
+          await redisCache.del(retryKey);
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        } else {
+          await redisCache.set(retryKey, c + 1, 3600);
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: null, tpSlOrderId: null },
+          });
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+        }
+      }
+    }
+  }
+}
+
 // ─── Auto-Claim Resolved Positions ──────────────────────────────────────────
 
 let _redeemRunning = false;
@@ -662,9 +1022,14 @@ async function checkBondResolutions(sendNotification: SendNotificationFn): Promi
 }
 
 async function checkBondResolutionsInner(sendNotification: SendNotificationFn): Promise<void> {
-  // Find all filled bond trades (open positions that may have resolved)
+  // Find all filled bond trades (open positions that may have resolved).
+  // tpSlStatus='redeemed' means we've already auto-claimed it; everything else
+  // (null, *_triggered, awaiting_resolution, *_failed) is still claim-eligible.
   const filledTrades = await prisma.bondTrade.findMany({
-    where: { status: 'filled' },
+    where: {
+      status: 'filled',
+      OR: [{ tpSlStatus: null }, { tpSlStatus: { not: 'redeemed' } }],
+    },
     include: {
       user: {
         select: {
@@ -706,6 +1071,13 @@ async function checkBondResolutionsInner(sendNotification: SendNotificationFn): 
         if (locked) continue;
         await redisCache.set(lockKey, 1, 120);
 
+        // Cancel any pending TP/SL sell — market resolved, the sell can't fill
+        if (trade.tpSlOrderId && trade.user.predexonUserId) {
+          try {
+            await predexonCancelOrder(trade.user.predexonUserId, trade.tpSlOrderId);
+          } catch { /* may already be gone */ }
+        }
+
         try {
           const result = await manualRedeem(
             trade.user.encryptedPrivateKey,
@@ -717,8 +1089,12 @@ async function checkBondResolutionsInner(sendNotification: SendNotificationFn): 
           if (result.success) {
             await prisma.bondTrade.update({
               where: { id: trade.id },
-              data: { status: 'redeemed' },
+              data: { status: 'redeemed', tpSlStatus: 'redeemed', tpSlOrderId: null },
             });
+            await redisCache.del(`bond:tpsl_retry:${trade.id}`);
+            await redisCache.del(`bond:tpsl_sell_at:${trade.id}`);
+            await redisCache.del(`bond:tpsl_lock:${trade.id}`);
+            await redisCache.del(`bond:tpsl_mid404:${trade.id}`);
             if (trade.user?.polymarketProxyAddress) {
               invalidatePortfolioCache(trade.user.polymarketProxyAddress).catch(() => {});
             }
@@ -759,19 +1135,35 @@ async function checkBondResolutionsInner(sendNotification: SendNotificationFn): 
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let redeemInterval: ReturnType<typeof setInterval> | null = null;
+let tpSlInterval: ReturnType<typeof setInterval> | null = null;
 let _initialTimeout: ReturnType<typeof setTimeout> | null = null;
 let _sendNotification: SendNotificationFn | null = null;
 let _tickRunning = false;
+let _tpSlRunning = false;
 
 export function startBondMonitor(sendNotification: SendNotificationFn): void {
   if (monitorInterval) return;
   _sendNotification = sendNotification;
 
-  logger.info('[bond] Starting bond monitor (60s tick)');
+  logger.info('[bond] Starting bond monitor (60s tick + 15s TP/SL)');
   monitorInterval = setInterval(() => {
     if (_tickRunning) { logger.warn('[bond] Tick still running, skipping'); return; }
     bondTick().catch(err => logger.error(`[bond] Tick error: ${err?.message}`));
   }, 60_000);
+
+  // TP/SL + pending sell monitor every 15s
+  tpSlInterval = setInterval(async () => {
+    if (_tpSlRunning) return;
+    _tpSlRunning = true;
+    try {
+      await checkBondTpSl(sendNotification);
+      await monitorPendingBondTpSlSells(sendNotification);
+    } catch (err: any) {
+      logger.error(`[bond] TP/SL check error: ${err?.message}`);
+    } finally {
+      _tpSlRunning = false;
+    }
+  }, 15_000);
 
   // Auto-claim resolved positions every 5 minutes
   redeemInterval = setInterval(() => {
@@ -799,6 +1191,10 @@ export function stopBondMonitor(): void {
   if (redeemInterval) {
     clearInterval(redeemInterval);
     redeemInterval = null;
+  }
+  if (tpSlInterval) {
+    clearInterval(tpSlInterval);
+    tpSlInterval = null;
   }
   logger.info('[bond] Bond monitor stopped');
 }

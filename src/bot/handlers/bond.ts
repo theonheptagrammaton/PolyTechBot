@@ -72,6 +72,8 @@ interface BondEditState {
       | 'awaiting_interval' | 'awaiting_min_liq'
       | 'awaiting_min_vol' | 'awaiting_mkt_max'
       | 'awaiting_total_max' | 'awaiting_loss_limit'
+      | 'awaiting_tp_pct' | 'awaiting_sl_pct'
+      | 'awaiting_tp_price' | 'awaiting_sl_price'
       | 'awaiting_rename';
   stratId: string;
   timestamp: number;
@@ -1129,6 +1131,8 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
     `💸 ${t(lang, 'Per Market Max')}: ${fmtVal(strat.maxSpendPerMarket)}`,
     `💸 ${t(lang, 'Total Max')}: ${fmtVal(strat.maxSpendTotal)}`,
     `📅 ${t(lang, 'Max Daily Loss')}: ${fmtVal(strat.maxDailyLoss)}`,
+    `🏆 ${t(lang, 'Take Profit')}: ${strat.takeProfitPct != null ? `+${strat.takeProfitPct}%` : (strat.takeProfitPrice != null ? `${strat.takeProfitPrice}¢` : '–')}`,
+    `🛑 ${t(lang, 'Stop Loss')}: ${strat.stopLossPct != null ? `−${strat.stopLossPct}%` : (strat.stopLossPrice != null ? `${strat.stopLossPrice}¢` : '–')}`,
     `🔔 ${t(lang, 'Notifications')}: ${onOff(strat.notificationsEnabled)}`,
   ];
 
@@ -1171,6 +1175,16 @@ export async function handleBondManage(ctx: Context, stratId: string): Promise<v
     [
       Markup.button.callback(`📅 ${t(lang, 'Loss Limit')}`, `bpm_loss_${id}`),
       Markup.button.callback(`🔔 ${t(lang, 'Notify')}`, `bpm_notify_${id}`),
+    ],
+    [
+      Markup.button.callback(`🏆 ${t(lang, 'TP %')}`, `bpm_tppct_${id}`),
+      Markup.button.callback(`🏆 ${t(lang, 'TP ¢')}`, `bpm_tpprice_${id}`),
+      Markup.button.callback(`✕`, `bpm_tpclear_${id}`),
+    ],
+    [
+      Markup.button.callback(`🛑 ${t(lang, 'SL %')}`, `bpm_slpct_${id}`),
+      Markup.button.callback(`🛑 ${t(lang, 'SL ¢')}`, `bpm_slprice_${id}`),
+      Markup.button.callback(`✕`, `bpm_slclear_${id}`),
     ],
     [
       Markup.button.callback(`✏️ ${t(lang, 'Rename')}`, `bpm_rename_${id}`),
@@ -1252,6 +1266,29 @@ export async function handleManageEditPrompt(
   await sendHtml(ctx, prompt, Markup.inlineKeyboard([
     [Markup.button.callback(`← ${t(lang, 'Cancel')}`, `bond_task_${id}`)],
   ]));
+}
+
+// TP/SL clear handlers
+export async function handleManageClearTp(ctx: Context, id: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyBondOwnership(ctx, id);
+  if (!strat) return;
+  await prisma.bondStrategy.update({
+    where: { id },
+    data: { takeProfitPct: null, takeProfitPrice: null },
+  });
+  await handleBondManage(ctx, id);
+}
+
+export async function handleManageClearSl(ctx: Context, id: string): Promise<void> {
+  await ctx.answerCbQuery().catch(() => {});
+  const strat = await verifyBondOwnership(ctx, id);
+  if (!strat) return;
+  await prisma.bondStrategy.update({
+    where: { id },
+    data: { stopLossPct: null, stopLossPrice: null },
+  });
+  await handleBondManage(ctx, id);
 }
 
 // Delete
@@ -1428,6 +1465,50 @@ export async function handleBondEditInput(ctx: Context, text: string): Promise<b
           return true;
         }
         await prisma.bondStrategy.update({ where: { id }, data: { maxDailyLoss: num } });
+        break;
+      }
+      case 'awaiting_tp_pct': {
+        if (num == null || num <= 0 || num > 1000) {
+          await ctx.reply(t(lang, 'Enter a percentage between 0 and 1000.'));
+          return true;
+        }
+        await prisma.bondStrategy.update({
+          where: { id },
+          data: { takeProfitPct: num, takeProfitPrice: null },
+        });
+        break;
+      }
+      case 'awaiting_sl_pct': {
+        if (num == null || num <= 0 || num > 100) {
+          await ctx.reply(t(lang, 'Enter a percentage between 0 and 100.'));
+          return true;
+        }
+        await prisma.bondStrategy.update({
+          where: { id },
+          data: { stopLossPct: num, stopLossPrice: null },
+        });
+        break;
+      }
+      case 'awaiting_tp_price': {
+        if (num == null || num < 1 || num > 99) {
+          await ctx.reply(t(lang, 'Enter cents 1–99 (e.g. 95).'));
+          return true;
+        }
+        await prisma.bondStrategy.update({
+          where: { id },
+          data: { takeProfitPrice: num, takeProfitPct: null },
+        });
+        break;
+      }
+      case 'awaiting_sl_price': {
+        if (num == null || num < 1 || num > 99) {
+          await ctx.reply(t(lang, 'Enter cents 1–99 (e.g. 80).'));
+          return true;
+        }
+        await prisma.bondStrategy.update({
+          where: { id },
+          data: { stopLossPrice: num, stopLossPct: null },
+        });
         break;
       }
       case 'awaiting_rename': {

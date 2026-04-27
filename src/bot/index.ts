@@ -290,6 +290,8 @@ import {
   handleManageDelete as handleBondManageDelete,
   handleManageDeleteExecute as handleBondManageDeleteExec,
   handleManageRename as handleBondManageRename,
+  handleManageClearTp as handleBondManageClearTp,
+  handleManageClearSl as handleBondManageClearSl,
   bondAddState,
   bondEditState,
 } from './handlers/bond';
@@ -1337,6 +1339,26 @@ export class TelegramBot {
     this.bot.action(/^bpm_loss_(.+)$/, async (ctx) => {
       await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_loss_limit',
         `📅 <b>Max Daily Loss</b>\n\nEnter max daily loss in USD:`);
+    });
+
+    // Bond TP/SL — register clear handlers BEFORE the broader prefix-matchers
+    this.bot.action(/^bpm_tpclear_(.+)$/, async (ctx) => handleBondManageClearTp(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_slclear_(.+)$/, async (ctx) => handleBondManageClearSl(ctx, ctx.match[1]));
+    this.bot.action(/^bpm_tppct_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_tp_pct',
+        `🏆 <b>Take Profit %</b>\n\nSell when price rises N% above the fill price. Enter percent (e.g. 50):`);
+    });
+    this.bot.action(/^bpm_slpct_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_sl_pct',
+        `🛑 <b>Stop Loss %</b>\n\nSell when price drops N% below the fill price. Enter percent (e.g. 25):`);
+    });
+    this.bot.action(/^bpm_tpprice_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_tp_price',
+        `🏆 <b>Take Profit Price</b>\n\nSell when price reaches X¢. Enter cents 1–99 (e.g. 95):`);
+    });
+    this.bot.action(/^bpm_slprice_(.+)$/, async (ctx) => {
+      await handleBondManageEditPrompt(ctx, ctx.match[1], 'awaiting_sl_price',
+        `🛑 <b>Stop Loss Price</b>\n\nSell when price drops to X¢. Enter cents 1–99 (e.g. 80):`);
     });
 
     // Bond manage: rename / delete

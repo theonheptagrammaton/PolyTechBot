@@ -235,7 +235,6 @@ export async function handlePositionView(ctx: Context, idx: number): Promise<voi
             Markup.button.callback(t(lang, 'btn.sell'), `pos_sell_${idx}`),
           ],
           [slButton],
-          [Markup.button.callback(`📊 P&L`, `pos_pnl_${idx}`)],
           ...(viewMarketUrl ? [[Markup.button.url(t(lang, 'btn.viewOnPolymarket'), viewMarketUrl)]] : []),
           [Markup.button.callback(t(lang, 'btn.backToPositions'), 'portfolio_open_1')],
         ];

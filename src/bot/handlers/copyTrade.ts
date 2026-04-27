@@ -2,7 +2,67 @@ import { Context, Markup } from 'telegraf';
 import { prisma } from '../../database/prisma';
 import { logger } from '../../utils/logger';
 import { parseTraderAddress } from '../../services/copyTrade';
-import { getUserByTelegramId } from '../../services/user';
+import { getOrder as predexonGetOrder, cancelOrder as predexonCancelOrder } from '../../services/predexon';
+import { ensurePredexonUser, getUserByTelegramId } from '../../services/user';
+
+// ─── Helper: cancel open Predexon orders for a (set of) subscription(s) ────
+// Copy-trade BUYs in `limitMode` place GTC limit orders that may sit on the
+// book indefinitely. When a subscription is deleted we lose the link to those
+// orders (CopiedTrade.subscriptionId is set null on delete cascade), so we
+// cancel them upfront. Best-effort — errors are logged and swallowed.
+async function cancelOpenCopyOrders(userId: string, subIds: string[]): Promise<number> {
+  if (subIds.length === 0) return 0;
+
+  const trades = await prisma.copiedTrade.findMany({
+    where: {
+      userId,
+      subscriptionId: { in: subIds },
+      side: 'BUY',
+      orderID: { not: null },
+    },
+    select: { id: true, orderID: true },
+  });
+  if (trades.length === 0) return 0;
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true, telegramId: true, walletAddress: true, encryptedPrivateKey: true,
+      polymarketProxyAddress: true, predexonUserId: true,
+      encryptedApiKey: true, encryptedApiSecret: true, encryptedPassphrase: true,
+    },
+  });
+  if (!user) return 0;
+
+  let predexonUserId: string;
+  try {
+    predexonUserId = await ensurePredexonUser(user as any);
+  } catch (err: any) {
+    logger.warn(`[copy] cancelOpenCopyOrders: ensurePredexonUser failed for ${userId}: ${err?.message}`);
+    return 0;
+  }
+
+  let cancelled = 0;
+  for (const tr of trades) {
+    if (!tr.orderID) continue;
+    try {
+      const status = await predexonGetOrder(predexonUserId, tr.orderID);
+      if (status.status === 'open' || status.status === 'pending') {
+        await predexonCancelOrder(predexonUserId, tr.orderID);
+        cancelled++;
+      }
+    } catch (err: any) {
+      // 404/cancelled/expired = nothing to do
+      if (!err?.message?.includes('404')) {
+        logger.debug(`[copy] cancelOpenCopyOrders: ${tr.orderID} → ${err?.message}`);
+      }
+    }
+  }
+  if (cancelled > 0) {
+    logger.info(`[copy] Cancelled ${cancelled} open BUY limit order(s) before subscription delete (user=${userId})`);
+  }
+  return cancelled;
+}
 import { sendPage } from '../../utils/telegram';
 import { esc } from '../../utils/customEmoji';
 import { config } from '../../config';
@@ -1226,6 +1286,18 @@ export async function handleCopyDeleteAllExecute(ctx: Context): Promise<void> {
   const user = await getUserByTelegramId(telegramId);
   if (!user) return;
 
+  // Cancel any pending limitMode BUYs before the subscription FK→null cascade
+  // strips the link and leaves the orders orphaned on the book.
+  const subs = await prisma.copySubscription.findMany({
+    where: { userId: user.id },
+    select: { id: true },
+  });
+  if (subs.length > 0) {
+    await cancelOpenCopyOrders(user.id, subs.map(s => s.id)).catch(err =>
+      logger.warn(`[copy] delete-all: cancelOpenCopyOrders failed: ${err?.message}`)
+    );
+  }
+
   await prisma.copySubscription.deleteMany({ where: { userId: user.id } });
   await handleCopyList(ctx);
 }
@@ -1268,6 +1340,15 @@ export async function handleCopyRemoveExecute(ctx: Context, subId: string): Prom
   await ctx.answerCbQuery().catch(() => {});
 
   try {
+    const sub = await prisma.copySubscription.findUnique({
+      where: { id: subId },
+      select: { userId: true },
+    });
+    if (sub) {
+      await cancelOpenCopyOrders(sub.userId, [subId]).catch(err =>
+        logger.warn(`[copy] remove: cancelOpenCopyOrders failed: ${err?.message}`)
+      );
+    }
     await prisma.copySubscription.delete({ where: { id: subId } });
   } catch { /* ignore not found */ }
 
@@ -1728,6 +1809,15 @@ export async function handleManageDelete(ctx: Context, subId: string): Promise<v
 export async function handleManageDeleteExecute(ctx: Context, subId: string): Promise<void> {
   await ctx.answerCbQuery().catch(() => {});
   try {
+    const sub = await prisma.copySubscription.findUnique({
+      where: { id: subId },
+      select: { userId: true },
+    });
+    if (sub) {
+      await cancelOpenCopyOrders(sub.userId, [subId]).catch(err =>
+        logger.warn(`[copy] manage-delete: cancelOpenCopyOrders failed: ${err?.message}`)
+      );
+    }
     await prisma.copySubscription.delete({ where: { id: subId } });
   } catch { /* ignore */ }
   await handleCopyList(ctx);
