@@ -236,6 +236,7 @@ export async function handleWithdrawChain(ctx: Context, chain: string): Promise<
       `🟢 *${t(lang, 'withdraw.polygonTitle')}*\n\n` +
       `💵 *${t(lang, 'withdraw.available')}:* $${balancePoly} USDC\n` +
       `🌐 *${t(lang, 'withdraw.token')}:*\n\`${NATIVE_USDC.address}\`\n\n` +
+      `⚠️ _Your balance is currently in USDC.e (Bridged USDC). USDC.e cannot be deposited directly to centralized exchanges (Binance, Coinbase, etc.). You must bridge/swap to native USDC first._\n\n` +
       `📍 ${t(lang, 'withdraw.enterPolygonAddress')}`;
 
     const polyKeyboard = Markup.inlineKeyboard([

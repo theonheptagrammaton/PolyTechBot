@@ -203,7 +203,7 @@ export const en: Record<string, string> = {
   // ─── Withdraw ─────────────────────────────────────────────
   // Chain selection
   'withdraw.selectChain': '🏦 *Select Withdrawal Destination*\n\nChoose where you want to receive your funds:',
-  'withdraw.selectDestination': '🏦 *Select Withdrawal Destination*\n\nChoose where you want to receive your funds:',
+  'withdraw.selectDestination': '🏦 *Select Withdrawal Destination*\n\nChoose where you want to receive your funds:\n\n⚠️ _Your balance is currently in USDC.e (Bridged USDC). USDC.e cannot be deposited directly to centralized exchanges (Binance, Coinbase, etc.). You must bridge/swap to native USDC first._',
   'withdraw.chainPolygon': '🟢 Polygon',
   'withdraw.chainSolana': '🟣 Solana',
   'withdraw.chainEthereum': '🔵 Ethereum',

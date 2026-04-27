@@ -121,7 +121,8 @@ export async function handleWalletPage(ctx: Context): Promise<void> {
     }
 
     message += `${eUsdc} <b>${t(lang, 'Balance')}:</b> $${esc(balance)}\n`;
-    message += `💡 <b>${t(lang, 'Min deposit: $10 USDC')}</b>`;
+    message += `💡 <b>${t(lang, 'Min deposit: $10 USDC')}</b>\n\n`;
+    message += `⚠️ <i>Your balance is currently in USDC.e (Bridged USDC). USDC.e cannot be deposited directly to centralized exchanges (Binance, Coinbase, etc.). You must bridge/swap to native USDC first.</i>`;
 
     // Buttons: Profile · Portfolio · Refresh / Back · Withdraw / Main Menu
     const profileBtn = user.polymarketProxyAddress
