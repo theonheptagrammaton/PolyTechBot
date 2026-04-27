@@ -1821,7 +1821,11 @@ export async function executeCloseAllPositions(
 ): Promise<{ closed: number; redeemed: number; failed: number; errors: string[]; overflowPositions: CloseAllOverflowPosition[] }> {
   const allPositions = await getActivePositions(user.polymarketProxyAddress);
   const sellable   = allPositions.filter(pos => pos.size > 0 && !pos.redeemable);
-  const redeemable = allPositions.filter(pos => pos.size > 0 &&  pos.redeemable);
+  const redeemableAll = allPositions.filter(pos => pos.size > 0 && pos.redeemable);
+  const redeemable = redeemableAll.filter(pos => pos.currentValue > 0);
+  if (redeemable.length < redeemableAll.length) {
+    logger.info(`[positionTrade] closeAll: skipping ${redeemableAll.length - redeemable.length} losing redeemable position(s) (currentValue <= 0)`);
+  }
   let closed = 0;
   let redeemed = 0;
   let failed = 0;

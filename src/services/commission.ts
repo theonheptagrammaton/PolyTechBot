@@ -34,6 +34,13 @@ const NATIVE_USDC_ADDRESS = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Nat
 /** Platform commission rate: 1% */
 export const COMMISSION_RATE = 0.01;
 
+/** Retry delays for Predexon "Insufficient USDC balance" settlement race */
+const PREDEXON_COMMISSION_RETRY_DELAYS = [3_000, 6_000, 12_000];
+
+function isInsufficientBalanceError(error: any): boolean {
+  return (error?.message ?? String(error)).includes('Insufficient USDC balance');
+}
+
 // Gnosis Safe ABI — only what we need
 const GNOSIS_SAFE_ABI = [
   'function nonce() view returns (uint256)',
@@ -89,12 +96,30 @@ async function _transferCommissionPredexon(
 
   try {
     const { withdraw } = await import('./predexon');
-    const result = await withdraw(predexonUserId, {
-      venue: 'polymarket',
+    const withdrawParams = {
+      venue: 'polymarket' as const,
       amount: commissionUsdc.toFixed(6),
       destinationAddress: adminWallet,
       chain: 'polygon',
-    });
+    };
+
+    let result: Awaited<ReturnType<typeof withdraw>>;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        result = await withdraw(predexonUserId, withdrawParams);
+        break;
+      } catch (err: any) {
+        if (!isInsufficientBalanceError(err) || attempt >= PREDEXON_COMMISSION_RETRY_DELAYS.length) {
+          throw err;
+        }
+        const delay = PREDEXON_COMMISSION_RETRY_DELAYS[attempt];
+        logger.warn(
+          `[commission] Predexon withdraw insufficient balance (attempt ${attempt + 1}/${PREDEXON_COMMISSION_RETRY_DELAYS.length + 1}), ` +
+          `retrying in ${delay / 1000}s — $${commissionUsdc.toFixed(6)} for user ${predexonUserId}`
+        );
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
 
     logger.info(`[commission] Predexon commission $${commissionUsdc.toFixed(4)} → ${adminWallet.substring(0, 10)}... tx: ${result.transactionHash}`);
 
@@ -114,7 +139,11 @@ async function _transferCommissionPredexon(
 
     return { success: true, txHash: result.transactionHash };
   } catch (error: any) {
-    logger.error(`[commission] Predexon commission failed: ${error?.message ?? String(error)}`);
+    const retried = isInsufficientBalanceError(error);
+    logger.error(
+      `[commission] Predexon commission failed${retried ? ' (all retries exhausted)' : ''}: ` +
+      `$${commissionUsdc.toFixed(6)} for user ${predexonUserId} — ${error?.message ?? String(error)}`
+    );
     return { success: false };
   }
 }
