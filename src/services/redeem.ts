@@ -85,6 +85,40 @@ async function getOnChainTokenBalance(proxyAddress: string, tokenId: string): Pr
 }
 
 /**
+ * Pre-flight dry-run for NegRiskAdapter.redeemPositions via eth_call.
+ * Catches "subtraction overflow" before we waste a relayer tx with default 10M gas
+ * (Builder Relayer Client swallows estimateGas failures and submits anyway, leading
+ * to on-chain revert + STATE_FAILED — which our exception-based flip retry can't see).
+ *
+ * Returns:
+ *  - { ok: true } if the call would succeed on-chain
+ *  - { ok: false, isOverflow: true } if it reverts with SafeMath subtraction overflow
+ *    (caller should flip outcomeIndex and re-try)
+ *  - { ok: false, isOverflow: false, reason } for any other revert (caller proceeds anyway —
+ *    e.g. missing approve will be paired with approve in the multi-tx payload)
+ */
+async function dryRunNegRiskRedeem(
+  proxyAddress: string,
+  conditionId: string,
+  amounts: ethers.BigNumber[],
+): Promise<{ ok: boolean; isOverflow: boolean; reason?: string }> {
+  try {
+    const negAdapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ADAPTER_ABI, polygonProvider);
+    await Promise.race([
+      negAdapter.callStatic.redeemPositions(conditionId, amounts, { from: proxyAddress }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('dry-run timeout')), 10_000)
+      ),
+    ]);
+    return { ok: true, isOverflow: false };
+  } catch (err: any) {
+    const msg = (err?.error?.message || err?.reason || err?.message || '').toString();
+    const isOverflow = /subtraction overflow/i.test(msg) || /SafeMath/i.test(msg);
+    return { ok: false, isOverflow, reason: msg.slice(0, 200) };
+  }
+}
+
+/**
  * Verifies a transaction was actually mined and succeeded on-chain.
  * Returns true only if the receipt exists and status === 1 (success).
  */
@@ -275,6 +309,36 @@ async function redeemNegRisk(
       const amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
       amounts[effectiveOutcomeIndex] = currentBalance;
       amounts[1 - effectiveOutcomeIndex] = currentOpposite;
+
+      // Pre-flight on-chain dry-run: catch SafeMath overflow before we burn a real
+      // relayer tx. Builder Relayer Client swallows estimateGas failures and submits
+      // with default 10M gas — that mines and reverts on-chain (STATE_FAILED), which
+      // doesn't throw, so the catch-block flip retry below can't see it. Simulating
+      // via eth_call turns the failure into a signal we can act on synchronously.
+      {
+        const dry = await dryRunNegRiskRedeem(proxyAddress, conditionId, amounts);
+        if (!dry.ok && dry.isOverflow) {
+          if (outcomeFlipped) {
+            logger.warn(`[redeem] ${txType}/NegRiskAdapter pre-flight: SafeMath overflow persists after flip (balance=${currentBalance.toString()}). Marking overflow dedup key.`);
+            await redisCache.set(overflowKey(proxyAddress, conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+            return { success: false, error: 'NegRiskAdapter subtraction overflow persists after outcome flip — needs manual review' };
+          }
+          effectiveOutcomeIndex = 1 - effectiveOutcomeIndex;
+          outcomeFlipped = true;
+          amounts[effectiveOutcomeIndex] = currentBalance;
+          amounts[1 - effectiveOutcomeIndex] = currentOpposite;
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter pre-flight overflow — flipped outcomeIndex to ${effectiveOutcomeIndex} and re-simulating`);
+          const dry2 = await dryRunNegRiskRedeem(proxyAddress, conditionId, amounts);
+          if (!dry2.ok && dry2.isOverflow) {
+            logger.warn(`[redeem] ${txType}/NegRiskAdapter pre-flight: SafeMath overflow persists after flip. Marking overflow dedup key.`);
+            await redisCache.set(overflowKey(proxyAddress, conditionId), true, OVERFLOW_TTL_SECONDS).catch(() => {});
+            return { success: false, error: 'NegRiskAdapter subtraction overflow persists after outcome flip — needs manual review' };
+          }
+          logger.info(`[redeem] ${txType}/NegRiskAdapter pre-flight after flip: ${dry2.ok ? 'passes' : `non-overflow revert (${dry2.reason}) — proceeding (approve will be batched)`}`);
+        } else if (!dry.ok) {
+          logger.info(`[redeem] ${txType}/NegRiskAdapter pre-flight: non-overflow revert (${dry.reason}) — proceeding (approve will be batched)`);
+        }
+      }
 
       const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
       const redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
