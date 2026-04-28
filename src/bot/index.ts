@@ -1752,30 +1752,54 @@ export class TelegramBot {
   }
 
   private setupErrorHandling(): void {
+    // Telegram returns 403 when the user has blocked the bot or deleted their
+    // account. This is normal user behavior, not a real error — treat as info.
+    const isBotBlockedError = (err: any): boolean =>
+      err?.response?.error_code === 403 ||
+      err?.code === 403 ||
+      /bot was blocked by the user|user is deactivated|chat not found/i.test(err?.message ?? '');
+
     // Handle bot errors
-    this.bot.catch((error: any, ctx: Context) => {
-      // Ignore "message is not modified" errors - these are expected
-      // when users click the same button multiple times
-      if (error.message?.includes('message is not modified')) {
+    this.bot.catch(async (error: any, ctx: Context) => {
+      // Ignore "message is not modified" — expected when users click same button
+      if (error?.message?.includes('message is not modified')) {
         logger.debug('Ignored: message is not modified (user clicked same button)');
+        return;
+      }
+
+      // Bot blocked / chat unreachable — log quietly, skip reply
+      if (isBotBlockedError(error)) {
+        logger.info(`[bot] Skipping reply — chat ${ctx.from?.id ?? 'unknown'} unreachable (${error?.response?.description ?? error?.message})`);
         return;
       }
 
       logger.error('Bot error:', error);
 
       try {
-        ctx.reply(
+        await ctx.reply(
           '❌ An unexpected error occurred. Please try again later.\n\n' +
           'If the problem persists, please contact support.'
         );
-      } catch (replyError) {
-        logger.error('Error sending error message to user:', replyError);
+      } catch (replyError: any) {
+        if (isBotBlockedError(replyError)) {
+          logger.info(`[bot] Could not send error reply — chat ${ctx.from?.id ?? 'unknown'} unreachable`);
+        } else {
+          logger.warn(`Error sending error message to user: ${replyError?.message ?? replyError}`);
+        }
       }
     });
 
     // Handle process errors
-    process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    process.on('unhandledRejection', (reason: any, promise) => {
+      if (isBotBlockedError(reason)) {
+        const chatId = reason?.on?.payload?.chat_id ?? 'unknown';
+        logger.info(`[bot] Unhandled 403 (chat ${chatId} unreachable) — ${reason?.response?.description ?? ''}`);
+        return;
+      }
+      logger.error('Unhandled Rejection', {
+        reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason,
+        promise: String(promise),
+      });
     });
 
     process.on('uncaughtException', (error) => {
