@@ -1340,15 +1340,15 @@ async function processStrategy(
         anyExecuted = true;
 
         // Handle failure
+        const errMsgLower = (result.errorMsg ?? '').toLowerCase();
+        const isFatalForRound = !result.success && (
+          errMsgLower.includes('not enough balance') ||
+          errMsgLower.includes('insufficient') ||
+          errMsgLower.includes('balance too low') ||
+          errMsgLower.includes('no proxy address') ||
+          errMsgLower.includes('trade amount too small')
+        );
         if (!result.success) {
-          const msg = (result.errorMsg ?? '').toLowerCase();
-          const isFatalForRound =
-            msg.includes('not enough balance') ||
-            msg.includes('insufficient') ||
-            msg.includes('balance too low') ||
-            msg.includes('no proxy address') ||
-            msg.includes('trade amount too small');
-
           if (isFatalForRound) {
             const failCountKey = `updown:balance_fail:${strat.id}`;
             const prevFails = (await redisCache.get<number>(failCountKey)) ?? 0;
@@ -1361,6 +1361,8 @@ async function processStrategy(
                 data: { isPaused: true },
               });
               await redisCache.del(failCountKey);
+              // Clear cooldown so the user reliably sees the pause notif
+              await redisCache.del(`updown:balance_notif:${strat.id}`);
               logger.warn(`[updown] Strategy ${strat.id} auto-paused after ${failCount} consecutive balance failures`);
               if (strat.notificationsEnabled) {
                 sendNotification({
@@ -1375,14 +1377,34 @@ async function processStrategy(
               return; // Stop processing this strategy entirely
             }
             logger.warn(`[updown] Strategy ${strat.id} balance failure ${failCount}/3, skipping rest of round`);
+
+            // 24h cooldown'lı bakiye yetersiz bildirimi — kullanıcıya tek mesajla
+            // "balance fail oldu" der, ardışık fail'larda spam etmez.
+            if (strat.notificationsEnabled) {
+              const notifCooldownKey = `updown:balance_notif:${strat.id}`;
+              const recentlyNotified = await redisCache.get<number>(notifCooldownKey);
+              if (!recentlyNotified) {
+                await redisCache.set(notifCooldownKey, 1, 24 * 60 * 60);
+                sendNotification({
+                  chatId: strat.user.telegramId,
+                  text:
+                    `💸 <b>AutoPilot — Insufficient Balance</b>\n\n` +
+                    `${coinEmoji(coin)} ${strat.label || `${coin} ${tf}`}\n` +
+                    `Failure: ${failCount}/3 (auto-pause at 3)\n\n` +
+                    `Top up your wallet to keep this strategy running.\n` +
+                    `<i>Further notifications muted for 24h.</i>`,
+                });
+              }
+            }
           } else {
             await redisCache.del(dirDedupKey);
           }
           anyFailed = true;
         } else {
-          // Success — reset failure counter
+          // Success — reset failure counter and notif cooldown
           const failCountKey = `updown:balance_fail:${strat.id}`;
           await redisCache.del(failCountKey);
+          await redisCache.del(`updown:balance_notif:${strat.id}`);
         }
 
         // Send notification
@@ -1401,7 +1423,9 @@ async function processStrategy(
                 `Amount: $${result.actualAmount?.toFixed(2) ?? strat.amount.toFixed(2)}\n` +
                 `Round: ${strat.roundsExecuted + 1}/${strat.maxRounds}`,
             });
-          } else {
+          } else if (!isFatalForRound) {
+            // Non-balance failure — keep the existing generic notif (no cooldown,
+            // these are rare: illiquid market, RPC errors, etc.)
             sendNotification({
               chatId: strat.user.telegramId,
               text:
@@ -1410,6 +1434,7 @@ async function processStrategy(
                 `Error: ${result.errorMsg?.slice(0, 100) ?? 'unknown'}`,
             });
           }
+          // Balance failure notifs are handled above with 24h cooldown
         }
       }
 
