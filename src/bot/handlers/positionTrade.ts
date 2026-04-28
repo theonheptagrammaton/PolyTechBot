@@ -1879,15 +1879,25 @@ export async function executeCloseAllPositions(
         } else {
           logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
           failed++;
-          const isOverflow = !!result.error && /only redeemable via Predexon/i.test(result.error);
+          const errMsg = result.error || '';
+          const isOverflow = /only redeemable via Predexon/i.test(errMsg);
+          const isRateLimit = /rate.?limit/i.test(errMsg);
+          const isUnresolved = /condition not yet resolved|oracle pending/i.test(errMsg);
           // Only track "fresh" overflows (not cached) so we don't spam admin on repeat attempts
-          if (isOverflow && !/\(cached\)/i.test(result.error!)) {
+          if (isOverflow && !/\(cached\)/i.test(errMsg)) {
             overflowPositions.push({ outcome: pos.outcome, title: pos.title, conditionId: pos.conditionId });
           }
-          const friendlyErr = isOverflow
-            ? 'needs manual support — please contact the team'
-            : (result.error || 'unknown error');
-          errors.push(`${pos.outcome}: redeem failed — ${friendlyErr}`);
+          let friendlyErr: string;
+          if (isOverflow) {
+            friendlyErr = 'needs manual support — please contact the team';
+          } else if (isRateLimit) {
+            friendlyErr = 'try again in a few minutes (relayer busy)';
+          } else if (isUnresolved) {
+            friendlyErr = 'market not finalized yet — try again later';
+          } else {
+            friendlyErr = 'redemption temporarily failed — try again later';
+          }
+          errors.push(`${pos.outcome}: ${friendlyErr}`);
           // If rate-limited, stop trying more redeems
           if (result.error && /rate.?limit/i.test(result.error)) {
             logger.warn(`[positionTrade] closeAll: relayer rate-limited, stopping redeem loop`);

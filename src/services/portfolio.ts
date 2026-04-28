@@ -248,7 +248,7 @@ export async function getOpenOrders(
   predexonUserId?: string
 ): Promise<OpenOrder[]> {
   if (!predexonUserId) {
-    logger.warn('getOpenOrders called without predexonUserId');
+    logger.debug('getOpenOrders skipped: user has no predexonUserId yet (not onboarded)');
     return [];
   }
   try {
@@ -475,7 +475,7 @@ export async function getBalance(
     if (cached !== null && cached !== undefined) return cached;
 
     if (!predexonUserId) {
-      logger.warn('getBalance called without predexonUserId');
+      logger.debug('getBalance skipped: user has no predexonUserId yet (not onboarded)');
       return '0.00';
     }
 

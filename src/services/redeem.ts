@@ -221,17 +221,31 @@ async function redeemPosition(params: {
 
   // If Data API says negativeRisk, try NegRiskAdapter first, then direct CTF as fallback
   if (params.position.negativeRisk) {
+    let adapterResult: { success: boolean; txHash?: string; error?: string } | null = null;
     const overflowCached = await checkOverflowDedup(params.proxyAddress, params.position.conditionId);
     if (!overflowCached) {
-      const adapterResult = await redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
+      adapterResult = await redeemNegRisk(privateKey, params.proxyAddress, params.position, onChainBalance, params.skipThrottle);
       if (adapterResult.success) return adapterResult;
     }
-    // NegRiskAdapter failed (overflow) — try direct CTF.redeemPositions(wcol, 0x0, ...) as fallback
+
+    // If overflow dedup was set (either pre-existing or just set by redeemNegRisk),
+    // skip DirectCTF entirely. For NegRisk positions, DirectCTF with WCOL collateral
+    // computes a different positionId than what the user holds, so the tx confirms
+    // but burns 0 tokens — wasting on-chain transactions and relayer quota.
+    if (await checkOverflowDedup(params.proxyAddress, params.position.conditionId)) {
+      return adapterResult ?? {
+        success: false,
+        error: 'NegRiskAdapter overflow — only redeemable via Predexon API (cached)',
+      };
+    }
+
+    // NegRiskAdapter failed without setting overflow dedup (e.g., transient relayer error).
+    // Try direct CTF.redeemPositions(wcol, 0x0, ...) as fallback.
     const directBalance = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
     if (directBalance.isZero()) {
       return { success: true, txHash: undefined };
     }
-    logger.info(`[redeem] NegRiskAdapter failed, trying direct CTF path for conditionId=${params.position.conditionId.slice(0, 18)}...`);
+    logger.info(`[redeem] NegRiskAdapter failed (no overflow dedup), trying direct CTF path for conditionId=${params.position.conditionId.slice(0, 18)}...`);
     return redeemNegRiskDirect(privateKey, params.proxyAddress, params.position, params.skipThrottle);
   }
 
@@ -253,7 +267,14 @@ async function redeemPosition(params: {
   const negResult = await redeemNegRisk(privateKey, params.proxyAddress, params.position, balanceNow, params.skipThrottle);
   if (negResult.success) return negResult;
 
-  // All adapter paths failed — try direct CTF path as last resort
+  // If NegRiskAdapter set overflow dedup, DirectCTF will also fail (positionId mismatch).
+  // Skip the wasted on-chain tx and return the adapter result.
+  if (await checkOverflowDedup(params.proxyAddress, params.position.conditionId)) {
+    logger.info(`[redeem] NegRiskAdapter set overflow dedup — skipping DirectCTF fallback`);
+    return negResult;
+  }
+
+  // All adapter paths failed without overflow dedup — try direct CTF as last resort
   const directBalance = await getOnChainTokenBalance(params.proxyAddress, params.position.asset);
   if (!directBalance.isZero()) {
     logger.info(`[redeem] All adapter paths failed, trying direct CTF path`);
@@ -584,8 +605,13 @@ async function redeemNegRiskDirect(
       // Verify position tokens were burned
       const balanceAfter = await getOnChainTokenBalance(proxyAddress, position.asset);
       if (!balanceAfter.isZero()) {
-        logger.warn(`[redeem] ${txType}/DirectCTF: position balance still ${balanceAfter.toString()} after redeem`);
-        continue;
+        // Tx confirmed status=1 but balance unchanged → positionId mismatch.
+        // CTF.redeemPositions(WCOL, 0x0, ...) computed positionIds that don't match
+        // the user's actual position asset id. PROXY txType will fail identically.
+        // Mark overflow dedup and abort to avoid wasting another on-chain tx.
+        logger.warn(`[redeem] ${txType}/DirectCTF: tx confirmed but position balance unchanged (${balanceAfter.toString()}) — positionId mismatch, DirectCTF cannot redeem this position`);
+        await setOverflowDedup(proxyAddress, conditionId, 'direct CTF positionId mismatch (tx confirmed but burned 0)');
+        return { success: false, error: 'Direct CTF cannot redeem this position (positionId mismatch) — only redeemable via Predexon API' };
       }
 
       logger.info(`[redeem] ${txType}/DirectCTF: position tokens redeemed, now converting wcol → USDC.e`);
@@ -642,7 +668,7 @@ async function redeemNegRiskDirect(
     }
   }
 
-  return { success: false, error: 'Direct CTF redemption failed with all tx types' };
+  return { success: false, error: 'Redemption temporarily failed — please try again later' };
 }
 
 /**
