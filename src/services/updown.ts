@@ -79,19 +79,6 @@ type SendNotificationFn = (n: NotificationPayload) => void;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/** Parse "mm:ss" to total seconds */
-function parseTimeToSeconds(t: string): number {
-  const parts = t.split(':');
-  return (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
-}
-
-/** Get elapsed seconds since round start */
-function elapsedSeconds(startDate: string): number {
-  const start = new Date(startDate).getTime();
-  if (isNaN(start)) return -1;
-  return Math.floor((Date.now() - start) / 1000);
-}
-
 /** Find the best matching market for a strategy */
 function findMatchingMarket(
   coin: string,
@@ -1258,17 +1245,14 @@ async function processStrategy(
       const alreadyTraded = await redisCache.get<number>(dedupKey);
       if (alreadyTraded) continue;
 
-      // 4. Entry window check (new: entryWindowSecs)
+      // 4. Entry window check
+      // entryWindowSecs:
+      //   - number → only fire in last N seconds of candle
+      //   - null   → "Anytime" (truly anytime in the candle); legacy timeRangeStart/End is ignored
+      //              because mm:ss format caps at 99:59 (=5999s) and can't represent 4-Hour candles
       if (strat.entryWindowSecs != null) {
         const remaining = getRemainingSeconds(market);
         if (remaining > strat.entryWindowSecs) continue;
-      } else {
-        // Legacy: use timeRangeStart/End
-        const elapsed = elapsedSeconds(market.startDate);
-        if (elapsed < 0) continue;
-        const startSec = parseTimeToSeconds(strat.timeRangeStart);
-        const endSec = parseTimeToSeconds(strat.timeRangeEnd);
-        if (elapsed < startSec || elapsed > endSec) continue;
       }
 
       // 5. Price range check — fetch LIVE CLOB midpoints (REQUIRED).
@@ -1325,6 +1309,13 @@ async function processStrategy(
       // All triggers passed — determine directions
       const directions = getDirections(strat.direction, liveUpPrice, strat.upPriceMin, strat.upPriceMax);
 
+      // Track per-direction outcomes so we only set the outer market dedup
+      // when every requested direction was successfully handled. Otherwise
+      // a partial failure in 'both' mode would block the surviving side
+      // from retrying on the next tick.
+      let anyFailed = false;
+      let anyExecuted = false;
+
       for (const dir of directions) {
         const dirDedupKey = `updown:dedup:${strat.id}:${market.conditionId}:${dir}`;
         const alreadyDir = await redisCache.get<number>(dirDedupKey);
@@ -1332,9 +1323,9 @@ async function processStrategy(
 
         logger.info(`[updown] Strategy ${strat.id} triggered on ${market.conditionId} [${coin}/${tf}/${dir}]`);
 
-        // Set dedup BEFORE execution
-        await redisCache.set(dedupKey, 1, 1200); // 20min
-        await redisCache.set(dirDedupKey, 1, 1200);
+        // Per-direction dedup BEFORE execute. Outer market dedup is set later
+        // (post-loop) only if every direction was handled cleanly.
+        await redisCache.set(dirDedupKey, 1, 1200); // 20min
 
         // Build a strategy-like object with the current direction for execution
         const execStrat = { ...strat, coin, direction: dir };
@@ -1345,6 +1336,8 @@ async function processStrategy(
           execStrat,
           sendNotification,
         );
+
+        anyExecuted = true;
 
         // Handle failure
         if (!result.success) {
@@ -1383,9 +1376,9 @@ async function processStrategy(
             }
             logger.warn(`[updown] Strategy ${strat.id} balance failure ${failCount}/3, skipping rest of round`);
           } else {
-            await redisCache.del(dedupKey);
             await redisCache.del(dirDedupKey);
           }
+          anyFailed = true;
         } else {
           // Success — reset failure counter
           const failCountKey = `updown:balance_fail:${strat.id}`;
@@ -1418,6 +1411,13 @@ async function processStrategy(
             });
           }
         }
+      }
+
+      // Outer market dedup is set ONLY when every requested direction was
+      // handled successfully. A non-fatal failure leaves it unset so the
+      // surviving sides can retry on the next tick.
+      if (anyExecuted && !anyFailed) {
+        await redisCache.set(dedupKey, 1, 1200);
       }
     }
   }

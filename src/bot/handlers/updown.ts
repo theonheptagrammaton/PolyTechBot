@@ -239,18 +239,24 @@ export async function handleUpDownList(ctx: Context): Promise<void> {
 
   const buttons: any[][] = [];
 
+  buttons.push([
+    Markup.button.callback(`+ New`, 'ud_start_add'),
+    Markup.button.callback(`🗑 Remove`, 'ud_remove_prompt'),
+  ]);
+
   if (strategies.length > 0) {
     buttons.push([
+      Markup.button.callback(`▶️ Start All`, 'ud_start_all'),
+      Markup.button.callback(`⏹ Stop All`, 'ud_stop_all'),
+    ]);
+    buttons.push([
       Markup.button.callback(`📋 Activity`, 'ud_history_10'),
+      Markup.button.callback(`🗑 Delete All`, 'ud_del_all_cfm'),
     ]);
   }
 
   buttons.push([
-    Markup.button.callback(`+ New`, 'ud_start_add'),
     Markup.button.callback(`🔄 Refresh`, 'updown_list'),
-  ]);
-
-  buttons.push([
     Markup.button.callback(`← Back`, 'auto_strategies'),
   ]);
 

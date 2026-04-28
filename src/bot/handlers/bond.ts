@@ -163,20 +163,21 @@ export async function handleBondList(ctx: Context): Promise<void> {
       const filledTrades = s.trades || [];
       const totalSpent = filledTrades.reduce((sum, t) => sum + t.amount, 0);
       const tradeCount = filledTrades.length;
-      const pnlEstimate = filledTrades.reduce((sum, t) => {
+      // Optimistic upper bound: assumes every position resolves in user's favor (shares × $1).
+      // Actual realized PnL would require tpSlStatus + redemption tracking.
+      const maxPotential = filledTrades.reduce((sum, t) => {
         return sum + (t.price > 0 ? t.amount * (1 / t.price - 1) : 0);
       }, 0);
-      const pnlStr = pnlEstimate >= 0 ? `+$${pnlEstimate.toFixed(2)}` : `-$${Math.abs(pnlEstimate).toFixed(2)}`;
+      const potentialStr = maxPotential >= 0 ? `+$${maxPotential.toFixed(2)}` : `-$${Math.abs(maxPotential).toFixed(2)}`;
 
-      // Today's trades
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayTrades = filledTrades.filter(t => new Date(t.createdAt) >= today).length;
+      // Today's trades — use UTC date boundary so it matches the daily-budget redis keys
+      const todayUtc = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+      const todayTrades = filledTrades.filter(t => new Date(t.createdAt).toISOString().slice(0, 10) === todayUtc).length;
 
       lines.push(
         `${i + 1}. ${statusDot} 🎯 <b>${esc(name)}</b>\n` +
         `├ ${t(lang, 'Mode')}: 📊 ${s.minProbability.toFixed(1)}%–${s.maxProbability.toFixed(1)}% · <b>$${s.fixedAmount.toFixed(2)}</b>\n` +
-        `├ ${t(lang, 'Est. PnL')}: <b>${pnlStr}</b> · ${t(lang, 'Trades Filled')}: ${tradeCount}\n` +
+        `├ ${t(lang, 'Max Potential')}: <b>${potentialStr}</b> · ${t(lang, 'Trades Filled')}: ${tradeCount}\n` +
         `├ ${t(lang, "Today's Trades")}: <b>${todayTrades}</b>\n` +
         `└ ${t(lang, 'Spent')}: <b>$${totalSpent.toFixed(2)}</b>`
       );

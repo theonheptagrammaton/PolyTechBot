@@ -1301,7 +1301,7 @@ async function bondTickInner(): Promise<void> {
               `🔗 <b>Bond Trade Filled</b>\n\n` +
               `📊 ${market.question.slice(0, 100)}\n` +
               `🎯 ${result.outcome} @ ${pct}%\n` +
-              `💵 $${execResult.actualAmount?.toFixed(2) ?? strategy_amount(strat)}\n` +
+              `💵 $${(execResult.actualAmount ?? strat.fixedAmount).toFixed(2)}\n` +
               `📋 Strategy: ${strat.label || strat.id.slice(0, 8)}`,
           });
         } else if (!execResult.success && _sendNotification && strat.notificationsEnabled) {
@@ -1323,6 +1323,3 @@ async function bondTickInner(): Promise<void> {
   }
 }
 
-function strategy_amount(s: { fixedAmount: number }): string {
-  return s.fixedAmount.toFixed(2);
-}
