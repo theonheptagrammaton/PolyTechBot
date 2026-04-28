@@ -318,64 +318,49 @@ async function redeemNegRisk(
       const approveData = ctfIface.encodeFunctionData('setApprovalForAll', [NEG_RISK_ADAPTER, true]);
       let redeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
 
-      // Pre-simulate to catch overflow BEFORE wasting gas on a doomed transaction.
-      let adapterApproved = false;
-      try {
-        const ctfCheck = new ethers.Contract(CTF_ADDRESS, CTF_ABI, polygonProvider);
-        adapterApproved = await ctfCheck.isApprovedForAll(proxyAddress, NEG_RISK_ADAPTER);
-      } catch { /* proceed without check */ }
-
-      if (adapterApproved) {
-        // Approval is set — pre-simulation will correctly detect overflow.
-        // If overflow detected, try flipped outcomeIndex (Data API may be wrong).
-        let simPassed = false;
+      // PRE-FLIGHT: always run gas estimation against the proxy wallet to catch
+      // SafeMath subtraction overflow BEFORE the relayer submits a doomed tx.
+      // Builder-relayer-client falls back to default gas (10M) on est failure
+      // and submits anyway, so we MUST gate this ourselves.
+      // Approval state doesn't matter — overflow surfaces independently of allowance.
+      const isOverflow = (e: any): boolean => {
+        const chain = `${e?.message ?? ''} ${e?.data ?? ''} ${e?.error?.message ?? ''} ${e?.cause?.message ?? ''}`;
+        return /subtraction overflow/i.test(chain);
+      };
+      const probe = async (data: string): Promise<{ ok: boolean; overflow: boolean }> => {
         try {
-          await polygonProvider.call({ from: proxyAddress, to: NEG_RISK_ADAPTER, data: redeemData });
-          simPassed = true;
-        } catch (simErr: any) {
-          const simMsg = simErr?.message ?? '';
-          if (/subtraction overflow/i.test(simMsg) && !outcomeFlipped) {
-            // Data API outcomeIndex may be wrong — flip and re-simulate (free, no gas)
-            effectiveOutcomeIndex = 1 - effectiveOutcomeIndex;
-            outcomeFlipped = true;
-            amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
-            amounts[effectiveOutcomeIndex] = currentBalance;
-            amounts[1 - effectiveOutcomeIndex] = currentOpposite;
-            const flippedRedeemData = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
-            try {
-              await polygonProvider.call({ from: proxyAddress, to: NEG_RISK_ADAPTER, data: flippedRedeemData });
-              redeemData = flippedRedeemData;
-              simPassed = true;
-              logger.info(`[redeem] ${txType}/NegRiskAdapter: pre-sim overflow fixed by flipping outcomeIndex to ${effectiveOutcomeIndex}`);
-            } catch (flipErr: any) {
-              if (/subtraction overflow/i.test(flipErr?.message ?? '')) {
-                logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-sim overflow on both orientations — aborting`);
-                await setOverflowDedup(proxyAddress, position.conditionId, 'pre-sim overflow both orientations');
-                return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
-              }
-              // Non-overflow error on flipped — proceed with flipped data
-              redeemData = flippedRedeemData;
-              simPassed = true;
-            }
-          } else if (/subtraction overflow/i.test(simMsg)) {
-            // Already flipped, still overflow
-            logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-sim overflow (already flipped) — aborting`);
-            await setOverflowDedup(proxyAddress, position.conditionId, 'pre-sim subtraction overflow');
-            return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
-          } else {
-            // Non-overflow simulation error — proceed, might work on-chain
-            simPassed = true;
-            logger.debug?.(`[redeem] ${txType}/NegRiskAdapter: pre-simulation non-fatal error: ${simMsg.slice(0, 120)}`);
-          }
+          await polygonProvider.estimateGas({ from: proxyAddress, to: NEG_RISK_ADAPTER, data });
+          return { ok: true, overflow: false };
+        } catch (e: any) {
+          if (isOverflow(e)) return { ok: false, overflow: true };
+          // Non-overflow revert (e.g., approval not yet set) — relayer's bundled
+          // approve+redeem may still succeed on-chain; let it through.
+          return { ok: false, overflow: false };
         }
-      } else {
-        // Approval not set — heuristic check.
-        if (currentOpposite.isZero() && currentBalance.gt(0)) {
-          logger.warn(`[redeem] ${txType}/NegRiskAdapter: opposite side balance is 0, approval not set — aborting`);
-          await setOverflowDedup(proxyAddress, position.conditionId, 'opposite-balance-zero heuristic');
+      };
+
+      let probeResult = await probe(redeemData);
+      if (probeResult.overflow && !outcomeFlipped) {
+        // Data API outcomeIndex may be inverted — flip and re-probe (free)
+        effectiveOutcomeIndex = 1 - effectiveOutcomeIndex;
+        outcomeFlipped = true;
+        amounts = [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
+        amounts[effectiveOutcomeIndex] = currentBalance;
+        amounts[1 - effectiveOutcomeIndex] = currentOpposite;
+        const flipped = negIface.encodeFunctionData('redeemPositions', [conditionId, amounts]);
+        const flipResult = await probe(flipped);
+        if (flipResult.overflow) {
+          logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-flight overflow on BOTH outcome orientations — aborting (balance=${currentBalance.toString()}, opposite=${currentOpposite.toString()})`);
+          await setOverflowDedup(proxyAddress, position.conditionId, 'pre-flight overflow both orientations');
           return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
         }
-        logger.info(`[redeem] ${txType}/NegRiskAdapter: CTF approval not set — proceeding with bundled tx`);
+        redeemData = flipped;
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: pre-flight overflow fixed by flipping outcomeIndex to ${effectiveOutcomeIndex}`);
+      } else if (probeResult.overflow) {
+        // Already flipped this session and still overflows — unrecoverable via Builder
+        logger.warn(`[redeem] ${txType}/NegRiskAdapter: pre-flight overflow (already flipped) — aborting`);
+        await setOverflowDedup(proxyAddress, position.conditionId, 'pre-flight subtraction overflow');
+        return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API' };
       }
 
       const txPayload = [
@@ -519,7 +504,9 @@ async function redeemNegRiskDirect(
     return { success: false, error: 'Relayer rate-limited' };
   }
 
-  // Pre-simulate CTF.redeemPositions(wcol, 0x0, conditionId, [1,2])
+  // Pre-flight CTF.redeemPositions(wcol, 0x0, conditionId, [1,2])
+  // Use estimateGas (not just eth_call) — it's what the relayer does, and surfaces
+  // the same revert reasons the relayer would hit on-chain.
   const redeemData = ctfIface.encodeFunctionData('redeemPositions', [
     WCOL_ADDRESS,
     ethers.constants.HashZero,
@@ -528,14 +515,20 @@ async function redeemNegRiskDirect(
   ]);
 
   try {
-    await polygonProvider.call({ from: proxyAddress, to: CTF_ADDRESS, data: redeemData });
+    await polygonProvider.estimateGas({ from: proxyAddress, to: CTF_ADDRESS, data: redeemData });
   } catch (simErr: any) {
+    const chain = `${simErr?.message ?? ''} ${simErr?.data ?? ''} ${simErr?.error?.message ?? ''} ${simErr?.cause?.message ?? ''}`;
+    if (/subtraction overflow/i.test(chain)) {
+      logger.warn(`[redeem] Direct CTF pre-flight: subtraction overflow — unrecoverable via Builder, setting overflow dedup`);
+      await setOverflowDedup(proxyAddress, conditionId, 'direct CTF pre-flight overflow');
+      return { success: false, error: 'Direct CTF subtraction overflow — only redeemable via Predexon API' };
+    }
     const msg = simErr?.message ?? '';
-    logger.warn(`[redeem] Direct CTF pre-sim failed: ${msg.slice(0, 150)}`);
-    return { success: false, error: `Direct CTF redemption simulation failed: ${msg.slice(0, 80)}` };
+    logger.warn(`[redeem] Direct CTF pre-flight failed (non-overflow): ${msg.slice(0, 150)}`);
+    return { success: false, error: `Direct CTF redemption pre-flight failed: ${msg.slice(0, 80)}` };
   }
 
-  logger.info(`[redeem] Direct CTF path: pre-sim passed for conditionId=${conditionId.slice(0, 18)}...`);
+  logger.info(`[redeem] Direct CTF path: pre-flight passed for conditionId=${conditionId.slice(0, 18)}...`);
 
   // Read current wcol balance (so we can withdraw exactly what we gain)
   const wcolContract = new ethers.Contract(WCOL_ADDRESS, ['function balanceOf(address) view returns (uint256)'], polygonProvider);
@@ -561,10 +554,31 @@ async function redeemNegRiskDirect(
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('confirm timeout')), 60_000)),
       ]);
 
+      // STATE_FAILED — relayer submitted but tx reverted on-chain. If balance
+      // didn't drop, redeem is unrecoverable via Builder; don't waste another tx
+      // type attempt.
+      if (!result) {
+        const balanceAfterFail = await getOnChainTokenBalance(proxyAddress, position.asset);
+        if (balanceAfterFail.isZero()) {
+          logger.info(`[redeem] ${txType}/DirectCTF: balance is now 0 after STATE_FAILED — already redeemed`);
+          return { success: true };
+        }
+        logger.warn(`[redeem] ${txType}/DirectCTF: STATE_FAILED with non-zero balance — marking overflow dedup`);
+        await setOverflowDedup(proxyAddress, conditionId, 'direct CTF STATE_FAILED');
+        return { success: false, error: 'Direct CTF redeem failed on-chain — only redeemable via Predexon API' };
+      }
+
       const txHash = result?.transactionHash;
       if (txHash && !(await verifyTxOnChain(txHash))) {
-        logger.warn(`[redeem] ${txType}/DirectCTF: redeem tx reverted`);
-        continue;
+        // Tx mined but reverted — same conclusion as STATE_FAILED above
+        const balanceAfterRevert = await getOnChainTokenBalance(proxyAddress, position.asset);
+        if (balanceAfterRevert.isZero()) {
+          logger.info(`[redeem] ${txType}/DirectCTF: balance is now 0 after revert — already redeemed`);
+          return { success: true, txHash };
+        }
+        logger.warn(`[redeem] ${txType}/DirectCTF: tx ${txHash} reverted with non-zero balance — marking overflow dedup`);
+        await setOverflowDedup(proxyAddress, conditionId, 'direct CTF tx reverted on-chain');
+        return { success: false, error: 'Direct CTF redeem reverted on-chain — only redeemable via Predexon API' };
       }
 
       // Verify position tokens were burned
@@ -611,6 +625,18 @@ async function redeemNegRiskDirect(
     } catch (error: any) {
       const errMsg = error?.message ?? '';
       if (isRateLimitError(errMsg)) { await setRelayerBackoff(errMsg); break; }
+      // Detect overflow / on-chain failure in error chain — abort instead of retrying next txType
+      const errChain = `${errMsg} ${error?.cause?.message ?? ''} ${error?.cause?.cause?.message ?? ''}`;
+      if (/subtraction overflow/i.test(errChain) || /failed onchain/i.test(errMsg)) {
+        const balanceAfterErr = await getOnChainTokenBalance(proxyAddress, position.asset);
+        if (balanceAfterErr.isZero()) {
+          logger.info(`[redeem] ${txType}/DirectCTF: balance is now 0 after error — position was redeemed`);
+          return { success: true };
+        }
+        logger.warn(`[redeem] ${txType}/DirectCTF: subtraction overflow / on-chain failure — marking overflow dedup`);
+        await setOverflowDedup(proxyAddress, conditionId, 'direct CTF error chain overflow');
+        return { success: false, error: 'Direct CTF redeem failed on-chain — only redeemable via Predexon API' };
+      }
       logger.warn(`[redeem] ${txType}/DirectCTF failed: ${errMsg.slice(0, 200)}`);
       continue;
     }
@@ -653,22 +679,23 @@ async function redeemStandard(
     const txPayload = [{ to: CTF_ADDRESS, data: callData, value: '0' }];
     const tokenLabel = collateralToken === USDC_E_POLYGON ? 'USDC.e' : 'native USDC';
 
-    // Pre-simulate the CTF.redeemPositions call to catch subtraction overflow
-    // before the relayer wastes gas on a doomed transaction.
+    // Pre-flight: gas estimation against the proxy wallet — this is what the relayer
+    // does internally. If it reverts with subtraction overflow, abort BEFORE the
+    // relayer falls back to default gas (10M) and submits a doomed tx anyway.
     try {
-      await polygonProvider.call({
+      await polygonProvider.estimateGas({
         from: proxyAddress,
         to: CTF_ADDRESS,
         data: callData,
       });
     } catch (simErr: any) {
-      const simMsg = simErr?.message ?? '';
-      if (/subtraction overflow/i.test(simMsg)) {
-        logger.warn(`[redeem] ${tokenLabel}: pre-simulation reverted with subtraction overflow — skipping this collateral`);
-        await setOverflowDedup(proxyAddress, conditionId, 'standard CTF pre-sim overflow');
+      const chain = `${simErr?.message ?? ''} ${simErr?.data ?? ''} ${simErr?.error?.message ?? ''} ${simErr?.cause?.message ?? ''}`;
+      if (/subtraction overflow/i.test(chain)) {
+        logger.warn(`[redeem] ${tokenLabel}: pre-flight subtraction overflow — skipping this collateral`);
+        await setOverflowDedup(proxyAddress, conditionId, 'standard CTF pre-flight overflow');
         return { success: false, error: 'SafeMath subtraction overflow — only redeemable via Predexon API' };
       }
-      // Other errors (e.g., wrong collateral) are expected — continue to next collateral
+      // Other errors (e.g., wrong collateral, payout-not-set) are expected — continue
     }
 
     for (const txType of [RelayerTxType.SAFE, RelayerTxType.PROXY]) {
@@ -710,7 +737,18 @@ async function redeemStandard(
             const txInfo = await response.getTransaction();
             logger.warn(`[redeem] ${txType}/${tokenLabel} STATE_FAILED: ${JSON.stringify(txInfo).slice(0, 400)}`);
           } catch { /* ignore */ }
-          logger.warn(`[redeem] ${txType}/${tokenLabel}: relay tx failed (STATE_FAILED)`);
+          // If balance is unchanged, this collateral is wrong — skip the rest of
+          // its txType attempts and move on to the next collateral.
+          const balanceAfterFail = await getOnChainTokenBalance(proxyAddress, position.asset);
+          if (balanceAfterFail.isZero()) {
+            logger.info(`[redeem] ${txType}/${tokenLabel}: balance is now 0 after STATE_FAILED — already redeemed`);
+            return { success: true };
+          }
+          if (balanceAfterFail.gte(onChainBalance)) {
+            logger.warn(`[redeem] ${txType}/${tokenLabel}: STATE_FAILED with unchanged balance — skipping remaining txTypes for this collateral`);
+            break;
+          }
+          logger.warn(`[redeem] ${txType}/${tokenLabel}: relay tx failed (STATE_FAILED) but balance changed — trying next txType`);
           continue;
         }
 
@@ -722,6 +760,16 @@ async function redeemStandard(
 
         const verified = await verifyTxOnChain(txHash);
         if (!verified) {
+          // Same logic as STATE_FAILED — don't waste another txType if balance is unchanged
+          const balanceAfterRevert = await getOnChainTokenBalance(proxyAddress, position.asset);
+          if (balanceAfterRevert.isZero()) {
+            logger.info(`[redeem] ${txType}/${tokenLabel}: balance is now 0 after revert — already redeemed`);
+            return { success: true, txHash };
+          }
+          if (balanceAfterRevert.gte(onChainBalance)) {
+            logger.warn(`[redeem] ${txType}/${tokenLabel}: tx ${txHash} reverted with unchanged balance — skipping remaining txTypes for this collateral`);
+            break;
+          }
           logger.warn(`[redeem] ${txType}/${tokenLabel}: relayer returned tx ${txHash} but on-chain verification FAILED`);
           continue;
         }
@@ -786,7 +834,44 @@ function findPredexonRedeemable(
 }
 
 /**
+ * Calls the Predexon redeem API for a given tokenId and verifies the result.
+ * Returns success on a verified on-chain tx hash, false otherwise.
+ */
+async function tryPredexonRedeem(
+  predexonUserId: string,
+  tokenId: string,
+  venue: string,
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    const result = await redeemPositionPredexon(predexonUserId, tokenId, venue || 'polymarket');
+    logger.info(`[redeem] Predexon redeem response: ${JSON.stringify(result).slice(0, 400)}`);
+
+    if (result.transactionHash) {
+      const verified = await verifyTxOnChain(result.transactionHash);
+      if (verified) {
+        logger.info(`[redeem] Predexon redeem ${result.status === 'completed' ? 'completed' : `status=${result.status} but verified`}: amountRedeemed=${result.amountRedeemed} sizeRedeemed=${result.sizeRedeemed} result=${result.result}`);
+        return { success: true, txHash: result.transactionHash };
+      }
+      logger.warn(`[redeem] Predexon returned tx ${result.transactionHash} (status=${result.status}) but on-chain verification FAILED`);
+      return { success: false, error: `Predexon tx ${result.transactionHash} not verified on-chain` };
+    }
+
+    if (result.status === 'completed') {
+      // Completed without a tx hash usually means "nothing to redeem" — treat as success
+      logger.info(`[redeem] Predexon redeem completed with no tx hash (probably already redeemed)`);
+      return { success: true };
+    }
+
+    return { success: false, error: `Predexon redeem returned status=${result.status} with no transactionHash` };
+  } catch (err: any) {
+    return { success: false, error: `Predexon redeem call failed: ${err?.message ?? 'unknown'}` };
+  }
+}
+
+/**
  * Attempts redemption via Predexon API first (no relayer quota), falls back to Builder Relayer.
+ * If Builder Relayer hits subtraction overflow, retries Predexon as last resort even
+ * if it didn't initially advertise the position as claimable.
  */
 async function redeemSingle(params: {
   encryptedPrivateKey: string;
@@ -795,6 +880,8 @@ async function redeemSingle(params: {
   predexonUserId?: string;
   skipThrottle?: boolean;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  let predexonTokenIdMatch: { tokenId: string; venue: string } | undefined;
+
   if (params.predexonUserId) {
     try {
       const predexonPositions = await getPositions(params.predexonUserId, 'polymarket');
@@ -813,31 +900,18 @@ async function redeemSingle(params: {
         `[redeem] Looking for asset=${params.position.asset} or conditionId=${params.position.conditionId}`
       );
       const { match, idMatches } = findPredexonRedeemable(params.position, predexonPositions);
+      // Remember any id-match (even non-claimable) so we can retry Predexon if Builder fails
+      const anyIdMatch = match ?? idMatches[0];
+      if (anyIdMatch?.tokenId) {
+        predexonTokenIdMatch = { tokenId: anyIdMatch.tokenId, venue: anyIdMatch.venue || 'polymarket' };
+      }
+
       if (match?.tokenId) {
         const matchedBy = normId(match.tokenId) === normId(params.position.asset) ? 'tokenId' : 'marketIdentifier';
         logger.info(`[redeem] Using Predexon API for tokenId=${match.tokenId} venue=${match.venue} status=${match.status} result=${match.result ?? '-'} (matched by ${matchedBy})`);
-        const result = await redeemPositionPredexon(params.predexonUserId, match.tokenId, match.venue || 'polymarket');
-        logger.info(`[redeem] Predexon redeem response: ${JSON.stringify(result).slice(0, 400)}`);
-
-        if (result.status === 'completed' && result.transactionHash) {
-          // Verify the transaction actually succeeded on-chain
-          const verified = await verifyTxOnChain(result.transactionHash);
-          if (verified) {
-            logger.info(`[redeem] Predexon redeem completed: amountRedeemed=${result.amountRedeemed} sizeRedeemed=${result.sizeRedeemed} result=${result.result}`);
-            return { success: true, txHash: result.transactionHash };
-          }
-          logger.warn(`[redeem] Predexon returned tx ${result.transactionHash} but on-chain verification FAILED`);
-        } else if (result.transactionHash) {
-          // Has tx hash but status is not 'completed'
-          const verified = await verifyTxOnChain(result.transactionHash);
-          if (verified) {
-            logger.info(`[redeem] Predexon redeem status=${result.status} but tx verified on-chain`);
-            return { success: true, txHash: result.transactionHash };
-          }
-          logger.warn(`[redeem] Predexon returned tx ${result.transactionHash} with status=${result.status}, on-chain verification FAILED`);
-        } else {
-          logger.warn(`[redeem] Predexon redeem returned status=${result.status} with no transactionHash`);
-        }
+        const predexonResult = await tryPredexonRedeem(params.predexonUserId, match.tokenId, match.venue || 'polymarket');
+        if (predexonResult.success) return predexonResult;
+        logger.warn(`[redeem] Predexon primary attempt failed: ${predexonResult.error}`);
       } else if (idMatches.length > 0) {
         const statuses = idMatches.map(p => `${p.status}${p.result ? '/' + p.result : ''}`).join(',');
         logger.info(`[redeem] Predexon has position by id but not claimable (statuses=${statuses}), falling back to relayer`);
@@ -849,12 +923,31 @@ async function redeemSingle(params: {
     }
   }
 
-  // Before falling back to Builder Relayer, check if this position is overflow-blocked
+  // If a previous attempt already proved this position is overflow-blocked on Builder,
+  // try Predexon (claimable or not) as last resort before giving up.
   if (await checkOverflowDedup(params.proxyAddress, params.position.conditionId)) {
+    if (params.predexonUserId && predexonTokenIdMatch) {
+      logger.info(`[redeem] Builder overflow-cached for ${params.position.conditionId.slice(0, 18)}... — retrying Predexon as fallback (tokenId=${predexonTokenIdMatch.tokenId})`);
+      const fallback = await tryPredexonRedeem(params.predexonUserId, predexonTokenIdMatch.tokenId, predexonTokenIdMatch.venue);
+      if (fallback.success) return fallback;
+      logger.warn(`[redeem] Predexon overflow-fallback failed: ${fallback.error}`);
+    }
     return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API (cached)' };
   }
 
-  return redeemPosition(params);
+  const builderResult = await redeemPosition(params);
+  if (builderResult.success) return builderResult;
+
+  // Builder failed with overflow → try Predexon one more time (force-claim, ignoring claimable filter)
+  const overflowFailure = !!builderResult.error && /subtraction overflow|only redeemable via Predexon|reverted on-chain|failed on-chain/i.test(builderResult.error);
+  if (overflowFailure && params.predexonUserId && predexonTokenIdMatch) {
+    logger.info(`[redeem] Builder overflow → retrying Predexon as last resort (tokenId=${predexonTokenIdMatch.tokenId})`);
+    const fallback = await tryPredexonRedeem(params.predexonUserId, predexonTokenIdMatch.tokenId, predexonTokenIdMatch.venue);
+    if (fallback.success) return fallback;
+    logger.warn(`[redeem] Predexon last-resort failed: ${fallback.error}`);
+  }
+
+  return builderResult;
 }
 
 /**
