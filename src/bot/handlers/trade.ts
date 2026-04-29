@@ -12,7 +12,7 @@ import { fetchProfilePhoto } from '../../utils/telegram';
 import { getUserByTelegramId, ensurePredexonUser } from '../../services/user';
 import { enableTrading } from '../../services/deposit';
 import { prisma } from '../../database/prisma';
-import { placeOrder } from '../../services/predexon';
+import { placeOrder, getOrder as predexonGetOrder } from '../../services/predexon';
 import { t, Locale } from '../../i18n';
 
 function getLang(user: any): Locale {
@@ -1559,15 +1559,15 @@ async function executeLimitTrade(
     const commissionAmt = parseFloat((amount * COMMISSION_RATE).toFixed(6));
     const tradeAmount   = parseFloat((amount - commissionAmt).toFixed(6));
 
-    // Snap limit price to tick size
+    // Snap limit price to tick size (price must land exactly on a tick — venues reject off-tick prices silently)
     const tick     = Math.max(parseFloat(tickSize), 0.001);
     const decimals = tickSize.includes('.') ? tickSize.split('.')[1].length : 2;
     const snappedPrice = parseFloat(
       Math.min(Math.round(limitPrice / tick) * tick, 0.99).toFixed(decimals)
     );
 
-    // Shares = tradeAmount / snappedPrice
-    const sharesToBuy = parseFloat((tradeAmount / snappedPrice).toFixed(4));
+    // Shares: floor to 2 decimals (Polymarket convention; 4dp can be silently truncated/rejected)
+    const sharesToBuy = Math.floor((tradeAmount / snappedPrice) * 100) / 100;
 
     if (sharesToBuy < 0.01) {
       await ctx.editMessageText(t(lang, 'limit.amountTooSmall')).catch(() => {});
@@ -1595,6 +1595,28 @@ async function executeLimitTrade(
     if (!orderResp.orderId) {
       const errMsg = (orderResp as any).error || (orderResp as any).message || 'Order rejected by exchange';
       throw new Error(errMsg);
+    }
+
+    // ── Verify the order actually landed on the venue (Predexon may return an orderId
+    //    even when the order failed to post to Polymarket's CLOB — silent ghost orders) ──
+    const acceptedStatuses = new Set(['open', 'live', 'pending', 'filled', 'partially_filled']);
+    let confirmedStatus: string = String(orderResp.status ?? 'unknown').toLowerCase();
+    if (!acceptedStatuses.has(confirmedStatus)) {
+      // Re-check after a brief delay — some venues report pending → open within 1–2s
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        const recheck = await predexonGetOrder(predexonUserId, orderResp.orderId);
+        confirmedStatus = String(recheck.status ?? 'unknown').toLowerCase();
+        logger.info(`[limit] Recheck status for ${orderResp.orderId}: ${confirmedStatus}`);
+      } catch (rcErr: any) {
+        logger.warn(`[limit] Recheck failed for ${orderResp.orderId}: ${rcErr?.message}`);
+      }
+      if (!acceptedStatuses.has(confirmedStatus)) {
+        throw new Error(
+          `Order did not reach the order book (Predexon status: ${confirmedStatus}). ` +
+          `This usually means the venue rejected the price/size or the builder credentials are misconfigured.`
+        );
+      }
     }
 
     // Commission transfer (fire-and-forget) — same pattern as market orders

@@ -215,12 +215,14 @@ export async function placeOrder(
   userId: string,
   order: PredexonOrder,
 ): Promise<PredexonOrderResponse> {
+  logger.info(`[predexon] placeOrder request: ${JSON.stringify(order)}`);
+
   const raw: any = await predexonFetch<any>(
     `${TRADE_URL()}/api/users/${userId}/orders`,
     { method: 'POST', body: JSON.stringify(order) },
   );
 
-  logger.debug(`[predexon] placeOrder raw response keys: ${Object.keys(raw ?? {}).join(', ')}`);
+  logger.info(`[predexon] placeOrder response: ${JSON.stringify(raw).slice(0, 800)}`);
 
   // Normalize — API may use orderId, order_id, or id
   return {
