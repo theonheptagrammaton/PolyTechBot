@@ -389,22 +389,12 @@ async function executeCopyOrder(
         return { status: 'skipped', errorMsg: 'sell size too small' };
       }
 
-      // SELL via Predexon — slippage-protected limit order
-      // (Polymarket CLOB only supports limit orders; 'market' type may be rejected)
-      // Fetch live CLOB midpoint to avoid stale-price sells
-      let copySellMid: number | null = null;
-      try {
-        const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${tokenId}`, { signal: AbortSignal.timeout(5_000) });
-        if (midResp.ok) { const d = await midResp.json(); const m = parseFloat(d?.mid); if (!isNaN(m) && m > 0) copySellMid = m; }
-      } catch {}
-      const sellBasePrice = copySellMid ?? trade.price;
-      const minSellPrice = Math.max(parseFloat((sellBasePrice * (1 - slippageMult)).toFixed(4)), 0.01);
+      // SELL via Predexon — true market SELL (FAK at venue). size = shares to sell.
       const orderResp = await predexonPlaceOrder(predexonUserId, {
         venue: 'polymarket',
         tokenId,
         side: 'sell',
-        type: 'limit',
-        price: String(minSellPrice),
+        type: 'market',
         size: String(size),
       });
 
@@ -416,22 +406,19 @@ async function executeCopyOrder(
         return { status: 'failed', errorMsg: errMsg };
       }
 
-      // Verify fill — cancel unfilled orders to prevent share locking
-      const { getOrder: getOrd, cancelOrder: cancelOrd } = await import('./predexon');
+      // Verify fill — market orders fill at venue immediately, but Predexon may return before status syncs
+      const { getOrder: getOrd } = await import('./predexon');
       let copyFillStatus = orderResp.status;
       let copyFilled = parseFloat(orderResp.sizeMatched || '0');
       if (copyFillStatus !== 'filled' && copyFilled < size * 0.95) {
-        for (let a = 1; a <= 4; a++) {
-          await new Promise(r => setTimeout(r, 1500));
+        for (let a = 1; a <= 3; a++) {
+          await new Promise(r => setTimeout(r, 1000));
           try {
             const os = await getOrd(predexonUserId, orderResp.orderId);
             copyFillStatus = os.status; copyFilled = parseFloat(os.sizeMatched || '0');
-            if (copyFillStatus === 'filled' || copyFilled >= size * 0.95) break;
+            if (copyFillStatus === 'filled' || copyFillStatus === 'cancelled' || copyFillStatus === 'expired') break;
           } catch {}
         }
-      }
-      if (copyFillStatus !== 'filled' && copyFillStatus !== 'cancelled') {
-        try { await cancelOrd(predexonUserId, orderResp.orderId); } catch {}
       }
       if (copyFilled <= 0) {
         return { status: 'failed', errorMsg: 'sell order not filled — market may be illiquid' };

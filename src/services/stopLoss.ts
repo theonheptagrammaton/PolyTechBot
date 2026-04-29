@@ -174,19 +174,12 @@ async function tick(): Promise<void> {
           continue;
         }
 
-        // Polymarket CLOB only supports limit orders for sells — 'market' type is rejected.
-        // Use aggressive limit price (current price minus slippage) to fill immediately.
-        const slippagePct = user.slippageTolerance ?? 5.0;
-        const limitSellPrice = Math.max(
-          parseFloat((currentPrice * (1 - slippagePct / 100)).toFixed(4)),
-          0.01,
-        );
+        // True market SELL — Predexon converts to FAK at the venue. size = shares to sell.
         const orderResp = await predexonPlaceOrder(predexonUserId, {
           venue: 'polymarket',
           tokenId: sl.assetId,
           side: 'sell',
-          type: 'limit',
-          price: String(limitSellPrice),
+          type: 'market',
           size: String(cleanSize),
         });
 
@@ -196,34 +189,31 @@ async function tick(): Promise<void> {
           throw new Error(errMsg);
         }
 
-        // ── Verify fill — don't assume orderId means filled ──
-        const { getOrder: predexonGetOrder, cancelOrder: predexonCancelOrder } = await import('./predexon');
+        // ── Verify fill — Predexon may return before status syncs, so poll briefly ──
+        const { getOrder: predexonGetOrder } = await import('./predexon');
         let slFinalStatus = orderResp.status;
         let slFilledSize = parseFloat(orderResp.sizeMatched || '0');
 
         if (slFinalStatus !== 'filled' && slFilledSize < cleanSize * 0.95) {
-          for (let att = 1; att <= 5; att++) {
-            await new Promise(r => setTimeout(r, 1500));
+          for (let att = 1; att <= 3; att++) {
+            await new Promise(r => setTimeout(r, 1000));
             try {
               const os = await predexonGetOrder(predexonUserId, orderResp.orderId);
               slFinalStatus = os.status;
               slFilledSize = parseFloat(os.sizeMatched || '0');
-              if (slFinalStatus === 'filled' || slFilledSize >= cleanSize * 0.95) break;
+              if (slFinalStatus === 'filled' || slFinalStatus === 'cancelled' || slFinalStatus === 'expired') break;
             } catch {}
           }
-        }
-
-        // Cancel unfilled remainder
-        if (slFinalStatus !== 'filled' && slFinalStatus !== 'cancelled') {
-          try { await predexonCancelOrder(predexonUserId, orderResp.orderId); } catch {}
         }
 
         if (slFilledSize <= 0) {
           throw new Error(`Stop loss sell not filled (order ${orderResp.orderId})`);
         }
 
-        // Commission: ONLY on actually filled amount
-        const commissionUsdc = limitSellPrice * slFilledSize * COMMISSION_RATE;
+        // Commission: on actually filled amount, valued at response price (fallback to trigger midpoint)
+        const respPrice = parseFloat(String(orderResp.price ?? '0'));
+        const fillPriceForFee = !isNaN(respPrice) && respPrice > 0 ? respPrice : currentPrice;
+        const commissionUsdc = fillPriceForFee * slFilledSize * COMMISSION_RATE;
         transferCommission(
           user.encryptedPrivateKey,
           user.polymarketProxyAddress!,

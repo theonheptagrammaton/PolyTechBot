@@ -1652,7 +1652,7 @@ async function executePositionOrder(
 ): Promise<{ orderID: string; sizeMatched?: number }> {
   // Predexon handles approvals, balance refresh, and order signing automatically
   const { ensurePredexonUser } = await import('../../services/user');
-  const { placeOrder: predexonPlaceOrder, getOrder: predexonGetOrder, cancelOrder: predexonCancelOrder } = await import('../../services/predexon');
+  const { placeOrder: predexonPlaceOrder, getOrder: predexonGetOrder } = await import('../../services/predexon');
 
   const predexonUserId = await ensurePredexonUser(user);
 
@@ -1663,8 +1663,7 @@ async function executePositionOrder(
   const cleanPrice = parseFloat(price.toFixed(4));
 
   if (action === 'sell') {
-    // ── CRITICAL: Fetch LIVE CLOB midpoint — never sell at stale cached price ──
-    const slippagePct = user.slippageTolerance ?? 1.0;
+    // ── Fetch LIVE CLOB midpoint for commission calc + as a sanity check ──
     let liveMidpoint: number | null = null;
     try {
       const midResp = await fetch(`https://clob.polymarket.com/midpoint?token_id=${assetId}`, {
@@ -1683,12 +1682,9 @@ async function executePositionOrder(
       throw new Error('Could not fetch live market price — sell blocked to protect your position. Please try again.');
     }
 
-    // Polymarket CLOB only supports limit orders for sells — 'market' type is rejected.
-    // Use a limit sell at the LIVE midpoint minus slippage to execute immediately.
-    const limitSellPrice = Math.max(parseFloat((liveMidpoint * (1 - slippagePct / 100)).toFixed(4)), 0.01);
-
+    // True market SELL — Predexon converts to FAK at the venue. size = shares to sell.
     logger.info(
-      `[positionTrade] Predexon limit SELL: ${cleanSize} shares (raw=${size}) @ ${limitSellPrice} (liveMid=${liveMidpoint}, slippage=${slippagePct}%, stalePrice=${cleanPrice}) assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
+      `[positionTrade] Predexon market SELL: ${cleanSize} shares (raw=${size}) liveMid=${liveMidpoint} stalePrice=${cleanPrice} assetId=${assetId.substring(0, 16)}... negRisk=${negRisk}`
     );
 
     let sellOrderResponse;
@@ -1697,8 +1693,7 @@ async function executePositionOrder(
         venue: 'polymarket',
         tokenId: assetId,
         side: 'sell',
-        type: 'limit',
-        price: String(limitSellPrice),
+        type: 'market',
         size: String(cleanSize),
       });
     } catch (err: any) {
@@ -1710,34 +1705,24 @@ async function executePositionOrder(
       throw classifyOrderError(new Error(errMsg), 'sell');
     }
 
-    // ── CRITICAL: Verify the order actually FILLED — orderId alone does NOT mean filled ──
+    // ── Verify fill — market orders fill (or partial-fill) at the venue immediately,
+    // but Predexon may return before status syncs, so poll briefly. ──
     const orderId = sellOrderResponse.orderId;
     let finalStatus = sellOrderResponse.status;
     let finalSizeMatched = parseFloat(sellOrderResponse.sizeMatched || '0');
 
-    // Poll for fill if not immediately filled (up to 5 attempts, 1.5s apart = max ~7.5s)
     if (finalStatus !== 'filled' && finalSizeMatched < cleanSize * 0.95) {
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        await new Promise(r => setTimeout(r, 1500));
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await new Promise(r => setTimeout(r, 1000));
         try {
           const orderStatus = await predexonGetOrder(predexonUserId, orderId);
           finalStatus = orderStatus.status;
           finalSizeMatched = parseFloat(orderStatus.sizeMatched || '0');
           logger.info(`[positionTrade] Sell order poll #${attempt}: status=${finalStatus} sizeMatched=${finalSizeMatched}/${cleanSize}`);
-          if (finalStatus === 'filled' || finalSizeMatched >= cleanSize * 0.95) break;
+          if (finalStatus === 'filled' || finalStatus === 'cancelled' || finalStatus === 'expired') break;
         } catch (pollErr: any) {
           logger.warn(`[positionTrade] Sell order poll #${attempt} failed: ${pollErr?.message}`);
         }
-      }
-    }
-
-    // Cancel any unfilled remainder to prevent shares from being locked on the order book
-    if (finalStatus !== 'filled' && finalStatus !== 'cancelled') {
-      try {
-        await predexonCancelOrder(predexonUserId, orderId);
-        logger.info(`[positionTrade] Cancelled unfilled sell order ${orderId} (filled=${finalSizeMatched}/${cleanSize})`);
-      } catch (cancelErr: any) {
-        logger.warn(`[positionTrade] Failed to cancel unfilled sell order ${orderId}: ${cancelErr?.message}`);
       }
     }
 
@@ -1746,8 +1731,10 @@ async function executePositionOrder(
       throw new Error('Sell order was not filled — the market may be illiquid or the price has moved. Your shares have NOT been sold. Please try again.');
     }
 
-    // ── Commission: ONLY after confirmed fill, and ONLY on the filled amount ──
-    const sellCommissionUsdc = limitSellPrice * finalSizeMatched * COMMISSION_RATE;
+    // ── Commission: on actually filled amount, valued at the response fill price (fallback to live midpoint) ──
+    const respPrice = parseFloat(String(sellOrderResponse.price ?? '0'));
+    const fillPriceForFee = !isNaN(respPrice) && respPrice > 0 ? respPrice : liveMidpoint;
+    const sellCommissionUsdc = fillPriceForFee * finalSizeMatched * COMMISSION_RATE;
     transferCommission(user.encryptedPrivateKey, user.polymarketProxyAddress!, sellCommissionUsdc, user.id, user.predexonUserId ?? undefined)
       .catch((feeErr) => {
         logger.warn('[positionTrade] Commission transfer after sell failed (non-fatal):', feeErr);

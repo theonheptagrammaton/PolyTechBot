@@ -447,92 +447,55 @@ export async function executeBondOrder(
       return { success: false, errorMsg: 'CLOB midpoint unavailable — blocked to prevent stale-price trade' };
     }
 
-    // Place BUY order — use limit order with slippage-derived price if slippage is set,
-    // otherwise fall back to market order.
-    // Slippage is stored as a percentage (e.g. 5 = 5%), convert to decimal for Polymarket prices (0–1).
-    const slippagePct = strategy.slippage;
-    const slippageDecimal = slippagePct / 100; // e.g. 5% → 0.05
-    const useLimit = slippagePct > 0 && livePrice > 0;
-
-    let orderResp: any;
-    if (useLimit) {
-      // Convert to limit order: buy at live CLOB price + slippage tolerance
-      const limitPrice = Math.min(livePrice + slippageDecimal, 0.99);
-      if (limitPrice <= 0) return { success: false, errorMsg: 'invalid limit price (≤0)' };
-      const size = String(Math.floor((tradeAmount / limitPrice) * 100) / 100);
-      orderResp = await predexonPlaceOrder(predexonUserId, {
-        venue: 'polymarket',
-        tokenId,
-        side: 'buy',
-        type: 'limit',
-        price: String(limitPrice),
-        size,
-      });
-    } else {
-      orderResp = await predexonPlaceOrder(predexonUserId, {
-        venue: 'polymarket',
-        tokenId,
-        side: 'buy',
-        type: 'market',
-        amount: String(tradeAmount),
-      });
-    }
+    // True market BUY — Predexon converts to FAK at the venue. amount = USD to spend.
+    const orderResp: any = await predexonPlaceOrder(predexonUserId, {
+      venue: 'polymarket',
+      tokenId,
+      side: 'buy',
+      type: 'market',
+      amount: String(tradeAmount),
+    });
 
     if (!orderResp.orderId) {
       const errMsg = (orderResp as any).error || (orderResp as any).message || 'order rejected';
       return { success: false, errorMsg: errMsg };
     }
 
-    // For limit orders, poll for fill status (up to 5 attempts, 2s apart) since
-    // they may not fill immediately even though we set price above market.
+    // Defensive poll — market BUYs fill at venue immediately, but Predexon may return before status syncs
     let actualFillPrice = livePrice;
-    let tradeStatus: 'filled' | 'open' = 'filled';
-    // Track whether the fill price was actually confirmed via CLOB midpoint
-    // so TP/SL percentage math doesn't fire on a stale `livePrice` proxy.
+    const tradeStatus: 'filled' | 'open' = 'filled';
     let confirmedFillPrice: number | null = null;
 
-    if (useLimit) {
-      let filled = false;
-      for (let i = 0; i < 5; i++) {
-        try {
-          const orderStatus = await predexonGetOrder(predexonUserId, orderResp.orderId);
-          if (orderStatus.status === 'filled') {
-            const rawP = parseFloat(orderStatus.price ?? '0');
-            if (!isNaN(rawP) && rawP > 0) actualFillPrice = rawP;
-            filled = true;
-            break;
-          }
-          if (orderStatus.status === 'cancelled' || orderStatus.status === 'expired') {
-            return { success: false, errorMsg: `limit order ${orderStatus.status}` };
-          }
-        } catch (err: any) {
-          logger.debug(`[bond] Fill poll attempt ${i + 1}/5 for ${orderResp.orderId}: ${err?.message}`);
+    for (let i = 0; i < 3; i++) {
+      try {
+        const orderStatus = await predexonGetOrder(predexonUserId, orderResp.orderId);
+        if (orderStatus.status === 'filled') {
+          const rawP = parseFloat(orderStatus.price ?? '0');
+          if (!isNaN(rawP) && rawP > 0) actualFillPrice = rawP;
+          break;
         }
-        await new Promise(r => setTimeout(r, 2000));
+        if (orderStatus.status === 'cancelled' || orderStatus.status === 'expired') {
+          return { success: false, errorMsg: `market order ${orderStatus.status}` };
+        }
+      } catch (err: any) {
+        logger.debug(`[bond] Fill poll attempt ${i + 1}/3 for ${orderResp.orderId}: ${err?.message}`);
       }
-      if (!filled) {
-        // Order is still open — record as open, it may fill later
-        tradeStatus = 'open';
-        logger.info(`[bond] Limit order ${orderResp.orderId} not yet filled after 10s, recording as open`);
-      }
+      await new Promise(r => setTimeout(r, 1000));
     }
 
-    // Capture an accurate fillPrice (post-fill CLOB midpoint, fallback to limit price).
-    // order.price returns the LIMIT price not the actual execution price.
-    if (tradeStatus === 'filled') {
-      try {
-        const midResp = await fetch(
-          `${CLOB_BASE}/midpoint?token_id=${tokenId}`,
-          { signal: AbortSignal.timeout(5_000) },
-        );
-        if (midResp.ok) {
-          const midData: any = await midResp.json();
-          const mid = parseFloat(midData?.mid ?? '0');
-          if (!isNaN(mid) && mid > 0 && mid < 1) confirmedFillPrice = mid;
-        }
-      } catch { /* fall through */ }
-      if (confirmedFillPrice == null) confirmedFillPrice = actualFillPrice;
-    }
+    // Capture an accurate fillPrice (post-fill CLOB midpoint, fallback to response price).
+    try {
+      const midResp = await fetch(
+        `${CLOB_BASE}/midpoint?token_id=${tokenId}`,
+        { signal: AbortSignal.timeout(5_000) },
+      );
+      if (midResp.ok) {
+        const midData: any = await midResp.json();
+        const mid = parseFloat(midData?.mid ?? '0');
+        if (!isNaN(mid) && mid > 0 && mid < 1) confirmedFillPrice = mid;
+      }
+    } catch { /* fall through */ }
+    if (confirmedFillPrice == null) confirmedFillPrice = actualFillPrice;
 
     // Record trade in DB
     await prisma.bondTrade.create({
@@ -865,18 +828,12 @@ async function checkBondTpSl(sendNotification: SendNotificationFn): Promise<void
         continue;
       }
 
-      const slippagePct = strat.slippage ?? trade.user.slippageTolerance ?? 5;
-      const minSellPrice = Math.max(
-        parseFloat((currentPrice * (1 - slippagePct / 100)).toFixed(4)),
-        0.01,
-      );
-
+      // True market SELL — Predexon converts to FAK at the venue. size = shares to sell.
       const sellResp = await predexonPlaceOrder(trade.user.predexonUserId, {
         venue: 'polymarket',
         tokenId: trade.tokenId,
         side: 'sell',
-        type: 'limit',
-        price: String(minSellPrice),
+        type: 'market',
         size: sellSize,
       });
 

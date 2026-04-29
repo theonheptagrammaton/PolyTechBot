@@ -223,34 +223,21 @@ export async function executeUpDownOrder(
       // Schedule TTL cancel
       scheduleLimitTtl(predexonUserId, orderResp.orderId, strategy.limitTtlSeconds, strategy.id, tokenId, user.polymarketProxyAddress ?? undefined);
     } else {
-      // "Market" order → actually place a limit order at midpoint + slippage
-      // This prevents filling at terrible prices in thin orderbooks
-      const slippageFactor = 1 + (strategy.slippage / 100);
-      const maxPrice = Math.min(parseFloat((triggerPrice * slippageFactor).toFixed(4)), 0.99);
-      const rawSize = Math.floor((tradeAmount / maxPrice) * 100) / 100;
-
-      if (rawSize <= 0) {
-        return { success: false, errorMsg: 'Trade amount too small for current price' };
-      }
-
-      logger.info(`[updown] Placing slippage-protected order: mid=${triggerPrice} maxPrice=${maxPrice} slippage=${strategy.slippage}% size=${rawSize}`);
+      // True market BUY — Predexon converts to FAK at the venue. amount = USD to spend.
+      logger.info(`[updown] Placing market BUY: amount=$${tradeAmount} mid=${triggerPrice} slippage=${strategy.slippage}%`);
 
       orderResp = await predexonPlaceOrder(predexonUserId, {
         venue: 'polymarket',
         tokenId,
         side: 'buy',
-        type: 'limit',
-        price: String(maxPrice),
-        size: String(rawSize),
+        type: 'market',
+        amount: String(tradeAmount),
       });
 
       if (!orderResp.orderId) {
         const errMsg = orderResp.error || orderResp.message || 'order rejected';
         return { success: false, errorMsg: errMsg };
       }
-
-      // Auto-cancel after 30s if not filled (don't let it sit forever)
-      scheduleLimitTtl(predexonUserId, orderResp.orderId, 30, strategy.id, tokenId, user.polymarketProxyAddress ?? undefined);
     }
 
     // Get round open price for context
@@ -259,8 +246,8 @@ export async function executeUpDownOrder(
       roundStartPrice = await getRoundOpenPrice(strategy.coin, market.conditionId, market.startDate);
     } catch { /* non-critical */ }
 
-    // Poll the actual fill price from the API
-    // All orders are now limit orders (market orders converted to slippage-protected limits)
+    // Poll the actual fill price from the API.
+    // Market BUYs fill (or partial-fill) immediately at venue; user-set limit BUYs may rest on the book.
     let actualFillPrice: number | null = null;
     let actualSizeMatched: string | null = null;
     const fillResult = await pollActualFillPrice(predexonUserId, orderResp.orderId, tokenId);
@@ -270,11 +257,11 @@ export async function executeUpDownOrder(
       logger.info(`[updown] Order ${orderResp.orderId} fill: price=${actualFillPrice} size=${actualSizeMatched} (mid was ${triggerPrice})`);
     } else {
       // DO NOT fall back to triggerPrice — it can be stale and corrupts TP/SL calculations.
-      // Leave fillPrice null; the scheduleLimitTtl check interval will update it when filled.
-      logger.warn(`[updown] Order ${orderResp.orderId} not yet filled after polling (may still fill via limit TTL check)`);
+      // For user-set limit orders, the scheduleLimitTtl check interval will update fillPrice on later fill.
+      logger.warn(`[updown] Order ${orderResp.orderId} not yet filled after polling`);
     }
 
-    // Determine initial status: filled if we got a fill price, otherwise open (limit pending)
+    // Determine initial status: filled if we got a fill price, otherwise open (user limit pending)
     const initialStatus = actualFillPrice ? 'filled' : 'open';
 
     // Record trade in DB
@@ -648,19 +635,14 @@ async function checkUpDownTpSl(sendNotification: SendNotificationFn): Promise<vo
           continue;
         }
 
-        // Use slippage-protected limit sell (same pattern as buy orders).
-        // Sell at currentPrice minus slippage — prevents filling at terrible bids.
-        const sellSlippage = strat.slippage ?? 5;
-        const slippageFactor = 1 - (sellSlippage / 100);
-        const minSellPrice = Math.max(parseFloat((currentPrice * slippageFactor).toFixed(4)), 0.01);
-        logger.info(`[updown] TP/SL sell: mid=${currentPrice} minPrice=${minSellPrice} slippage=${sellSlippage}% size=${sellSize}`);
+        // True market SELL — Predexon converts to FAK at the venue. size = shares to sell.
+        logger.info(`[updown] TP/SL market sell: mid=${currentPrice} size=${sellSize}`);
 
         const sellResp = await predexonPlaceOrder(trade.user.predexonUserId, {
           venue: 'polymarket',
           tokenId: trade.tokenId,
           side: 'sell',
-          type: 'limit',
-          price: String(minSellPrice),
+          type: 'market',
           size: sellSize,
         });
 
