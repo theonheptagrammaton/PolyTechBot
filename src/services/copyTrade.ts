@@ -1161,6 +1161,26 @@ async function checkRedeemableCopiedPositions(
     const active = activePositions.find((p) => p.asset === pos.assetId);
     if (!active?.redeemable) continue;
 
+    // Skip losing-side resolved positions: NegRiskAdapter can't redeem them
+    // (SafeMath subtraction overflow). Mark them as resolved-loss via tpSlStatus
+    // so the next tick's findMany filter (tpSlStatus: null) excludes them.
+    if (active.currentValue <= 0) {
+      handledAssets.add(pos.assetId);
+      logger.info(`[copy] Skipping auto-redeem for losing-side ${pos.assetId.slice(0, 20)}... (currentValue=${active.currentValue})`);
+      await prisma.copiedTrade.updateMany({
+        where: {
+          subscriptionId: sub.subscriptionId,
+          userId: user.id,
+          assetId: pos.assetId,
+          side: 'BUY',
+          status: 'filled',
+          tpSlStatus: null,
+        },
+        data: { tpSlStatus: 'resolved_loss' },
+      }).catch(() => {});
+      continue;
+    }
+
     handledAssets.add(pos.assetId);
     logger.info(
       `[copy] Auto-redeem triggered for user ${user.id} sub ${sub.subscriptionId} ` +
@@ -1181,7 +1201,8 @@ async function checkRedeemableCopiedPositions(
     }
 
     if (!result.success) {
-      logger.warn(`[copy] Auto-redeem failed for ${pos.assetId.slice(0, 20)}...: ${result.error}`);
+      // Expected on broken NegRisk markets — info, not warn.
+      logger.info(`[copy] Auto-redeem failed for ${pos.assetId.slice(0, 20)}...: ${result.error}`);
       continue;
     }
 

@@ -1349,8 +1349,12 @@ export async function handleCopyRemoveExecute(ctx: Context, subId: string): Prom
         logger.warn(`[copy] remove: cancelOpenCopyOrders failed: ${err?.message}`)
       );
     }
-    await prisma.copySubscription.delete({ where: { id: subId } });
-  } catch { /* ignore not found */ }
+    // deleteMany avoids P2025 ("Record not found") log noise on duplicate clicks —
+    // the surrounding try/catch handled it but Prisma still logged at error level.
+    await prisma.copySubscription.deleteMany({ where: { id: subId } });
+  } catch (err: any) {
+    logger.warn(`[copy] remove: delete failed: ${err?.message}`);
+  }
 
   await handleCopyList(ctx);
 }
@@ -1818,8 +1822,10 @@ export async function handleManageDeleteExecute(ctx: Context, subId: string): Pr
         logger.warn(`[copy] manage-delete: cancelOpenCopyOrders failed: ${err?.message}`)
       );
     }
-    await prisma.copySubscription.delete({ where: { id: subId } });
-  } catch { /* ignore */ }
+    await prisma.copySubscription.deleteMany({ where: { id: subId } });
+  } catch (err: any) {
+    logger.warn(`[copy] manage-delete: delete failed: ${err?.message}`);
+  }
   await handleCopyList(ctx);
 }
 

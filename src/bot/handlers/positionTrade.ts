@@ -1838,7 +1838,8 @@ export async function executeCloseAllPositions(
         success = true;
         break;
       } catch (err: any) {
-        logger.warn(`[positionTrade] closeAll: attempt slip=${slip}% failed for ${pos.outcome}: ${err.message}`);
+        // Slippage-tier retry is an expected fallback — info, not warn.
+        logger.info(`[positionTrade] closeAll: attempt slip=${slip}% failed for ${pos.outcome}: ${err.message}`);
       }
     }
 
@@ -1864,7 +1865,9 @@ export async function executeCloseAllPositions(
           logger.info(`[positionTrade] closeAll: redeemed ${pos.outcome} / ${pos.title.slice(0, 40)}`);
           redeemed++;
         } else {
-          logger.warn(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
+          // Expected on broken NegRisk markets — info, not warn. The user-facing
+          // notification still goes out and admin alert fires on first overflow.
+          logger.info(`[positionTrade] closeAll: redeem failed for ${pos.outcome}: ${result.error}`);
           failed++;
           const errMsg = result.error || '';
           const isOverflow = /only redeemable via Predexon/i.test(errMsg);
@@ -1887,7 +1890,7 @@ export async function executeCloseAllPositions(
           errors.push(`${pos.outcome}: ${friendlyErr}`);
           // If rate-limited, stop trying more redeems
           if (result.error && /rate.?limit/i.test(result.error)) {
-            logger.warn(`[positionTrade] closeAll: relayer rate-limited, stopping redeem loop`);
+            logger.info(`[positionTrade] closeAll: relayer rate-limited, stopping redeem loop`);
             // Count remaining as failed
             for (let j = i + 1; j < redeemable.length; j++) {
               failed++;
@@ -1897,6 +1900,7 @@ export async function executeCloseAllPositions(
           }
         }
       } catch (err: any) {
+        // Unexpected throw (not a graceful failure) — keep at warn for visibility.
         logger.warn(`[positionTrade] closeAll: redeem threw for ${pos.outcome}: ${err?.message}`);
         failed++;
         errors.push(`${pos.outcome}: redeem error — ${err?.message || 'unknown error'}`);

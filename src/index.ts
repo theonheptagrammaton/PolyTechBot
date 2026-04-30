@@ -1,3 +1,7 @@
+// Must run before any module that pulls in @polymarket/builder-relayer-client.
+import { silenceThirdPartyLogs } from './utils/silenceLibs';
+silenceThirdPartyLogs();
+
 import http from 'http';
 import { config } from './config';
 import { logger } from './utils/logger';

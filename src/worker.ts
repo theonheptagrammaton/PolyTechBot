@@ -4,6 +4,10 @@
  * Notifications are enqueued via BullMQ (Redis-backed), which the bot's
  * notification worker drains at a rate-limited 25 msg/s.
  */
+// Must run before any module that pulls in @polymarket/builder-relayer-client.
+import { silenceThirdPartyLogs } from './utils/silenceLibs';
+silenceThirdPartyLogs();
+
 import http from 'http';
 import { config } from './config';
 import { logger } from './utils/logger';

@@ -1314,7 +1314,9 @@ export async function handleManageDeleteExecute(ctx: Context, id: string): Promi
   const lang = ((ctx as any).userLanguage as Locale) || 'en';
   try {
     await prisma.bondTrade.deleteMany({ where: { strategyId: id } });
-    await prisma.bondStrategy.delete({ where: { id } });
+    // deleteMany silently no-ops when the strategy was already removed
+    // by a duplicate click — avoids Prisma P2025 stdout noise.
+    await prisma.bondStrategy.deleteMany({ where: { id } });
   } catch (err: any) {
     logger.error(`[bond] Failed to delete strategy ${id}: ${err?.message}`);
     await sendHtml(ctx, t(lang, 'Failed to delete strategy. Please try again.'));

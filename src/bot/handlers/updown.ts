@@ -1395,7 +1395,7 @@ export async function handleManageDeleteExecute(ctx: Context, stratId: string): 
   if (!strat) return;
   try {
     await prisma.upDownTrade.deleteMany({ where: { strategyId: stratId } });
-    await prisma.upDownStrategy.delete({ where: { id: stratId } });
+    await prisma.upDownStrategy.deleteMany({ where: { id: stratId } });
   } catch (err: any) {
     logger.error(`[autopilot] Failed to delete strategy ${stratId}: ${err?.message}`);
     await sendHtml(ctx, 'Failed to delete strategy. Please try again.');

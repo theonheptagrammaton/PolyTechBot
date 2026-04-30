@@ -1022,6 +1022,22 @@ async function checkBondResolutionsInner(sendNotification: SendNotificationFn): 
         );
         if (!pos) continue;
 
+        // Skip losing-side resolved positions: NegRiskAdapter.redeemPositions reverts
+        // with SafeMath subtraction overflow when the user only holds the losing side
+        // (the adapter expects complementary shares). currentValue<=0 means oracle
+        // resolved against this outcome — there is nothing to claim on-chain.
+        if (pos.currentValue <= 0) {
+          logger.info(`[bond] Marking trade ${trade.id} as resolved-loss (currentValue=${pos.currentValue}) — no on-chain claim possible`);
+          await prisma.bondTrade.update({
+            where: { id: trade.id },
+            data: { status: 'resolved_loss', tpSlStatus: 'resolved_loss', tpSlOrderId: null },
+          }).catch((err: any) => logger.warn(`[bond] resolved-loss update failed for ${trade.id}: ${err?.message}`));
+          await redisCache.del(`bond:tpsl_retry:${trade.id}`).catch(() => {});
+          await redisCache.del(`bond:tpsl_sell_at:${trade.id}`).catch(() => {});
+          await redisCache.del(`bond:tpsl_lock:${trade.id}`).catch(() => {});
+          continue;
+        }
+
         // Prevent double-processing
         const lockKey = `bond:redeem_lock:${trade.id}`;
         const locked = await redisCache.get<number>(lockKey);
@@ -1071,7 +1087,8 @@ async function checkBondResolutionsInner(sendNotification: SendNotificationFn): 
               });
             }
           } else {
-            logger.warn(`[bond] Auto-redeem failed for trade ${trade.id}: ${result.error}`);
+            // Expected on broken NegRisk markets — info, not warn.
+            logger.info(`[bond] Auto-redeem failed for trade ${trade.id}: ${result.error}`);
             await redisCache.del(lockKey);
           }
         } catch (err: any) {

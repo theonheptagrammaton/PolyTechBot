@@ -26,6 +26,12 @@ const CLAIMED_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 // via Builder path. Only Predexon API can handle these. Retry after 6h in case market state changes.
 const OVERFLOW_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
+// TTL for the GLOBAL broken-condition cache — 24h. When ANY user proves a conditionId
+// reverts on-chain (SafeMath overflow / positionId mismatch), every other user with
+// shares in the same market will hit the same revert. Cache it globally to skip
+// expensive RPC + relayer round-trips for the rest of the day.
+const BROKEN_COND_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+
 function claimedKey(proxyAddress: string, conditionId: string): string {
   return `redeem:claimed:${proxyAddress.toLowerCase()}:${conditionId}`;
 }
@@ -34,11 +40,19 @@ function overflowKey(proxyAddress: string, conditionId: string): string {
   return `redeem:overflow:${proxyAddress.toLowerCase()}:${conditionId}`;
 }
 
+function brokenCondKey(conditionId: string): string {
+  return `redeem:broken-cond:${conditionId.toLowerCase()}`;
+}
+
 async function setOverflowDedup(proxyAddress: string, conditionId: string, context: string): Promise<void> {
   const key = overflowKey(proxyAddress, conditionId);
-  logger.warn(`[redeem] Setting overflow dedup: key=${key} context=${context}`);
+  const globalKey = brokenCondKey(conditionId);
+  // Routine flow on broken NegRisk markets — info-level is appropriate.
+  logger.info(`[redeem] Setting overflow dedup: key=${key} context=${context}`);
   try {
     await redisCache.set(key, true, OVERFLOW_TTL_SECONDS);
+    // Also set the global broken-condition cache so other users skip immediately.
+    await redisCache.set(globalKey, true, BROKEN_COND_TTL_SECONDS);
   } catch (err: any) {
     logger.error(`[redeem] Overflow dedup SET FAILED: key=${key} error=${err?.message}`);
   }
@@ -49,12 +63,26 @@ async function checkOverflowDedup(proxyAddress: string, conditionId: string): Pr
   try {
     const blocked = await redisCache.get<boolean>(key);
     if (blocked) {
-      logger.info(`[redeem] Overflow dedup ACTIVE: key=${key}`);
+      logger.debug(`[redeem] Overflow dedup ACTIVE: key=${key}`);
       return true;
     }
     return false;
   } catch (err: any) {
     logger.warn(`[redeem] Overflow dedup CHECK FAILED: key=${key} error=${err?.message}`);
+    return false;
+  }
+}
+
+/**
+ * Global broken-condition gate: if ANY user previously proved this conditionId
+ * is unrecoverable via Builder, skip all RPC + relayer calls for everyone.
+ * Predexon API fallback is still attempted in redeemSingle even when this is set.
+ */
+async function isConditionGloballyBroken(conditionId: string): Promise<boolean> {
+  try {
+    const blocked = await redisCache.get<boolean>(brokenCondKey(conditionId));
+    return !!blocked;
+  } catch {
     return false;
   }
 }
@@ -182,6 +210,13 @@ async function redeemPosition(params: {
   position: ActivePosition;
   skipThrottle?: boolean;
 }): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  // Global gate: if another user already proved this conditionId is broken on Builder,
+  // skip every RPC/relayer call. redeemSingle's Predexon fallback still runs upstream.
+  if (await isConditionGloballyBroken(params.position.conditionId)) {
+    logger.info(`[redeem] Skipping Builder path — conditionId ${params.position.conditionId.slice(0, 18)}... globally cached as broken`);
+    return { success: false, error: 'NegRiskAdapter subtraction overflow — only redeemable via Predexon API (cached)' };
+  }
+
   // Pre-flight: check if relayer is available
   // Manual claims (skipThrottle) bypass proactive throttle — they always get at least one attempt
   if (!params.skipThrottle) {
@@ -422,7 +457,7 @@ async function redeemNegRisk(
         try {
           const txInfo = await response.getTransaction();
           failedTxHash = (txInfo as any)?.transactionHash ?? (Array.isArray(txInfo) ? (txInfo[0] as any)?.transactionHash : undefined);
-          logger.warn(`[redeem] ${txType}/NegRiskAdapter STATE_FAILED: hash=${failedTxHash ?? 'none'} ${JSON.stringify(txInfo).slice(0, 300)}`);
+          logger.info(`[redeem] ${txType}/NegRiskAdapter STATE_FAILED: hash=${failedTxHash ?? 'none'}`);
         } catch { /* ignore */ }
 
         const balanceAfterFail = await getOnChainTokenBalance(proxyAddress, position.asset);
@@ -430,8 +465,9 @@ async function redeemNegRisk(
           logger.info(`[redeem] ${txType}/NegRiskAdapter: balance is now 0 after STATE_FAILED — position was redeemed`);
           return { success: true, txHash: failedTxHash };
         }
-        // Balance still non-zero → redeem permanently failed, set overflow dedup to prevent future gas waste
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: STATE_FAILED with balance still ${balanceAfterFail.toString()} — marking overflow dedup`);
+        // Balance still non-zero → redeem permanently failed; mark overflow dedup
+        // to prevent future gas waste. Expected on losing-side NegRisk positions.
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: STATE_FAILED with balance still ${balanceAfterFail.toString()} — marking overflow dedup`);
         await setOverflowDedup(proxyAddress, position.conditionId, 'STATE_FAILED with non-zero balance');
         return { success: false, error: 'NegRiskAdapter redeem failed on-chain — only redeemable via Predexon API' };
       }
@@ -448,7 +484,7 @@ async function redeemNegRisk(
         // it's almost certainly SafeMath subtraction overflow in the adapter
         // (unrecoverable via Builder path). Set overflow dedup key to prevent
         // further gas waste on every user interaction.
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx ${txHash} reverted on-chain — marking overflow dedup to prevent future gas waste`);
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: tx ${txHash} reverted on-chain — marking overflow dedup`);
         await setOverflowDedup(proxyAddress, position.conditionId, 'tx reverted on-chain');
         return { success: false, error: 'NegRiskAdapter redeem reverted on-chain — only redeemable via Predexon API' };
       }
@@ -456,7 +492,7 @@ async function redeemNegRisk(
       // Verify CTF tokens were actually burned
       const balanceAfter = await getOnChainTokenBalance(proxyAddress, position.asset);
       if (balanceAfter.gte(currentBalance)) {
-        logger.warn(`[redeem] ${txType}/NegRiskAdapter: tx succeeded but CTF balance unchanged (${balanceAfter.toString()})`);
+        logger.info(`[redeem] ${txType}/NegRiskAdapter: tx succeeded but CTF balance unchanged (${balanceAfter.toString()})`);
         continue;
       }
 
@@ -490,7 +526,7 @@ async function redeemNegRisk(
         logger.info(`[redeem] ${txType}/NegRiskAdapter: balance is now 0 after error — position was redeemed`);
         return { success: true, txHash: undefined };
       }
-      logger.warn(`[redeem] ${txType}/NegRiskAdapter attempt failed (balance=${postErrBalance.toString()}): ${errMsg.slice(0, 200)}`);
+      logger.info(`[redeem] ${txType}/NegRiskAdapter attempt failed (balance=${postErrBalance.toString()}): ${errMsg.slice(0, 200)}`);
       // If the error involved an on-chain tx submission (not just a client-side rejection),
       // stop retrying — the next txType will likely fail the same way, wasting more gas.
       if (/failed onchain|reverted|execution/i.test(errChain)) {
@@ -584,7 +620,7 @@ async function redeemNegRiskDirect(
           logger.info(`[redeem] ${txType}/DirectCTF: balance is now 0 after STATE_FAILED — already redeemed`);
           return { success: true };
         }
-        logger.warn(`[redeem] ${txType}/DirectCTF: STATE_FAILED with non-zero balance — marking overflow dedup`);
+        logger.info(`[redeem] ${txType}/DirectCTF: STATE_FAILED with non-zero balance — marking overflow dedup`);
         await setOverflowDedup(proxyAddress, conditionId, 'direct CTF STATE_FAILED');
         return { success: false, error: 'Direct CTF redeem failed on-chain — only redeemable via Predexon API' };
       }
@@ -597,7 +633,7 @@ async function redeemNegRiskDirect(
           logger.info(`[redeem] ${txType}/DirectCTF: balance is now 0 after revert — already redeemed`);
           return { success: true, txHash };
         }
-        logger.warn(`[redeem] ${txType}/DirectCTF: tx ${txHash} reverted with non-zero balance — marking overflow dedup`);
+        logger.info(`[redeem] ${txType}/DirectCTF: tx ${txHash} reverted with non-zero balance — marking overflow dedup`);
         await setOverflowDedup(proxyAddress, conditionId, 'direct CTF tx reverted on-chain');
         return { success: false, error: 'Direct CTF redeem reverted on-chain — only redeemable via Predexon API' };
       }
@@ -609,7 +645,7 @@ async function redeemNegRiskDirect(
         // CTF.redeemPositions(WCOL, 0x0, ...) computed positionIds that don't match
         // the user's actual position asset id. PROXY txType will fail identically.
         // Mark overflow dedup and abort to avoid wasting another on-chain tx.
-        logger.warn(`[redeem] ${txType}/DirectCTF: tx confirmed but position balance unchanged (${balanceAfter.toString()}) — positionId mismatch, DirectCTF cannot redeem this position`);
+        logger.info(`[redeem] ${txType}/DirectCTF: tx confirmed but position balance unchanged (${balanceAfter.toString()}) — positionId mismatch`);
         await setOverflowDedup(proxyAddress, conditionId, 'direct CTF positionId mismatch (tx confirmed but burned 0)');
         return { success: false, error: 'Direct CTF cannot redeem this position (positionId mismatch) — only redeemable via Predexon API' };
       }
@@ -644,7 +680,7 @@ async function redeemNegRiskDirect(
         }
         logger.info(`[redeem] ${txType}/DirectCTF: wcol withdraw complete (${wcolGained.toString()} → USDC.e)`);
       } catch (wErr: any) {
-        logger.warn(`[redeem] ${txType}/DirectCTF: wcol withdraw failed: ${wErr?.message?.slice(0, 100)} — position redeemed but wcol stuck in wallet`);
+        logger.info(`[redeem] ${txType}/DirectCTF: wcol withdraw failed: ${wErr?.message?.slice(0, 100)} — position redeemed but wcol stuck in wallet`);
       }
 
       return { success: true, txHash };
@@ -659,11 +695,11 @@ async function redeemNegRiskDirect(
           logger.info(`[redeem] ${txType}/DirectCTF: balance is now 0 after error — position was redeemed`);
           return { success: true };
         }
-        logger.warn(`[redeem] ${txType}/DirectCTF: subtraction overflow / on-chain failure — marking overflow dedup`);
+        logger.info(`[redeem] ${txType}/DirectCTF: subtraction overflow / on-chain failure — marking overflow dedup`);
         await setOverflowDedup(proxyAddress, conditionId, 'direct CTF error chain overflow');
         return { success: false, error: 'Direct CTF redeem failed on-chain — only redeemable via Predexon API' };
       }
-      logger.warn(`[redeem] ${txType}/DirectCTF failed: ${errMsg.slice(0, 200)}`);
+      logger.info(`[redeem] ${txType}/DirectCTF failed: ${errMsg.slice(0, 200)}`);
       continue;
     }
   }
@@ -761,7 +797,8 @@ async function redeemStandard(
         if (!result) {
           try {
             const txInfo = await response.getTransaction();
-            logger.warn(`[redeem] ${txType}/${tokenLabel} STATE_FAILED: ${JSON.stringify(txInfo).slice(0, 400)}`);
+            const hash = (txInfo as any)?.transactionHash ?? (Array.isArray(txInfo) ? (txInfo[0] as any)?.transactionHash : 'none');
+            logger.info(`[redeem] ${txType}/${tokenLabel} STATE_FAILED: hash=${hash}`);
           } catch { /* ignore */ }
           // If balance is unchanged, this collateral is wrong — skip the rest of
           // its txType attempts and move on to the next collateral.
@@ -949,11 +986,15 @@ async function redeemSingle(params: {
     }
   }
 
-  // If a previous attempt already proved this position is overflow-blocked on Builder,
-  // try Predexon (claimable or not) as last resort before giving up.
-  if (await checkOverflowDedup(params.proxyAddress, params.position.conditionId)) {
+  // If a previous attempt already proved this position is overflow-blocked on Builder
+  // (per-user OR globally across all users), try Predexon (claimable or not) as last
+  // resort before giving up.
+  const perUserOverflow = await checkOverflowDedup(params.proxyAddress, params.position.conditionId);
+  const globallyBroken = await isConditionGloballyBroken(params.position.conditionId);
+  if (perUserOverflow || globallyBroken) {
     if (params.predexonUserId && predexonTokenIdMatch) {
-      logger.info(`[redeem] Builder overflow-cached for ${params.position.conditionId.slice(0, 18)}... — retrying Predexon as fallback (tokenId=${predexonTokenIdMatch.tokenId})`);
+      const reason = globallyBroken && !perUserOverflow ? 'global broken-cond cache' : 'Builder overflow-cached';
+      logger.info(`[redeem] ${reason} for ${params.position.conditionId.slice(0, 18)}... — retrying Predexon as fallback (tokenId=${predexonTokenIdMatch.tokenId})`);
       const fallback = await tryPredexonRedeem(params.predexonUserId, predexonTokenIdMatch.tokenId, predexonTokenIdMatch.venue);
       if (fallback.success) return fallback;
       logger.warn(`[redeem] Predexon overflow-fallback failed: ${fallback.error}`);

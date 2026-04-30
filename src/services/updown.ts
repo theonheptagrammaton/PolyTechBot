@@ -887,6 +887,22 @@ async function checkUpDownResolutionsInner(sendNotification: SendNotificationFn)
         );
         if (!pos) continue;
 
+        // Skip losing-side resolved positions: NegRiskAdapter.redeemPositions reverts
+        // with SafeMath subtraction overflow when the user only holds the losing side.
+        // currentValue<=0 means oracle resolved against this outcome — nothing on-chain to claim.
+        if (pos.currentValue <= 0) {
+          logger.info(`[updown] Marking trade ${trade.id} as resolved-loss (currentValue=${pos.currentValue}) — no on-chain claim possible`);
+          await prisma.upDownTrade.update({
+            where: { id: trade.id },
+            data: { tpSlStatus: 'resolved_loss', tpSlOrderId: null },
+          }).catch((err: any) => logger.warn(`[updown] resolved-loss update failed for ${trade.id}: ${err?.message}`));
+          await redisCache.del(`updown:tpsl_mid404:${trade.id}`).catch(() => {});
+          await redisCache.del(`updown:tpsl_retry:${trade.id}`).catch(() => {});
+          await redisCache.del(`updown:tpsl_sell_at:${trade.id}`).catch(() => {});
+          await redisCache.del(`updown:tpsl_lock:${trade.id}`).catch(() => {});
+          continue;
+        }
+
         // Prevent double-processing
         const lockKey = `updown:redeem_lock:${trade.id}`;
         const locked = await redisCache.get<number>(lockKey);
@@ -933,7 +949,8 @@ async function checkUpDownResolutionsInner(sendNotification: SendNotificationFn)
               });
             }
           } else {
-            logger.warn(`[updown] Auto-redeem failed for trade ${trade.id}: ${result.error}`);
+            // Expected on broken NegRisk markets — info, not warn.
+            logger.info(`[updown] Auto-redeem failed for trade ${trade.id}: ${result.error}`);
             await redisCache.del(lockKey);
           }
         } catch (err: any) {
