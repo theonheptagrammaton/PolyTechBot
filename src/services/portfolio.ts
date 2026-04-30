@@ -310,7 +310,7 @@ export async function cancelOrderById(
 ): Promise<{ success: boolean; errorReason?: string }> {
   if (!predexonUserId) return { success: false, errorReason: 'no predexonUserId' };
   try {
-    await predexonCancelOrder(predexonUserId, orderId);
+    await predexonCancelOrder(predexonUserId, orderId, 'polymarket');
     logger.info(`[portfolio] Cancelled order ${orderId.substring(0, 16)}...`);
     return { success: true };
   } catch (error: any) {

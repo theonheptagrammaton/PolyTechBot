@@ -140,7 +140,10 @@ async function predexonFetch<T>(
     throw new Error(msg);
   }
 
-  return res.json() as Promise<T>;
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 // ── User Management ────────────────────────────────────────────────────────
@@ -311,10 +314,12 @@ export async function getOrder(
 export async function cancelOrder(
   userId: string,
   orderId: string,
+  venue?: string,
 ): Promise<void> {
+  const params = venue ? `?venue=${encodeURIComponent(venue)}` : '';
   await predexonFetch<unknown>(
-    `${TRADE_URL()}/api/users/${userId}/orders/${orderId}/cancel`,
-    { method: 'POST' },
+    `${TRADE_URL()}/api/users/${userId}/orders/${orderId}${params}`,
+    { method: 'DELETE' },
   );
 }
 
@@ -322,10 +327,10 @@ export async function cancelAllOrders(
   userId: string,
   venue?: string,
 ): Promise<void> {
-  const body = venue ? JSON.stringify({ venue }) : undefined;
+  const params = venue ? `?venue=${encodeURIComponent(venue)}` : '';
   await predexonFetch<unknown>(
-    `${TRADE_URL()}/api/users/${userId}/orders/cancel`,
-    { method: 'POST', body },
+    `${TRADE_URL()}/api/users/${userId}/orders${params}`,
+    { method: 'DELETE' },
   );
 }
 
