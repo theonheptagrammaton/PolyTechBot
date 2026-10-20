@@ -9,3 +9,13 @@ build/
 logs/
 calibrate-*.png
 scripts/
+
+# OS / editor
+.DS_Store
+.claude/
+.vscode/
+.idea/
+
+# Local font config and cache
+src/bot/img/fonts/.cache/
+src/bot/img/fonts/fonts.conf

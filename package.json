@@ -1,7 +1,7 @@
 {
   "name": "polytech-telegram-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for Polymarket wallet management",
+  "description": "Telegram trading bot for Polymarket: trading, copy trading and automated strategies",
   "main": "dist/index.js",
   "scripts": {
     "setup": "bash scripts/setup.sh",
@@ -16,12 +16,23 @@
   },
   "keywords": [
     "telegram",
+    "telegram-bot",
     "polymarket",
-    "crypto",
-    "wallet"
+    "prediction-markets",
+    "trading-bot",
+    "copy-trading",
+    "polygon"
   ],
-  "author": "",
+  "author": "Eray Pişkin (https://eraypiskin.com)",
   "license": "MIT",
+  "homepage": "https://github.com/theonheptagrammaton/PolyTechBot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theonheptagrammaton/PolyTechBot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/theonheptagrammaton/PolyTechBot/issues"
+  },
   "dependencies": {
     "@dome-api/sdk": "^1.0.2",
     "@polymarket/abstract-signer": "^0.0.8",

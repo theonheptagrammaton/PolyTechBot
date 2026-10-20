@@ -1,241 +1,167 @@
-# 🤖 Polymarket Telegram Trading Bot
+# PolyTech
 
-A production-ready Telegram bot for trading on Polymarket with multi-chain wallet support, 2FA security, automated deposits, and commission system.
+A Telegram trading bot for [Polymarket](https://polymarket.com). Users get a managed wallet on `/start`, then browse markets, trade, copy top traders and run automated strategies without leaving Telegram.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)](https://www.typescriptlang.org/)
 
-## ✨ Features
-
-### 🔐 Security & Authentication
-- **2FA Authentication** - Google Authenticator integration with backup codes
-- **End-to-End Encryption** - AES-256-GCM for private keys and credentials
-- **Multi-signature Support** - Secure wallet management
-
-### 💰 Multi-Chain Wallet
-- **EVM Chains**: Polygon, Ethereum, BNB (shared address)
-- **Solana**: Dedicated SPL wallet
-- **Auto-generation** - Wallets created on first \`/start\`
-- **Real-time Balance** - Live USDC balance from blockchains
-
-### 💸 Deposit System
-- **Multi-chain Deposits** - Polygon, Ethereum, Solana
-- **Automatic Detection** - Bot checks blockchain for incoming USDC
-- **One-click Approval** - Approve + Deposit to Polymarket
-- **Minimum $10** - Validation and user notifications
-
-### 📊 Portfolio Tracking
-- **Open Positions** - Active orders with live data
-- **Closed Positions** - Complete trade history
-- **All Transactions** - Combined view with pagination
-
-### 🔍 Market Discovery
-- **Browse by Category** - Politics, Crypto, Sports, Business, Pop Culture
-- **Search Markets** - Keyword search with pagination
-- **Real-time Data** - Direct from Polymarket Gamma API
-
-### 💹 Trading (Coming Soon)
-- Market & Limit orders
-- 1% commission system
-- 2FA protection for large trades
+**Try it on Telegram:** [t.me/tradepolytech](https://t.me/tradepolytech)
 
 ---
 
-## 🚀 Quick Start (Production Deployment)
+## Features
 
-### Prerequisites
+### Trading
+- Market and limit orders on any Polymarket market
+- Open orders, open positions and closed-position history
+- Internal stop-loss monitor (price-triggered market sells instead of resting limit orders)
+- Automatic redemption of resolved positions
+- Shareable PnL cards rendered as images
 
-- **Node.js** 18+ 
-- **PostgreSQL** 14+
-- **Redis** 7+
-- **Git**
-- **Telegram Bot Token**
+### Market discovery
+- Browse by category: politics, crypto, sports, business, geopolitics, tech, science, pop culture and more
+- Trending and newest markets
+- Keyword search with pagination
+- Market and wallet analysis via `/analyze`
+
+### Copy trading
+- Smart-wallet leaderboard of top Polymarket traders
+- Follow a wallet and mirror its buys (and optionally its sells) with your own sizing rules
+- Runs in a separate worker process; notifications are delivered through a BullMQ queue
+
+### Automated strategies
+- **Bond**: scans high-probability markets and buys near-certain outcomes, with filters, take-profit / stop-loss and a daily loss limit
+- **Up/Down Autopilot** (`/autopilot`, `/afk`): trades short-timeframe crypto up/down rounds by coin, timeframe, direction and price range
+- **Nothing Ever Happens**: picks non-sports markets and bets on the status quo
+- **Backtest**: simulates a strategy against historical data before you run it live
+
+### Wallet and funds
+- Managed Polymarket wallet per user (via Predexon)
+- Deposit addresses for Polygon, Ethereum and Solana, with automatic detection
+- Withdrawals to external addresses
+- Optional 2FA (TOTP, Google Authenticator compatible) with backup codes
+
+### Platform
+- 1% commission per trade, collected on-chain to an admin wallet
+- Three-tier referral program (25% / 5% / 3% of commission) with automatic payouts
+- 10% cashback of commission to the trader
+- Group mode with per-group rate limiting
+- English, Russian and Chinese interface
+- Admin commands: stats, user list, broadcast
+- Web dashboard for platform metrics (token-protected)
 
 ---
 
-## 📦 Installation
+## Architecture
 
-### Step 1: Clone Repository
+```
+Telegram ──> bot (src/index.ts) ──┬──> PostgreSQL (Prisma)
+                                  ├──> Redis (sessions, state, queues)
+                                  ├──> Predexon API (wallets, order execution)
+                                  └──> Polymarket APIs (Gamma, CLOB, Data)
 
-\`\`\`bash
-git clone https://github.com/theonheptagrammaton/polytech.git
-cd polytech
-\`\`\`
+worker (src/worker.ts) ──> copy-trade monitor, notification queue (BullMQ)
+dashboard (dashboard/)  ──> Express + static UI over the same database
+```
 
-### Step 2: Install Dependencies
+| Path | Contents |
+| --- | --- |
+| `src/bot/handlers/` | Telegram commands and callback handlers |
+| `src/services/` | Trading, strategies, wallets, deposits, referrals, commission |
+| `src/i18n/` | Translations (`en`, `ru`, `zh`) |
+| `src/database/` | Prisma and Redis clients |
+| `prisma/` | Schema and migrations |
+| `dashboard/` | Admin dashboard |
 
-\`\`\`bash
+---
+
+## Self-hosting
+
+### Requirements
+
+- Node.js 20+
+- PostgreSQL 14+
+- Redis 7+
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- A [Predexon](https://predexon.com) API key (wallets and trade execution)
+
+### Quick start with Docker
+
+```bash
+git clone https://github.com/theonheptagrammaton/PolyTechBot.git
+cd PolyTechBot
+cp .env.example .env        # fill in the values, see below
+docker compose up -d
+docker compose logs -f bot
+```
+
+This starts PostgreSQL, Redis, the bot, the worker and the dashboard. The bot container syncs the database schema on start.
+
+### Manual setup
+
+```bash
+git clone https://github.com/theonheptagrammaton/PolyTechBot.git
+cd PolyTechBot
 npm install
-\`\`\`
-
-### Step 3: Setup PostgreSQL
-
-\`\`\`bash
-# Using Docker (Recommended)
-docker run --name polytech-postgres \\
-  -e POSTGRES_USER=polytech \\
-  -e POSTGRES_PASSWORD=your_secure_password \\
-  -e POSTGRES_DB=polytech_db \\
-  -p 5432:5432 \\
-  -d postgres:14-alpine
-\`\`\`
-
-### Step 4: Setup Redis
-
-\`\`\`bash
-# Using Docker (Recommended)
-docker run --name polytech-redis \\
-  -p 6379:6379 \\
-  -d redis:7-alpine
-\`\`\`
-
-### Step 5: Configure Environment
-
-\`\`\`bash
 cp .env.example .env
-nano .env
-\`\`\`
-
-**Required Configuration:**
-
-\`\`\`env
-TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
-ADMIN_USER_IDS=your_telegram_user_id
-DATABASE_URL=postgresql://polytech:password@localhost:5432/polytech_db
-ENCRYPTION_KEY=generate_with_openssl_rand_hex_16
-ADMIN_COMMISSION_WALLET=0xYourPolygonWalletAddress
-NODE_ENV=production
-\`\`\`
-
-### Step 6: Run Migrations
-
-\`\`\`bash
 npx prisma migrate deploy
 npx prisma generate
-\`\`\`
-
-### Step 7: Build & Start
-
-\`\`\`bash
 npm run build
-npm start
-\`\`\`
+npm start              # bot
+npm run start:worker   # worker, in a second process
+```
+
+For development: `npm run dev`.
+
+### Configuration
+
+Required:
+
+| Variable | Description |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `ENCRYPTION_KEY` | Exactly 32 characters, used for AES-256-GCM. Generate with `openssl rand -hex 16` |
+| `PREDEXON_API_KEY` | Predexon API key |
+
+Commonly used:
+
+| Variable | Description |
+| --- | --- |
+| `BOT_USERNAME` | Bot username without `@`, used in referral links |
+| `ADMIN_USER_IDS` | Comma-separated Telegram user IDs with admin access |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` | Redis connection |
+| `ADMIN_WALLET_ADDRESS` | Polygon address that receives commission |
+| `PLATFORM_EXECUTOR_KEY` | Private key of a wallet holding MATIC for fee-transfer gas |
+| `REFERRAL_TREASURY_KEY` | Private key of a wallet holding USDC.e for referral payouts |
+| `POLY_BUILDER_API_KEY`, `POLY_BUILDER_SECRET`, `POLY_BUILDER_PASSPHRASE` | Polymarket Builder (relayer) credentials |
+| `WEBHOOK_DOMAIN`, `WEBHOOK_PORT` | Use webhooks instead of long polling |
+| `DASHBOARD_TOKEN` | Access token for the dashboard |
+| `POSTGRES_PASSWORD` | Database password used by `docker-compose.yml` |
+
+See [`.env.example`](.env.example) for the full list.
+
+For a full server walkthrough (firewall, PM2, backups), see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 
-## 🐳 Docker Deployment (Easiest)
+## Security
 
-\`\`\`bash
-# Start all services
-docker-compose up -d
+- Wallet keys and credentials are encrypted at rest with AES-256-GCM. Losing `ENCRYPTION_KEY` makes stored keys unrecoverable; leaking it exposes them.
+- Never commit `.env`. The executor and treasury keys control real funds.
+- Keep PostgreSQL and Redis off the public internet.
 
-# View logs
-docker-compose logs -f bot
-
-# Stop
-docker-compose down
-\`\`\`
+Found a vulnerability? Please report it privately via [GitHub Security Advisories](https://github.com/theonheptagrammaton/PolyTechBot/security/advisories/new) instead of opening a public issue.
 
 ---
 
-## 🔧 Configuration
+## Disclaimer
 
-### Get Telegram Bot Token
-1. Message [@BotFather](https://t.me/BotFather)
-2. Send \`/newbot\`
-3. Copy token to \`.env\`
-
-### Get Your Telegram ID
-1. Message [@userinfobot](https://t.me/userinfobot)
-2. Copy ID to \`ADMIN_USER_IDS\`
-
-### Generate Encryption Key
-\`\`\`bash
-openssl rand -hex 16
-\`\`\`
+PolyTech is an independent project and is not affiliated with or endorsed by Polymarket. Prediction-market trading carries real financial risk, and automated strategies can lose money. Use at your own risk and check whether Polymarket is available in your jurisdiction.
 
 ---
 
-## 🛡️ Security
+## License
 
-- ✅ Never commit \`.env\`
-- ✅ Use strong passwords
-- ✅ Enable firewall
-- ✅ Keep dependencies updated
-- ✅ Rotate encryption key periodically
-
----
-
-## 🔄 Process Management (PM2)
-
-\`\`\`bash
-npm install -g pm2
-pm2 start npm --name "polytech-bot" -- start
-pm2 save
-pm2 startup
-\`\`\`
-
----
-
-## 🚨 Troubleshooting
-
-### Bot Not Starting
-\`\`\`bash
-pm2 logs polytech-bot --lines 100
-\`\`\`
-
-### Database Issues
-\`\`\`bash
-sudo systemctl status postgresql
-sudo systemctl restart postgresql
-\`\`\`
-
-### Redis Issues
-\`\`\`bash
-sudo systemctl status redis
-redis-cli ping
-\`\`\`
-
----
-
-## 📊 Monitoring
-
-\`\`\`bash
-# View logs
-pm2 logs polytech-bot
-
-# Check status
-pm2 status
-
-# Restart
-pm2 restart polytech-bot
-\`\`\`
-
----
-
-## 🔄 Updates
-
-\`\`\`bash
-git pull origin main
-npm install
-npx prisma migrate deploy
-npm run build
-pm2 restart polytech-bot
-\`\`\`
-
----
-
-## 📄 License
-
-MIT License
-
----
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/theonheptagrammaton/polytech/issues)
-
----
-
-Made with ❤️ by [theonheptagrammaton](https://github.com/theonheptagrammaton)
+[MIT](LICENSE) © [Eray Pişkin](https://eraypiskin.com)

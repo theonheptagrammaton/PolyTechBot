@@ -7,10 +7,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: polytech
-      POSTGRES_PASSWORD: polytech_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: polytech_db
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +24,7 @@ services:
     container_name: polytech-redis
     restart: unless-stopped
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -47,7 +47,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://polytech:polytech_password@postgres:5432/polytech_db?connection_limit=40&pool_timeout=20&connect_timeout=10
+      DATABASE_URL: postgresql://polytech:${POSTGRES_PASSWORD}@postgres:5432/polytech_db?connection_limit=40&pool_timeout=20&connect_timeout=10
       REDIS_HOST: redis
       REDIS_PORT: 6379
       WEBHOOK_PORT: 8443
@@ -71,7 +71,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://polytech:polytech_password@postgres:5432/polytech_db?connection_limit=40&pool_timeout=20&connect_timeout=10
+      DATABASE_URL: postgresql://polytech:${POSTGRES_PASSWORD}@postgres:5432/polytech_db?connection_limit=40&pool_timeout=20&connect_timeout=10
       REDIS_HOST: redis
       REDIS_PORT: 6379
       HEALTH_PORT: 3001
@@ -88,11 +88,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://polytech:polytech_password@postgres:5432/polytech_db?connect_timeout=10
+      DATABASE_URL: postgresql://polytech:${POSTGRES_PASSWORD}@postgres:5432/polytech_db?connect_timeout=10
       DASHBOARD_TOKEN: ${DASHBOARD_TOKEN}
       PORT: 3000
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
 
 volumes:
   postgres_data:
