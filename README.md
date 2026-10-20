@@ -1,55 +1,52 @@
+<div align="center">
+
+<img src=".github/assets/logo.png" alt="PolyTech" width="88" />
+
 # PolyTech
 
-A Telegram trading bot for [Polymarket](https://polymarket.com). Users get a managed wallet on `/start`, then browse markets, trade, copy top traders and run automated strategies without leaving Telegram.
+**A Telegram trading bot for Polymarket.**
 
-[![License: All rights reserved](https://img.shields.io/badge/license-all%20rights%20reserved-red.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)](https://www.typescriptlang.org/)
+Trade prediction markets, copy top wallets and run automated strategies without leaving Telegram.
 
-**Try it on Telegram:** [t.me/tradepolytech](https://t.me/tradepolytech)
+[![Telegram](https://img.shields.io/badge/Telegram-@tradepolytech-26A5E4?logo=telegram&logoColor=white)](https://t.me/tradepolytech)
+[![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=nodedotjs&logoColor=white)](#requirements)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](#architecture)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-4169E1?logo=postgresql&logoColor=white)](#requirements)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](#requirements)
+[![Polygon](https://img.shields.io/badge/Polygon-PoS-7B3FE4?logo=polygon&logoColor=white)](#architecture)
+[![License](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)](LICENSE)
+
+**[Open the bot](https://t.me/tradepolytech)** · Built by **[Eray Pişkin](https://eraypiskin.com)**
+
+</div>
 
 ---
 
+## Overview
+
+PolyTech puts Polymarket inside a Telegram chat. A user sends `/start`, gets a managed wallet, funds it from Polygon, Ethereum or Solana, and can trade any market from there. On top of manual trading it mirrors the best-performing wallets and runs rule-based strategies around the clock, with stop-losses, take-profits and automatic redemption of resolved positions.
+
 ## Features
 
-### Trading
-- Market and limit orders on any Polymarket market
-- Open orders, open positions and closed-position history
-- Internal stop-loss monitor (price-triggered market sells instead of resting limit orders)
-- Automatic redemption of resolved positions
-- Shareable PnL cards rendered as images
+| Area | What it does |
+| --- | --- |
+| **Trading** | Market and limit orders on any Polymarket market, open orders, positions and full trade history. |
+| **Risk controls** | Internal stop-loss monitor that triggers market sells on price, take-profit / stop-loss on strategies, daily loss limits. |
+| **Market discovery** | Categories (politics, crypto, sports, business, geopolitics, tech, science, pop culture), trending and newest markets, keyword search. |
+| **Analysis** | `/analyze` for market and wallet analysis, smart-money scanning. |
+| **Copy trading** | Leaderboard of top Polymarket wallets; follow one and mirror its buys, and optionally its sells, with your own sizing. |
+| **Bond strategy** | Scans high-probability markets and buys near-certain outcomes, with filters, TP/SL and a daily loss cap. |
+| **Up/Down Autopilot** | `/autopilot` trades short-timeframe crypto up/down rounds by coin, timeframe, direction and price range. |
+| **Nothing Ever Happens** | Picks non-sports markets and bets on the status quo. |
+| **Backtesting** | Simulates a strategy against historical data before it goes live. |
+| **Wallet & funds** | Managed wallet per user, deposit detection on Polygon, Ethereum and Solana, withdrawals, automatic redemption. |
+| **Security** | Optional TOTP 2FA with backup codes, AES-256-GCM encryption for keys and credentials at rest. |
+| **PnL cards** | Shareable profit-and-loss images generated per position or for all-time results. |
+| **Referrals & cashback** | Three-tier referral program (25% / 5% / 3% of commission) with automatic payouts, 10% cashback to traders. |
+| **Groups & languages** | Group mode with per-group rate limits; English, Russian and Chinese interface. |
+| **Admin** | Stats, user list, broadcast, and a token-protected web dashboard for platform metrics. |
 
-### Market discovery
-- Browse by category: politics, crypto, sports, business, geopolitics, tech, science, pop culture and more
-- Trending and newest markets
-- Keyword search with pagination
-- Market and wallet analysis via `/analyze`
-
-### Copy trading
-- Smart-wallet leaderboard of top Polymarket traders
-- Follow a wallet and mirror its buys (and optionally its sells) with your own sizing rules
-- Runs in a separate worker process; notifications are delivered through a BullMQ queue
-
-### Automated strategies
-- **Bond**: scans high-probability markets and buys near-certain outcomes, with filters, take-profit / stop-loss and a daily loss limit
-- **Up/Down Autopilot** (`/autopilot`, `/afk`): trades short-timeframe crypto up/down rounds by coin, timeframe, direction and price range
-- **Nothing Ever Happens**: picks non-sports markets and bets on the status quo
-- **Backtest**: simulates a strategy against historical data before you run it live
-
-### Wallet and funds
-- Managed Polymarket wallet per user (via Predexon)
-- Deposit addresses for Polygon, Ethereum and Solana, with automatic detection
-- Withdrawals to external addresses
-- Optional 2FA (TOTP, Google Authenticator compatible) with backup codes
-
-### Platform
-- 1% commission per trade, collected on-chain to an admin wallet
-- Three-tier referral program (25% / 5% / 3% of commission) with automatic payouts
-- 10% cashback of commission to the trader
-- Group mode with per-group rate limiting
-- English, Russian and Chinese interface
-- Admin commands: stats, user list, broadcast
-- Web dashboard for platform metrics (token-protected)
+The platform charges a 1% commission per trade, collected on-chain to the admin wallet.
 
 ---
 
