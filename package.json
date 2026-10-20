@@ -24,7 +24,8 @@
     "polygon"
   ],
   "author": "Eray Pişkin (https://eraypiskin.com)",
-  "license": "MIT",
+  "license": "UNLICENSED",
+  "private": true,
   "homepage": "https://github.com/theonheptagrammaton/PolyTechBot#readme",
   "repository": {
     "type": "git",

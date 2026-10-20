@@ -2,7 +2,7 @@
 
 A Telegram trading bot for [Polymarket](https://polymarket.com). Users get a managed wallet on `/start`, then browse markets, trade, copy top traders and run automated strategies without leaving Telegram.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: All rights reserved](https://img.shields.io/badge/license-all%20rights%20reserved-red.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)](https://www.typescriptlang.org/)
 
@@ -77,6 +77,8 @@ dashboard (dashboard/)  ──> Express + static UI over the same database
 ---
 
 ## Self-hosting
+
+The instructions below document how the project runs. Running your own instance requires written permission, see [License](#license).
 
 ### Requirements
 
@@ -164,4 +166,6 @@ PolyTech is an independent project and is not affiliated with or endorsed by Pol
 
 ## License
 
-[MIT](LICENSE) © [Eray Pişkin](https://eraypiskin.com)
+Copyright © 2026 [Eray Pişkin](https://eraypiskin.com). All rights reserved.
+
+The source is public for reference only. Using, copying, modifying or redistributing it, or running it as a service, requires prior written permission. See [LICENSE](LICENSE).
